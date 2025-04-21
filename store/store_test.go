@@ -1250,7 +1250,7 @@ func TestCopyFrom(t *testing.T) {
 		copied, err := destStore.CopyFrom(nil)
 		assert.Error(t, err)
 		assert.Equal(t, 0, copied)
-		assert.Contains(t, err.Error(), "source store cannot be nil")
+		assert.Contains(t, err.Error(), "source store is nil")
 	})
 
 	t.Run("reference_isolation", func(t *testing.T) {
@@ -1393,7 +1393,7 @@ func TestCopyFromWithOverwrite(t *testing.T) {
 		assert.Error(t, err)
 		assert.Equal(t, 0, copied)
 		assert.Equal(t, 0, overwritten)
-		assert.Contains(t, err.Error(), "source store cannot be nil")
+		assert.Contains(t, err.Error(), "source store is nil")
 	})
 
 	t.Run("expired_entries", func(t *testing.T) {

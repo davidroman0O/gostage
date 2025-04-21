@@ -116,9 +116,9 @@ func (m *Metadata) RemoveProperty(key string) bool {
 type entry struct {
 	typ       reflect.Type
 	typeKind  reflect.Kind // Store the kind for quick access
-	blob      []byte
-	expiresAt *time.Time // nil means no expiration
-	metadata  *Metadata  // nil means no metadata
+	value     interface{}  // Store the actual value directly (no serialization)
+	expiresAt *time.Time   // nil means no expiration
+	metadata  *Metadata    // nil means no metadata
 }
 
 // MergeStrategy determines how key collisions are handled during a merge.

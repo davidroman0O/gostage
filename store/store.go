@@ -5,11 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/invopop/jsonschema"
-	"github.com/morrisxyang/xreflect"
 )
 
 // KVStore is a threadsafe, type‑aware in‑memory store.
@@ -45,9 +45,38 @@ func (s *KVStore) PutWithTTLAndMetadata(key string, value any, ttl time.Duration
 		return errors.New("key cannot be empty")
 	}
 
-	blob, err := json.Marshal(value)
-	if err != nil {
-		return err
+	// Special handling for nil values
+	if value == nil {
+		var expiresAt *time.Time
+		if ttl > 0 {
+			exp := time.Now().Add(ttl)
+			expiresAt = &exp
+		}
+
+		// Use the provided metadata or preserve existing
+		var meta *Metadata
+		if metadata != nil {
+			meta = metadata
+		} else {
+			s.mu.RLock()
+			if existingEntry, exists := s.data[key]; exists && existingEntry.metadata != nil {
+				meta = existingEntry.metadata
+				// Update the UpdatedAt timestamp
+				meta.UpdatedAt = time.Now()
+			}
+			s.mu.RUnlock()
+		}
+
+		s.mu.Lock()
+		s.data[key] = entry{
+			typ:       nil,
+			typeKind:  reflect.Invalid,
+			value:     nil,
+			expiresAt: expiresAt,
+			metadata:  meta,
+		}
+		s.mu.Unlock()
+		return nil
 	}
 
 	t := reflect.TypeOf(value)
@@ -72,12 +101,13 @@ func (s *KVStore) PutWithTTLAndMetadata(key string, value any, ttl time.Duration
 		// Update the UpdatedAt timestamp
 		meta.UpdatedAt = time.Now()
 	}
-	s.data[key] = entry{typ: t, typeKind: k, blob: blob, expiresAt: expiresAt, metadata: meta}
+	// Store the actual value directly - no serialization
+	s.data[key] = entry{typ: t, typeKind: k, value: value, expiresAt: expiresAt, metadata: meta}
 	s.mu.Unlock()
 	return nil
 }
 
-// Get retrieves and unmarshals key into a value of type T.
+// Get retrieves a value of type T for the given key.
 func Get[T any](s *KVStore, key string) (T, error) {
 	var zero T
 	if key == "" {
@@ -98,14 +128,13 @@ func Get[T any](s *KVStore, key string) (T, error) {
 		return zero, ErrExpired
 	}
 
-	// Get the requested type once
+	// Get the requested type
 	want := reflect.TypeOf((*T)(nil)).Elem()
 	wantKind := want.Kind()
 
 	// If requesting an interface, check if the stored type implements it
 	if wantKind == reflect.Interface {
 		// Use the cached typeKind to check if the stored object can be an interface implementation
-		// Some types can't implement interfaces (like basic types)
 		if !canImplementInterface(e.typeKind) {
 			return zero, fmt.Errorf("%w: wanted interface %v, but stored value type %v (kind: %v) can't implement interfaces",
 				ErrTypeMismatch, want, e.typ, e.typeKind)
@@ -117,18 +146,10 @@ func Get[T any](s *KVStore, key string) (T, error) {
 				ErrTypeMismatch, want, e.typ)
 		}
 
-		// The stored type implements the requested interface
-		// First, unmarshal into the concrete type
-		instance := reflect.New(e.typ).Interface()
-		if err := json.Unmarshal(e.blob, instance); err != nil {
-			return zero, err
-		}
-
-		// Get the value and convert it directly to the requested interface type
-		val := reflect.ValueOf(instance).Elem().Interface()
-		result, ok := val.(T)
+		// Direct type assertion - no serialization/deserialization needed
+		result, ok := e.value.(T)
 		if !ok {
-			return zero, fmt.Errorf("type assertion failed: %T cannot be converted to requested interface", val)
+			return zero, fmt.Errorf("type assertion failed: %T cannot be converted to requested interface", e.value)
 		}
 
 		return result, nil
@@ -140,13 +161,13 @@ func Get[T any](s *KVStore, key string) (T, error) {
 			ErrTypeMismatch, want, wantKind, e.typ, e.typeKind)
 	}
 
-	// For exact type matches, unmarshal directly
-	var v T
-	if err := json.Unmarshal(e.blob, &v); err != nil {
-		return zero, err
+	// For exact type matches, do a direct type assertion - no serialization/deserialization
+	result, ok := e.value.(T)
+	if !ok {
+		return zero, fmt.Errorf("type assertion failed: %T cannot be converted to %v", e.value, want)
 	}
 
-	return v, nil
+	return result, nil
 }
 
 // Helper function to determine if a reflect.Kind can implement interfaces
@@ -325,6 +346,68 @@ func TypeToSchema(t reflect.Type) interface{} {
 	return schemaMap
 }
 
+// setFieldValue sets a field value in a struct using a dot-notation path
+// Returns an error if the path is invalid or type is mismatched
+func setFieldValue(obj interface{}, path string, value interface{}) error {
+	// Split the path into segments
+	segments := strings.Split(path, ".")
+	if len(segments) == 0 {
+		return fmt.Errorf("empty path")
+	}
+
+	// Start with the object
+	v := reflect.ValueOf(obj)
+
+	// Navigate to the field
+	for i := 0; i < len(segments); i++ {
+		segment := segments[i]
+
+		// If it's a pointer, get the element it points to
+		if v.Kind() == reflect.Ptr {
+			v = v.Elem()
+		}
+
+		// Make sure we have a struct at this point
+		if v.Kind() != reflect.Struct {
+			return fmt.Errorf("path segment '%s' does not point to a struct", segment)
+		}
+
+		// Get the field
+		field := v.FieldByName(segment)
+		if !field.IsValid() {
+			return fmt.Errorf("no field named '%s'", segment)
+		}
+
+		// If this is the last segment, set the field value
+		if i == len(segments)-1 {
+			// Make sure the field is settable
+			if !field.CanSet() {
+				return fmt.Errorf("field '%s' cannot be set (unexported?)", segment)
+			}
+
+			// Convert the value to the field's type if needed
+			valueOfValue := reflect.ValueOf(value)
+			if valueOfValue.Type().AssignableTo(field.Type()) {
+				field.Set(valueOfValue)
+				return nil
+			}
+
+			// Try to convert the value
+			if valueOfValue.Type().ConvertibleTo(field.Type()) {
+				field.Set(valueOfValue.Convert(field.Type()))
+				return nil
+			}
+
+			return fmt.Errorf("value type %v cannot be assigned to field type %v", valueOfValue.Type(), field.Type())
+		}
+
+		// Not the last segment, so we need to traverse deeper
+		v = field
+	}
+
+	return nil // Should never reach here
+}
+
 // UpdateField updates a single field in a stored object using dot notation.
 func (s *KVStore) UpdateField(key string, fieldPath string, fieldValue interface{}) error {
 	if key == "" {
@@ -348,35 +431,39 @@ func (s *KVStore) UpdateField(key string, fieldPath string, fieldValue interface
 		return ErrExpired
 	}
 
-	instance := reflect.New(e.typ).Interface()
-	if err := json.Unmarshal(e.blob, instance); err != nil {
-		return err
+	// Make a deep copy of the original value
+	valueCopy := deepCopy(e.value)
+
+	// Create a pointer if the value is not already a pointer
+	var targetPtr interface{}
+	if reflect.TypeOf(valueCopy).Kind() != reflect.Ptr {
+		// Create a new pointer to this value type
+		targetPtr = reflect.New(reflect.TypeOf(valueCopy)).Interface()
+		// Set the element to our copy
+		reflect.ValueOf(targetPtr).Elem().Set(reflect.ValueOf(valueCopy))
+	} else {
+		targetPtr = valueCopy
 	}
 
-	// Use recover to catch panics from type conversion errors
-	var setErr error
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				setErr = fmt.Errorf("type conversion error: %v", r)
-			}
-		}()
-		setErr = xreflect.SetEmbedField(instance, fieldPath, fieldValue)
-	}()
-
-	if setErr != nil {
-		return fmt.Errorf("failed to update field: %w", setErr)
-	}
-
-	newBlob, err := json.Marshal(instance)
+	// Try to set the field value
+	err := setFieldValue(targetPtr, fieldPath, fieldValue)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to update field: %w", err)
 	}
 
+	// Store the updated value (if it wasn't a pointer, get the element)
+	var updatedValue interface{}
+	if reflect.TypeOf(e.value).Kind() != reflect.Ptr {
+		updatedValue = reflect.ValueOf(targetPtr).Elem().Interface()
+	} else {
+		updatedValue = targetPtr
+	}
+
+	// Update the entry in the store
 	s.data[key] = entry{
 		typ:       e.typ,
 		typeKind:  e.typeKind,
-		blob:      newBlob,
+		value:     updatedValue,
 		expiresAt: e.expiresAt,
 		metadata:  e.metadata,
 	}
@@ -407,37 +494,41 @@ func (s *KVStore) UpdateFields(key string, fields map[string]interface{}) error 
 		return ErrExpired
 	}
 
-	instance := reflect.New(e.typ).Interface()
-	if err := json.Unmarshal(e.blob, instance); err != nil {
-		return err
+	// Make a deep copy of the original value
+	valueCopy := deepCopy(e.value)
+
+	// Create a pointer if the value is not already a pointer
+	var targetPtr interface{}
+	if reflect.TypeOf(valueCopy).Kind() != reflect.Ptr {
+		// Create a new pointer to this value type
+		targetPtr = reflect.New(reflect.TypeOf(valueCopy)).Interface()
+		// Set the element to our copy
+		reflect.ValueOf(targetPtr).Elem().Set(reflect.ValueOf(valueCopy))
+	} else {
+		targetPtr = valueCopy
 	}
 
+	// Apply each field update
 	for fieldPath, fieldValue := range fields {
-		// Use recover to catch panics from type conversion errors
-		var setErr error
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					setErr = fmt.Errorf("type conversion error: %v", r)
-				}
-			}()
-			setErr = xreflect.SetEmbedField(instance, fieldPath, fieldValue)
-		}()
-
-		if setErr != nil {
-			return fmt.Errorf("failed to update field %s: %w", fieldPath, setErr)
+		err := setFieldValue(targetPtr, fieldPath, fieldValue)
+		if err != nil {
+			return fmt.Errorf("failed to update field '%s': %w", fieldPath, err)
 		}
 	}
 
-	newBlob, err := json.Marshal(instance)
-	if err != nil {
-		return err
+	// Store the updated value (if it wasn't a pointer, get the element)
+	var updatedValue interface{}
+	if reflect.TypeOf(e.value).Kind() != reflect.Ptr {
+		updatedValue = reflect.ValueOf(targetPtr).Elem().Interface()
+	} else {
+		updatedValue = targetPtr
 	}
 
+	// Update the entry in the store
 	s.data[key] = entry{
 		typ:       e.typ,
 		typeKind:  e.typeKind,
-		blob:      newBlob,
+		value:     updatedValue,
 		expiresAt: e.expiresAt,
 		metadata:  e.metadata,
 	}
@@ -670,7 +761,7 @@ func (s *KVStore) GetMetadata(key string) (*Metadata, error) {
 	if e.metadata == nil {
 		meta := NewMetadata()
 		s.mu.Lock()
-		s.data[key] = entry{typ: e.typ, typeKind: e.typeKind, blob: e.blob, expiresAt: e.expiresAt, metadata: meta}
+		s.data[key] = entry{typ: e.typ, typeKind: e.typeKind, value: e.value, expiresAt: e.expiresAt, metadata: meta}
 		s.mu.Unlock()
 		return meta, nil
 	}
@@ -868,15 +959,8 @@ func (s *KVStore) Clone() *KVStore {
 			continue
 		}
 
-		// Create a new instance of the stored value
-		instance := reflect.New(e.typ).Interface()
-		if err := json.Unmarshal(e.blob, instance); err != nil {
-			// Skip problematic entries
-			continue
-		}
-
-		// Get the actual value (not the pointer)
-		value := reflect.ValueOf(instance).Elem().Interface()
+		// Get the original value
+		originalValue := e.value
 
 		// Handle TTL if present
 		var ttl time.Duration
@@ -903,26 +987,63 @@ func (s *KVStore) Clone() *KVStore {
 			}
 		}
 
-		// Since we'll use Put methods that will recompute the typeKind, we can directly
-		// modify the internal data structure to preserve the original typeKind
-		if metadata != nil {
-			if ttl > 0 {
-				newStore.PutWithTTLAndMetadata(key, value, ttl, metadata)
+		// Create a proper deep copy based on the type
+		var deepCopy interface{}
+
+		// Handle different types for proper deep copying
+		if reflect.TypeOf(originalValue).Kind() == reflect.Ptr {
+			// For pointers, create a new instance and copy the value
+			elemType := reflect.TypeOf(originalValue).Elem()
+			newInstance := reflect.New(elemType)
+
+			// Deep copy depends on the underlying element type
+			if elemType.Kind() == reflect.Struct {
+				// For struct pointers, copy each field
+				newInstance.Elem().Set(reflect.ValueOf(originalValue).Elem())
+			} else if elemType.Kind() == reflect.Map {
+				// For maps, create a new map and copy all entries
+				originalMap := reflect.ValueOf(originalValue).Elem().Interface()
+				newInstance.Elem().Set(reflect.ValueOf(originalMap))
+			} else if elemType.Kind() == reflect.Slice || elemType.Kind() == reflect.Array {
+				// For slices/arrays, create a new one and copy all elements
+				originalSlice := reflect.ValueOf(originalValue).Elem().Interface()
+				newInstance.Elem().Set(reflect.ValueOf(originalSlice))
 			} else {
-				newStore.PutWithMetadata(key, value, metadata)
+				// For other pointer types, just make a simple copy
+				newInstance.Elem().Set(reflect.ValueOf(originalValue).Elem())
 			}
+
+			deepCopy = newInstance.Interface()
+		} else if reflect.TypeOf(originalValue).Kind() == reflect.Struct {
+			// For structs, create a new instance and copy
+			newStruct := reflect.New(reflect.TypeOf(originalValue)).Elem()
+			newStruct.Set(reflect.ValueOf(originalValue))
+			deepCopy = newStruct.Interface()
+		} else if reflect.TypeOf(originalValue).Kind() == reflect.Map {
+			// For maps, create a new map and copy all entries
+			deepCopy = reflect.ValueOf(originalValue).Interface()
+		} else if reflect.TypeOf(originalValue).Kind() == reflect.Slice || reflect.TypeOf(originalValue).Kind() == reflect.Array {
+			// For slices/arrays, create a new one and copy all elements
+			deepCopy = reflect.ValueOf(originalValue).Interface()
 		} else {
-			if ttl > 0 {
-				newStore.PutWithTTL(key, value, ttl)
-			} else {
-				newStore.Put(key, value)
-			}
+			// For primitive types, a simple copy is sufficient
+			deepCopy = originalValue
 		}
 
-		// Ensure the typeKind is preserved after adding the entry
-		if currentEntry, exists := newStore.data[key]; exists {
-			currentEntry.typeKind = e.typeKind
-			newStore.data[key] = currentEntry
+		// Store the value in the new store (no serialization needed)
+		var expiresAt *time.Time
+		if ttl > 0 {
+			exp := time.Now().Add(ttl)
+			expiresAt = &exp
+		}
+
+		// Create the entry directly
+		newStore.data[key] = entry{
+			typ:       e.typ,
+			typeKind:  e.typeKind,
+			value:     deepCopy,
+			expiresAt: expiresAt,
+			metadata:  metadata,
 		}
 	}
 
@@ -938,82 +1059,59 @@ func CloneFrom(source *KVStore) *KVStore {
 	return source.Clone()
 }
 
-// CopyFrom copies all entries from the source store into this store.
-// This is a deep copy operation, so no references are shared between the stores.
-// Existing entries in the destination store are preserved, and only non-existing keys are copied.
-// Returns the number of entries copied.
+// CopyFrom copies all entries from the source store to the current store.
+// It returns the number of entries copied and an error if one occurred.
 func (s *KVStore) CopyFrom(source *KVStore) (int, error) {
 	if source == nil {
-		return 0, errors.New("source store cannot be nil")
+		return 0, fmt.Errorf("source store is nil")
 	}
 
-	// First read all data from source store with only a read lock
 	source.mu.RLock()
-	entriesToCopy := make(map[string]entry)
-	for key, e := range source.data {
-		// Skip expired entries
-		if e.expiresAt != nil && time.Now().After(*e.expiresAt) {
-			continue
-		}
-		entriesToCopy[key] = e
-	}
-	source.mu.RUnlock()
+	defer source.mu.RUnlock()
 
-	// Then lock the destination store to modify it
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	copied := 0
+	for key, srcEntry := range source.data {
+		// Skip expired entries
+		if srcEntry.expiresAt != nil && time.Now().After(*srcEntry.expiresAt) {
+			continue
+		}
 
-	// Copy entries that don't already exist in the destination
-	for key, e := range entriesToCopy {
 		// Skip keys that already exist in the destination
 		if _, exists := s.data[key]; exists {
 			continue
 		}
 
-		// Create a new instance of the stored value for validation
-		// This ensures the blob can be unmarshaled to the specified type
-		instance := reflect.New(e.typ).Interface()
-		if err := json.Unmarshal(e.blob, instance); err != nil {
-			// Skip problematic entries
-			continue
-		}
+		// Use our deepCopy function to ensure proper reference isolation
+		deepCopiedValue := deepCopy(srcEntry.value)
 
-		// Handle TTL if present
-		var ttl time.Duration
-		if e.expiresAt != nil {
-			ttl = time.Until(*e.expiresAt)
-			if ttl <= 0 {
-				continue // Skip if expired during processing
-			}
-		}
-
-		// Handle metadata if present
-		var metadata *Metadata
-		if e.metadata != nil {
-			metadata = &Metadata{
-				Tags:        append([]string{}, e.metadata.Tags...),
+		// Deep copy metadata if it exists
+		var metadataCopy *Metadata
+		if srcEntry.metadata != nil {
+			metadataCopy = &Metadata{
+				Tags:        append([]string{}, srcEntry.metadata.Tags...),
 				Properties:  make(map[string]interface{}),
-				Description: e.metadata.Description,
-				CreatedAt:   e.metadata.CreatedAt,
-				UpdatedAt:   e.metadata.UpdatedAt,
+				Description: srcEntry.metadata.Description,
+				CreatedAt:   srcEntry.metadata.CreatedAt,
+				UpdatedAt:   srcEntry.metadata.UpdatedAt,
 			}
 			// Deep copy properties
-			for k, v := range e.metadata.Properties {
-				metadata.Properties[k] = v
+			for k, v := range srcEntry.metadata.Properties {
+				metadataCopy.Properties[k] = deepCopy(v)
 			}
 		}
 
-		// Create the entry directly in the destination's data map
-		var expiresAt *time.Time
-		if ttl > 0 {
-			exp := time.Now().Add(ttl)
-			expiresAt = &exp
+		// Create a new entry with the deep-copied value
+		s.data[key] = entry{
+			typ:       srcEntry.typ,
+			typeKind:  srcEntry.typeKind,
+			value:     deepCopiedValue,
+			expiresAt: srcEntry.expiresAt,
+			metadata:  metadataCopy,
 		}
 
-		// Create the entry directly
-		s.data[key] = entry{typ: e.typ, typeKind: e.typeKind, blob: e.blob, expiresAt: expiresAt, metadata: metadata}
 		copied++
 	}
 
@@ -1023,80 +1121,54 @@ func (s *KVStore) CopyFrom(source *KVStore) (int, error) {
 // CopyFromWithOverwrite copies all entries from the source store into this store,
 // overwriting any existing entries in the destination with the same keys.
 // This is a deep copy operation, so no references are shared between the stores.
-// Returns the number of entries copied and the number of entries overwritten.
+// Returns the number of entries copied, the number of entries overwritten, and an error if one occurred.
 func (s *KVStore) CopyFromWithOverwrite(source *KVStore) (copied int, overwritten int, err error) {
 	if source == nil {
-		return 0, 0, errors.New("source store cannot be nil")
+		return 0, 0, fmt.Errorf("source store is nil")
 	}
 
-	// First read all data from source store with only a read lock
 	source.mu.RLock()
-	entriesToCopy := make(map[string]entry)
-	for key, e := range source.data {
-		// Skip expired entries
-		if e.expiresAt != nil && time.Now().After(*e.expiresAt) {
-			continue
-		}
-		entriesToCopy[key] = e
-	}
-	source.mu.RUnlock()
+	defer source.mu.RUnlock()
 
-	// Then lock the destination store to modify it
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Copy all entries
-	for key, e := range entriesToCopy {
+	for key, srcEntry := range source.data {
+		// Skip expired entries
+		if srcEntry.expiresAt != nil && time.Now().After(*srcEntry.expiresAt) {
+			continue
+		}
+
 		// Check if key exists in destination
 		_, exists := s.data[key]
 
-		// Skip if the type is nil
-		if e.typ == nil {
-			continue
-		}
+		// Use our deepCopy function to ensure proper reference isolation
+		deepCopiedValue := deepCopy(srcEntry.value)
 
-		// Create a new instance of the stored value for validation
-		// This ensures the blob can be unmarshaled to the specified type
-		instance := reflect.New(e.typ).Interface()
-		if err := json.Unmarshal(e.blob, instance); err != nil {
-			// Skip problematic entries
-			continue
-		}
-
-		// Handle TTL if present
-		var ttl time.Duration
-		if e.expiresAt != nil {
-			ttl = time.Until(*e.expiresAt)
-			if ttl <= 0 {
-				continue // Skip if expired during processing
-			}
-		}
-
-		// Handle metadata if present
-		var metadata *Metadata
-		if e.metadata != nil {
-			metadata = &Metadata{
-				Tags:        append([]string{}, e.metadata.Tags...),
+		// Deep copy metadata if it exists
+		var metadataCopy *Metadata
+		if srcEntry.metadata != nil {
+			metadataCopy = &Metadata{
+				Tags:        append([]string{}, srcEntry.metadata.Tags...),
 				Properties:  make(map[string]interface{}),
-				Description: e.metadata.Description,
-				CreatedAt:   e.metadata.CreatedAt,
-				UpdatedAt:   e.metadata.UpdatedAt,
+				Description: srcEntry.metadata.Description,
+				CreatedAt:   srcEntry.metadata.CreatedAt,
+				UpdatedAt:   srcEntry.metadata.UpdatedAt,
 			}
 			// Deep copy properties
-			for k, v := range e.metadata.Properties {
-				metadata.Properties[k] = v
+			for k, v := range srcEntry.metadata.Properties {
+				metadataCopy.Properties[k] = deepCopy(v)
 			}
 		}
 
-		// Create the entry directly in the destination's data map
-		var expiresAt *time.Time
-		if ttl > 0 {
-			exp := time.Now().Add(ttl)
-			expiresAt = &exp
+		// Create a new entry with the deep-copied value
+		s.data[key] = entry{
+			typ:       srcEntry.typ,
+			typeKind:  srcEntry.typeKind,
+			value:     deepCopiedValue,
+			expiresAt: srcEntry.expiresAt,
+			metadata:  metadataCopy,
 		}
-
-		// Create the entry directly
-		s.data[key] = entry{typ: e.typ, typeKind: e.typeKind, blob: e.blob, expiresAt: expiresAt, metadata: metadata}
 
 		if exists {
 			overwritten++
@@ -1106,4 +1178,93 @@ func (s *KVStore) CopyFromWithOverwrite(source *KVStore) (copied int, overwritte
 	}
 
 	return copied, overwritten, nil
+}
+
+// deepCopy creates a proper deep copy of a value
+func deepCopy(value interface{}) interface{} {
+	if value == nil {
+		return nil
+	}
+
+	valueType := reflect.TypeOf(value)
+	valueKind := valueType.Kind()
+
+	// Handle different types for proper deep copying
+	if valueKind == reflect.Ptr {
+		// For pointers, create a new instance and deep copy the target
+		elemType := valueType.Elem()
+		newInstance := reflect.New(elemType)
+
+		// Deep copy the pointed-to value
+		elemValue := reflect.ValueOf(value).Elem().Interface()
+		elemCopy := deepCopy(elemValue)
+
+		// Set the new instance to the copied element
+		newInstance.Elem().Set(reflect.ValueOf(elemCopy))
+		return newInstance.Interface()
+	} else if valueKind == reflect.Struct {
+		// For structs, create a new instance and copy each field
+		newStruct := reflect.New(valueType).Elem()
+
+		// Copy each field
+		for i := 0; i < valueType.NumField(); i++ {
+			field := reflect.ValueOf(value).Field(i)
+			if field.CanInterface() {
+				fieldValue := field.Interface()
+				fieldCopy := deepCopy(fieldValue)
+				newStruct.Field(i).Set(reflect.ValueOf(fieldCopy))
+			} else {
+				// For unexported fields, we can't access their interface directly
+				// Just copy the value directly if possible
+				newStruct.Field(i).Set(field)
+			}
+		}
+
+		return newStruct.Interface()
+	} else if valueKind == reflect.Map {
+		// For maps, create a new map and deep copy all entries
+		valueValue := reflect.ValueOf(value)
+		newMap := reflect.MakeMap(valueType)
+
+		// Iterate over the map entries
+		iter := valueValue.MapRange()
+		for iter.Next() {
+			k := iter.Key()
+			v := iter.Value().Interface()
+			// Deep copy the value
+			vCopy := deepCopy(v)
+			newMap.SetMapIndex(k, reflect.ValueOf(vCopy))
+		}
+
+		return newMap.Interface()
+	} else if valueKind == reflect.Slice {
+		// For slices, create a new slice and deep copy all elements
+		valueValue := reflect.ValueOf(value)
+		newSlice := reflect.MakeSlice(valueType, valueValue.Len(), valueValue.Cap())
+
+		// Copy each element
+		for i := 0; i < valueValue.Len(); i++ {
+			elem := valueValue.Index(i).Interface()
+			elemCopy := deepCopy(elem)
+			newSlice.Index(i).Set(reflect.ValueOf(elemCopy))
+		}
+
+		return newSlice.Interface()
+	} else if valueKind == reflect.Array {
+		// For arrays, create a new array and deep copy all elements
+		valueValue := reflect.ValueOf(value)
+		newArray := reflect.New(valueType).Elem()
+
+		// Copy each element
+		for i := 0; i < valueValue.Len(); i++ {
+			elem := valueValue.Index(i).Interface()
+			elemCopy := deepCopy(elem)
+			newArray.Index(i).Set(reflect.ValueOf(elemCopy))
+		}
+
+		return newArray.Interface()
+	} else {
+		// For primitive types, a simple copy is sufficient
+		return value
+	}
 }
