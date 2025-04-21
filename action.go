@@ -1,4 +1,4 @@
-package gostate
+package gostage
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/davidroman0O/gostate/store"
+	"github.com/davidroman0O/gostage/store"
 )
 
 // Action is a single unit of work within a stage.

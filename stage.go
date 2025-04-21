@@ -1,10 +1,10 @@
-package gostate
+package gostage
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/davidroman0O/gostate/store"
+	"github.com/davidroman0O/gostage/store"
 )
 
 // Stage is a logical phase within a workflow that contains a sequence of actions.

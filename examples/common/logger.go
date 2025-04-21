@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/davidroman0O/gostate"
+	"github.com/davidroman0O/gostage"
 )
 
 // LogLevel represents different logging levels
@@ -24,7 +24,7 @@ type ConsoleLogger struct {
 }
 
 // NewConsoleLogger creates a new console logger with the specified log level
-func NewConsoleLogger(level LogLevel) gostate.Logger {
+func NewConsoleLogger(level LogLevel) gostage.Logger {
 	return &ConsoleLogger{
 		level: level,
 	}

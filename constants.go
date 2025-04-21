@@ -1,4 +1,4 @@
-package gostate
+package gostage
 
 // Store key prefixes for organizing different entities in the store
 const (

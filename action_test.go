@@ -1,4 +1,4 @@
-package gostate
+package gostage
 
 import (
 	"fmt"

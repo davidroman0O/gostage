@@ -1,11 +1,11 @@
-package gostate
+package gostage
 
 import (
 	"context"
 	"fmt"
 	"time"
 
-	"github.com/davidroman0O/gostate/store"
+	"github.com/davidroman0O/gostage/store"
 )
 
 // Workflow is a sequence of stages forming a complete process.

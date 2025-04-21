@@ -4,25 +4,25 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/davidroman0O/gostate"
-	"github.com/davidroman0O/gostate/examples/common"
-	"github.com/davidroman0O/gostate/store"
+	"github.com/davidroman0O/gostage"
+	"github.com/davidroman0O/gostage/examples/common"
+	"github.com/davidroman0O/gostage/store"
 )
 
 // StageControlAction demonstrates how to enable/disable actions and stages
 type StageControlAction struct {
-	gostate.BaseAction
+	gostage.BaseAction
 }
 
 // NewStageControlAction creates a new stage control action
 func NewStageControlAction(name, description string) *StageControlAction {
 	return &StageControlAction{
-		BaseAction: gostate.NewBaseAction(name, description),
+		BaseAction: gostage.NewBaseAction(name, description),
 	}
 }
 
 // Execute implements the stage control behavior
-func (a *StageControlAction) Execute(ctx *gostate.ActionContext) error {
+func (a *StageControlAction) Execute(ctx *gostage.ActionContext) error {
 	// Disable a specific action by name
 	ctx.DisableAction("action-to-disable")
 	ctx.Logger.Info("Disabled action: action-to-disable")
@@ -55,18 +55,18 @@ func (a *StageControlAction) Execute(ctx *gostate.ActionContext) error {
 // ConditionalAction determines whether to enable/disable other actions
 // based on conditions stored in the workflow
 type ConditionalAction struct {
-	gostate.BaseAction
+	gostage.BaseAction
 }
 
 // NewConditionalAction creates a new conditional action
 func NewConditionalAction(name, description string) *ConditionalAction {
 	return &ConditionalAction{
-		BaseAction: gostate.NewBaseAction(name, description),
+		BaseAction: gostage.NewBaseAction(name, description),
 	}
 }
 
 // Execute implements the conditional behavior
-func (a *ConditionalAction) Execute(ctx *gostate.ActionContext) error {
+func (a *ConditionalAction) Execute(ctx *gostage.ActionContext) error {
 	// Example: Check a condition in the store and disable actions based on it
 	envValue, err := store.Get[string](ctx.Store, "environment")
 	if err != nil {
@@ -89,16 +89,16 @@ func (a *ConditionalAction) Execute(ctx *gostate.ActionContext) error {
 }
 
 // CreateDisableEnableWorkflow builds a workflow demonstrating control flow
-func CreateDisableEnableWorkflow() *gostate.Workflow {
+func CreateDisableEnableWorkflow() *gostage.Workflow {
 	// Create a new workflow
-	wf := gostate.NewWorkflow(
+	wf := gostage.NewWorkflow(
 		"control-flow-demo",
 		"Control Flow Demonstration",
 		"Demonstrates enabling and disabling actions and stages",
 	)
 
 	// Stage 1: Initial stage with the control action
-	controlStage := gostate.NewStage(
+	controlStage := gostage.NewStage(
 		"control-stage",
 		"Control Stage",
 		"Contains actions that control workflow flow",
@@ -114,7 +114,7 @@ func CreateDisableEnableWorkflow() *gostate.Workflow {
 	))
 
 	// Stage 2: A stage that might be disabled
-	optionalStage := gostate.NewStageWithTags(
+	optionalStage := gostage.NewStageWithTags(
 		"stage-to-skip",
 		"Optional Stage",
 		"This stage might be skipped based on conditions",
@@ -133,7 +133,7 @@ func CreateDisableEnableWorkflow() *gostate.Workflow {
 	))
 
 	// Stage 3: Final stage with tag-based actions
-	finalStage := gostate.NewStage(
+	finalStage := gostage.NewStage(
 		"final-stage",
 		"Final Stage",
 		"Contains actions with different tags",
@@ -162,27 +162,27 @@ func CreateDisableEnableWorkflow() *gostate.Workflow {
 
 // SimpleAction is a basic action implementation
 type SimpleAction struct {
-	gostate.BaseAction
+	gostage.BaseAction
 	customTags []string
 }
 
 // NewSimpleAction creates a new simple action
 func NewSimpleAction(name, description string) *SimpleAction {
 	return &SimpleAction{
-		BaseAction: gostate.NewBaseAction(name, description),
+		BaseAction: gostage.NewBaseAction(name, description),
 	}
 }
 
 // NewSimpleActionWithTags creates a new simple action with tags
 func NewSimpleActionWithTags(name, description string, tags []string) *SimpleAction {
 	return &SimpleAction{
-		BaseAction: gostate.NewBaseActionWithTags(name, description, tags),
+		BaseAction: gostage.NewBaseActionWithTags(name, description, tags),
 		customTags: tags,
 	}
 }
 
 // Execute implements a simple behavior
-func (a *SimpleAction) Execute(ctx *gostate.ActionContext) error {
+func (a *SimpleAction) Execute(ctx *gostage.ActionContext) error {
 	ctx.Logger.Info("Executing simple action: %s", a.Name())
 	return nil
 }

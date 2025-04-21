@@ -7,9 +7,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/davidroman0O/gostate"
-	"github.com/davidroman0O/gostate/examples/common"
-	"github.com/davidroman0O/gostate/store"
+	"github.com/davidroman0O/gostage"
+	"github.com/davidroman0O/gostage/examples/common"
+	"github.com/davidroman0O/gostage/store"
 )
 
 // FileOperation represents the different operations that can be performed on files
@@ -25,7 +25,7 @@ const (
 
 // FileAction demonstrates a platform-aware action that handles file operations
 type FileAction struct {
-	gostate.BaseAction
+	gostage.BaseAction
 	operation FileOperation
 }
 
@@ -35,13 +35,13 @@ func NewFileAction(operation FileOperation) *FileAction {
 	description := fmt.Sprintf("Performs %s operation on files", operation)
 
 	return &FileAction{
-		BaseAction: gostate.NewBaseAction(name, description),
+		BaseAction: gostage.NewBaseAction(name, description),
 		operation:  operation,
 	}
 }
 
 // Execute handles the file operation
-func (a *FileAction) Execute(ctx *gostate.ActionContext) error {
+func (a *FileAction) Execute(ctx *gostage.ActionContext) error {
 	// Get source and destination from store
 	source, err := store.Get[string](ctx.Store, "file.source")
 	if err != nil {
@@ -149,16 +149,16 @@ func checkFileExists(path string) (bool, error) {
 }
 
 // Example of how to use the FileAction in a workflow
-func CreateFileWorkflowExample() *gostate.Workflow {
+func CreateFileWorkflowExample() *gostage.Workflow {
 	// Create a workflow for file operations
-	wf := gostate.NewWorkflow(
+	wf := gostage.NewWorkflow(
 		"file-workflow",
 		"File Operations Workflow",
 		"Demonstrates how to use file operations in a workflow",
 	)
 
 	// Create a stage for file operations
-	stage := gostate.NewStage(
+	stage := gostage.NewStage(
 		"file-operations",
 		"File Operations",
 		"Performs various file operations",

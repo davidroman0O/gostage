@@ -1,10 +1,10 @@
-package gostate
+package gostage
 
 import (
 	"context"
 	"testing"
 
-	"github.com/davidroman0O/gostate/store"
+	"github.com/davidroman0O/gostage/store"
 	"github.com/stretchr/testify/assert"
 )
 

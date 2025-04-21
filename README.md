@@ -1,14 +1,14 @@
-# GoState
+# gostage
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/davidroman0O/gostate.svg)](https://pkg.go.dev/github.com/davidroman0O/gostate)
-[![Go Report Card](https://goreportcard.com/badge/github.com/davidroman0O/gostate)](https://goreportcard.com/report/github.com/davidroman0O/gostate)
-[![License](https://img.shields.io/github/license/davidroman0O/gostate)](https://github.com/davidroman0O/gostate/blob/main/LICENSE)
+[![Go Reference](https://pkg.go.dev/badge/github.com/davidroman0O/gostage.svg)](https://pkg.go.dev/github.com/davidroman0O/gostage)
+[![Go Report Card](https://goreportcard.com/badge/github.com/davidroman0O/gostage)](https://goreportcard.com/report/github.com/davidroman0O/gostage)
+[![License](https://img.shields.io/github/license/davidroman0O/gostage)](https://github.com/davidroman0O/gostage/blob/main/LICENSE)
 
-GoState is a workflow orchestration and state management library for Go that enables you to build multi-stage stateful workflows with runtime modification capabilities. It provides a framework for organizing complex processes into manageable stages and actions with rich metadata support.
+gostage is a workflow orchestration and state management library for Go that enables you to build multi-stage stateful workflows with runtime modification capabilities. It provides a framework for organizing complex processes into manageable stages and actions with rich metadata support.
 
 ## Overview
 
-GoState provides a structured approach to workflow management with these core components:
+gostage provides a structured approach to workflow management with these core components:
 
 - **Workflows** - The top-level container representing an entire process
 - **Stages** - Sequential phases within a workflow, each containing multiple actions 
@@ -29,7 +29,7 @@ GoState provides a structured approach to workflow management with these core co
 ## Installation
 
 ```bash
-go get github.com/davidroman0O/gostate
+go get github.com/davidroman0O/gostage
 ```
 
 ## Basic Usage
@@ -43,17 +43,17 @@ import (
 	"context"
 	"fmt"
 	
-	"github.com/davidroman0O/gostate"
+	"github.com/davidroman0O/gostage"
 )
 
 // Define a custom action by embedding BaseAction
 type GreetingAction struct {
-	gostate.BaseAction
+	gostage.BaseAction
 }
 
 // Implement the Execute method required by the Action interface
-func (a GreetingAction) Execute(ctx *gostate.ActionContext) error {
-	name, err := gostate.ContextGetOrDefault(ctx, "user.name", "World")
+func (a GreetingAction) Execute(ctx *gostage.ActionContext) error {
+	name, err := gostage.ContextGetOrDefault(ctx, "user.name", "World")
 	if err != nil {
 		return err
 	}
@@ -64,14 +64,14 @@ func (a GreetingAction) Execute(ctx *gostate.ActionContext) error {
 
 func main() {
 	// Create a new workflow
-	wf := gostate.NewWorkflow(
+	wf := gostage.NewWorkflow(
 		"hello-world",
 		"Hello World Workflow",
 		"A simple introductory workflow",
 	)
 	
 	// Create a stage
-	stage := gostate.NewStage(
+	stage := gostage.NewStage(
 		"greeting",
 		"Greeting Stage",
 		"Demonstrates a simple greeting",
@@ -79,14 +79,14 @@ func main() {
 	
 	// Add actions to the stage
 	stage.AddAction(&GreetingAction{
-		BaseAction: gostate.NewBaseAction("greet", "Greeting Action"),
+		BaseAction: gostage.NewBaseAction("greet", "Greeting Action"),
 	})
 	
 	// Add the stage to the workflow
 	wf.AddStage(stage)
 	
 	// Set up a logger
-	logger := gostate.NewDefaultLogger()
+	logger := gostage.NewDefaultLogger()
 	
 	// Execute the workflow
 	if err := wf.Execute(context.Background(), logger); err != nil {
@@ -126,7 +126,7 @@ Stages are containers for actions that execute sequentially:
 
 ```go
 // Create a stage with tags
-stage := gostate.NewStageWithTags(
+stage := gostage.NewStageWithTags(
     "validation", 
     "Order Validation", 
     "Validates incoming orders", 
@@ -143,7 +143,7 @@ Workflows manage the execution of stages:
 
 ```go
 // Create a workflow
-wf := gostate.NewWorkflow(
+wf := gostage.NewWorkflow(
     "process-orders", 
     "Order Processing", 
     "Handles end-to-end order processing",
@@ -159,7 +159,7 @@ wf.Execute(context.Background(), logger)
 
 ### State Management
 
-GoState includes a key-value store with type safety:
+gostage includes a key-value store with type safety:
 
 ```go
 // Store data
@@ -185,10 +185,10 @@ ctx.Store.PutWithMetadata("customer.data", customerData, metadata)
 Actions can dynamically generate additional actions during execution:
 
 ```go
-func (a DynamicAction) Execute(ctx *gostate.ActionContext) error {
+func (a DynamicAction) Execute(ctx *gostage.ActionContext) error {
     // Create a new action dynamically
     newAction := &CustomAction{
-        BaseAction: gostate.NewBaseAction("dynamic-action", "Dynamically Created Action"),
+        BaseAction: gostage.NewBaseAction("dynamic-action", "Dynamically Created Action"),
     }
     
     // Add it to be executed after this action
@@ -203,9 +203,9 @@ func (a DynamicAction) Execute(ctx *gostate.ActionContext) error {
 Stages can be created dynamically during workflow execution:
 
 ```go
-func (a StageGeneratorAction) Execute(ctx *gostate.ActionContext) error {
+func (a StageGeneratorAction) Execute(ctx *gostage.ActionContext) error {
     // Create a new stage dynamically
-    newStage := gostate.NewStage(
+    newStage := gostage.NewStage(
         "dynamic-stage", 
         "Dynamic Stage", 
         "Created based on runtime conditions",
@@ -259,14 +259,14 @@ reportStages := ctx.FindStagesByDescription("report")
 uploadActions := ctx.FindActionsByType((*UploadAction)(nil))
 
 // Custom filtering
-complexActions := ctx.FilterActions(func(a gostate.Action) bool {
+complexActions := ctx.FilterActions(func(a gostage.Action) bool {
     return strings.Contains(a.Description(), "complex")
 })
 ```
 
 ## Use Cases
 
-GoState is well-suited for various workflow scenarios:
+gostage is well-suited for various workflow scenarios:
 
 - **ETL Processes** - Define data extraction, transformation and loading pipelines
 - **Deployment Pipelines** - Create sequential deployment steps with conditional execution

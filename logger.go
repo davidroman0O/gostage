@@ -1,4 +1,4 @@
-package gostate
+package gostage
 
 // Logger provides a simple interface for workflow logging
 type Logger interface {

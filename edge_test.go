@@ -1,4 +1,4 @@
-package gostate
+package gostage
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/davidroman0O/gostate/store"
+	"github.com/davidroman0O/gostage/store"
 	"github.com/stretchr/testify/assert"
 )
 

@@ -1,4 +1,4 @@
-module github.com/davidroman0O/gostate
+module github.com/davidroman0O/gostage
 
 go 1.23.5
 

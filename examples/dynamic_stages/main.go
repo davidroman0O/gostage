@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/davidroman0O/gostate"
-	"github.com/davidroman0O/gostate/examples/common"
-	"github.com/davidroman0O/gostate/store"
+	"github.com/davidroman0O/gostage"
+	"github.com/davidroman0O/gostage/examples/common"
+	"github.com/davidroman0O/gostage/store"
 )
 
 // ResourceType represents different types of resources
@@ -28,18 +28,18 @@ type Resource struct {
 
 // ResourceFinderAction discovers resources and generates stages for each type
 type ResourceFinderAction struct {
-	gostate.BaseAction
+	gostage.BaseAction
 }
 
 // NewResourceFinderAction creates a new resource finder action
 func NewResourceFinderAction(name, description string) *ResourceFinderAction {
 	return &ResourceFinderAction{
-		BaseAction: gostate.NewBaseAction(name, description),
+		BaseAction: gostage.NewBaseAction(name, description),
 	}
 }
 
 // Execute implements resource discovery behavior
-func (a *ResourceFinderAction) Execute(ctx *gostate.ActionContext) error {
+func (a *ResourceFinderAction) Execute(ctx *gostage.ActionContext) error {
 	ctx.Logger.Info("Scanning for resources...")
 
 	// In a real implementation, this would discover actual resources
@@ -70,7 +70,7 @@ func (a *ResourceFinderAction) Execute(ctx *gostate.ActionContext) error {
 		stageID := fmt.Sprintf("process-%s", resourceType)
 		stageDescription := fmt.Sprintf("Process %s resources", resourceType)
 
-		stage := gostate.NewStageWithTags(
+		stage := gostage.NewStageWithTags(
 			stageID,
 			stageName,
 			stageDescription,
@@ -97,20 +97,20 @@ func (a *ResourceFinderAction) Execute(ctx *gostate.ActionContext) error {
 
 // ResourceProcessorAction processes resources of a specific type
 type ResourceProcessorAction struct {
-	gostate.BaseAction
+	gostage.BaseAction
 	resourceType ResourceType
 }
 
 // NewResourceProcessorAction creates a new resource processor
 func NewResourceProcessorAction(name, description string, resourceType ResourceType) *ResourceProcessorAction {
 	return &ResourceProcessorAction{
-		BaseAction:   gostate.NewBaseAction(name, description),
+		BaseAction:   gostage.NewBaseAction(name, description),
 		resourceType: resourceType,
 	}
 }
 
 // Execute processes resources of a specific type
-func (a *ResourceProcessorAction) Execute(ctx *gostate.ActionContext) error {
+func (a *ResourceProcessorAction) Execute(ctx *gostage.ActionContext) error {
 	// Get all discovered resources
 	resources, err := store.Get[[]Resource](ctx.Store, "discovered.resources")
 	if err != nil {
@@ -152,20 +152,20 @@ func (a *ResourceProcessorAction) Execute(ctx *gostate.ActionContext) error {
 
 // ResourceBackupAction is a dynamically added action for backing up resources
 type ResourceBackupAction struct {
-	gostate.BaseAction
+	gostage.BaseAction
 	resourceType ResourceType
 }
 
 // NewResourceBackupAction creates a new resource backup action
 func NewResourceBackupAction(name, description string, resourceType ResourceType) *ResourceBackupAction {
 	return &ResourceBackupAction{
-		BaseAction:   gostate.NewBaseActionWithTags(name, description, []string{"backup", string(resourceType)}),
+		BaseAction:   gostage.NewBaseActionWithTags(name, description, []string{"backup", string(resourceType)}),
 		resourceType: resourceType,
 	}
 }
 
 // Execute performs backup operations
-func (a *ResourceBackupAction) Execute(ctx *gostate.ActionContext) error {
+func (a *ResourceBackupAction) Execute(ctx *gostage.ActionContext) error {
 	ctx.Logger.Info("Backing up %s resources...", a.resourceType)
 
 	// Get all discovered resources
@@ -195,16 +195,16 @@ func (a *ResourceBackupAction) Execute(ctx *gostate.ActionContext) error {
 }
 
 // CreateDynamicStagesWorkflow builds a workflow demonstrating dynamic stage generation
-func CreateDynamicStagesWorkflow() *gostate.Workflow {
+func CreateDynamicStagesWorkflow() *gostage.Workflow {
 	// Create a new workflow
-	wf := gostate.NewWorkflow(
+	wf := gostage.NewWorkflow(
 		"dynamic-stages-demo",
 		"Dynamic Stages Demonstration",
 		"Demonstrates dynamic stage generation based on discoveries",
 	)
 
 	// Create the initial discovery stage
-	discoveryStage := gostate.NewStage(
+	discoveryStage := gostage.NewStage(
 		"discovery",
 		"Resource Discovery",
 		"Discovers resources and generates processing stages",
@@ -217,7 +217,7 @@ func CreateDynamicStagesWorkflow() *gostate.Workflow {
 	))
 
 	// Create a final reporting stage
-	reportStage := gostate.NewStage(
+	reportStage := gostage.NewStage(
 		"report",
 		"Processing Report",
 		"Generates a report of all processed resources",
@@ -237,18 +237,18 @@ func CreateDynamicStagesWorkflow() *gostate.Workflow {
 
 // ReportAction generates a report on processed resources
 type ReportAction struct {
-	gostate.BaseAction
+	gostage.BaseAction
 }
 
 // NewReportAction creates a new report action
 func NewReportAction(name, description string) *ReportAction {
 	return &ReportAction{
-		BaseAction: gostate.NewBaseAction(name, description),
+		BaseAction: gostage.NewBaseAction(name, description),
 	}
 }
 
 // Execute generates a processing report
-func (a *ReportAction) Execute(ctx *gostate.ActionContext) error {
+func (a *ReportAction) Execute(ctx *gostage.ActionContext) error {
 	ctx.Logger.Info("Generating resource processing report")
 
 	// Get all discovered resources

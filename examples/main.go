@@ -4,17 +4,17 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/davidroman0O/gostate"
-	"github.com/davidroman0O/gostate/store"
+	"github.com/davidroman0O/gostage"
+	"github.com/davidroman0O/gostage/store"
 )
 
 // Define a custom action by embedding BaseAction
 type GreetingAction struct {
-	gostate.BaseAction
+	gostage.BaseAction
 }
 
 // Implement the Execute method required by the Action interface
-func (a GreetingAction) Execute(ctx *gostate.ActionContext) error {
+func (a GreetingAction) Execute(ctx *gostage.ActionContext) error {
 	name, err := store.GetOrDefault(ctx.Store, "user.name", "World")
 	if err != nil {
 		return err
@@ -26,14 +26,14 @@ func (a GreetingAction) Execute(ctx *gostate.ActionContext) error {
 
 func main() {
 	// Create a new workflow
-	wf := gostate.NewWorkflow(
+	wf := gostage.NewWorkflow(
 		"hello-world",
 		"Hello World Workflow",
 		"A simple introductory workflow",
 	)
 
 	// Create a stage
-	stage := gostate.NewStage(
+	stage := gostage.NewStage(
 		"greeting",
 		"Greeting Stage",
 		"Demonstrates a simple greeting",
@@ -41,14 +41,14 @@ func main() {
 
 	// Add actions to the stage
 	stage.AddAction(&GreetingAction{
-		BaseAction: gostate.NewBaseAction("greet", "Greeting Action"),
+		BaseAction: gostage.NewBaseAction("greet", "Greeting Action"),
 	})
 
 	// Add the stage to the workflow
 	wf.AddStage(stage)
 
 	// Set up a logger
-	logger := gostate.NewDefaultLogger()
+	logger := gostage.NewDefaultLogger()
 
 	// Execute the workflow
 	if err := wf.Execute(context.Background(), logger); err != nil {

@@ -1,6 +1,6 @@
-// Package gostate provides a workflow orchestration and state management system.
+// Package gostage provides a workflow orchestration and state management system.
 //
-// GoState enables building multi-stage stateful workflows with runtime modification
+// gostage enables building multi-stage stateful workflows with runtime modification
 // capabilities. It provides a framework for organizing complex processes into
 // manageable stages and actions with rich metadata support.
 //
@@ -12,4 +12,4 @@
 //
 // Key features include sequential execution, dynamic modification, tag-based organization,
 // type-safe state storage, conditional execution, rich metadata, and serializable state.
-package gostate
+package gostage

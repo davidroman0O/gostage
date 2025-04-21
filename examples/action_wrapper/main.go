@@ -5,46 +5,46 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/davidroman0O/gostate"
-	"github.com/davidroman0O/gostate/examples/common"
-	"github.com/davidroman0O/gostate/store"
+	"github.com/davidroman0O/gostage"
+	"github.com/davidroman0O/gostage/examples/common"
+	"github.com/davidroman0O/gostage/store"
 )
 
 // BaseOperation represents a basic operation that can be wrapped
 type BaseOperation struct {
-	gostate.BaseAction
-	execute func(ctx *gostate.ActionContext) error
+	gostage.BaseAction
+	execute func(ctx *gostage.ActionContext) error
 }
 
 // NewBaseOperation creates a new base operation
-func NewBaseOperation(name, description string, execute func(ctx *gostate.ActionContext) error) *BaseOperation {
+func NewBaseOperation(name, description string, execute func(ctx *gostage.ActionContext) error) *BaseOperation {
 	return &BaseOperation{
-		BaseAction: gostate.NewBaseAction(name, description),
+		BaseAction: gostage.NewBaseAction(name, description),
 		execute:    execute,
 	}
 }
 
 // Execute runs the operation
-func (a *BaseOperation) Execute(ctx *gostate.ActionContext) error {
+func (a *BaseOperation) Execute(ctx *gostage.ActionContext) error {
 	return a.execute(ctx)
 }
 
 // TimingWrapper wraps an action with timing functionality
 type TimingWrapper struct {
-	gostate.BaseAction
-	wrappedAction gostate.Action
+	gostage.BaseAction
+	wrappedAction gostage.Action
 }
 
 // NewTimingWrapper creates a new timing wrapper around an action
-func NewTimingWrapper(wrappedAction gostate.Action) *TimingWrapper {
+func NewTimingWrapper(wrappedAction gostage.Action) *TimingWrapper {
 	return &TimingWrapper{
-		BaseAction:    gostate.NewBaseAction(wrappedAction.Name(), fmt.Sprintf("Timed: %s", wrappedAction.Description())),
+		BaseAction:    gostage.NewBaseAction(wrappedAction.Name(), fmt.Sprintf("Timed: %s", wrappedAction.Description())),
 		wrappedAction: wrappedAction,
 	}
 }
 
 // Execute runs the wrapped action with timing
-func (a *TimingWrapper) Execute(ctx *gostate.ActionContext) error {
+func (a *TimingWrapper) Execute(ctx *gostage.ActionContext) error {
 	// Record start time
 	startTime := time.Now()
 	ctx.Logger.Info("Starting timed execution of %s", a.wrappedAction.Name())
@@ -65,22 +65,22 @@ func (a *TimingWrapper) Execute(ctx *gostate.ActionContext) error {
 
 // LoggingWrapper adds enhanced logging around an action
 type LoggingWrapper struct {
-	gostate.BaseAction
-	wrappedAction gostate.Action
+	gostage.BaseAction
+	wrappedAction gostage.Action
 	logLevel      string
 }
 
 // NewLoggingWrapper creates a new logging wrapper
-func NewLoggingWrapper(wrappedAction gostate.Action, logLevel string) *LoggingWrapper {
+func NewLoggingWrapper(wrappedAction gostage.Action, logLevel string) *LoggingWrapper {
 	return &LoggingWrapper{
-		BaseAction:    gostate.NewBaseAction(wrappedAction.Name(), fmt.Sprintf("Logged: %s", wrappedAction.Description())),
+		BaseAction:    gostage.NewBaseAction(wrappedAction.Name(), fmt.Sprintf("Logged: %s", wrappedAction.Description())),
 		wrappedAction: wrappedAction,
 		logLevel:      logLevel,
 	}
 }
 
 // Execute runs the wrapped action with enhanced logging
-func (a *LoggingWrapper) Execute(ctx *gostate.ActionContext) error {
+func (a *LoggingWrapper) Execute(ctx *gostage.ActionContext) error {
 	// Log action start with context information
 	ctx.Logger.Info("[%s] Executing action: %s", a.logLevel, a.wrappedAction.Name())
 	ctx.Logger.Info("[%s] Description: %s", a.logLevel, a.wrappedAction.Description())
@@ -102,16 +102,16 @@ func (a *LoggingWrapper) Execute(ctx *gostate.ActionContext) error {
 
 // RetryWrapper adds retry capabilities to an action
 type RetryWrapper struct {
-	gostate.BaseAction
-	wrappedAction gostate.Action
+	gostage.BaseAction
+	wrappedAction gostage.Action
 	maxRetries    int
 	retryDelay    time.Duration
 }
 
 // NewRetryWrapper creates a new retry wrapper
-func NewRetryWrapper(wrappedAction gostate.Action, maxRetries int, retryDelay time.Duration) *RetryWrapper {
+func NewRetryWrapper(wrappedAction gostage.Action, maxRetries int, retryDelay time.Duration) *RetryWrapper {
 	return &RetryWrapper{
-		BaseAction:    gostate.NewBaseAction(wrappedAction.Name(), fmt.Sprintf("Retry: %s", wrappedAction.Description())),
+		BaseAction:    gostage.NewBaseAction(wrappedAction.Name(), fmt.Sprintf("Retry: %s", wrappedAction.Description())),
 		wrappedAction: wrappedAction,
 		maxRetries:    maxRetries,
 		retryDelay:    retryDelay,
@@ -119,7 +119,7 @@ func NewRetryWrapper(wrappedAction gostate.Action, maxRetries int, retryDelay ti
 }
 
 // Execute runs the wrapped action with retry logic
-func (a *RetryWrapper) Execute(ctx *gostate.ActionContext) error {
+func (a *RetryWrapper) Execute(ctx *gostage.ActionContext) error {
 	var lastErr error
 
 	// Try the operation up to maxRetries times
@@ -153,20 +153,20 @@ func (a *RetryWrapper) Execute(ctx *gostate.ActionContext) error {
 
 // CompositeAction represents a collection of actions to be executed in sequence
 type CompositeAction struct {
-	gostate.BaseAction
-	actions []gostate.Action
+	gostage.BaseAction
+	actions []gostage.Action
 }
 
 // NewCompositeAction creates a new composite action
-func NewCompositeAction(name, description string, actions []gostate.Action) *CompositeAction {
+func NewCompositeAction(name, description string, actions []gostage.Action) *CompositeAction {
 	return &CompositeAction{
-		BaseAction: gostate.NewBaseAction(name, description),
+		BaseAction: gostage.NewBaseAction(name, description),
 		actions:    actions,
 	}
 }
 
 // Execute runs all contained actions in sequence
-func (a *CompositeAction) Execute(ctx *gostate.ActionContext) error {
+func (a *CompositeAction) Execute(ctx *gostage.ActionContext) error {
 	ctx.Logger.Info("Executing composite action %s with %d sub-actions", a.Name(), len(a.actions))
 
 	// Execute each action in sequence
@@ -187,16 +187,16 @@ func (a *CompositeAction) Execute(ctx *gostate.ActionContext) error {
 }
 
 // CreateActionWrapperWorkflow builds a workflow demonstrating action wrappers
-func CreateActionWrapperWorkflow() *gostate.Workflow {
+func CreateActionWrapperWorkflow() *gostage.Workflow {
 	// Create a new workflow
-	wf := gostate.NewWorkflow(
+	wf := gostage.NewWorkflow(
 		"action-wrapper-demo",
 		"Action Wrapper Demonstration",
 		"Demonstrates wrapping actions to add functionality",
 	)
 
 	// Create a stage for basic operations
-	basicStage := gostate.NewStage(
+	basicStage := gostage.NewStage(
 		"basic-operations",
 		"Basic Operations",
 		"Demonstrates basic operations without wrappers",
@@ -206,7 +206,7 @@ func CreateActionWrapperWorkflow() *gostate.Workflow {
 	basicStage.AddAction(NewBaseOperation(
 		"task-1",
 		"Simple Task 1",
-		func(ctx *gostate.ActionContext) error {
+		func(ctx *gostage.ActionContext) error {
 			ctx.Logger.Info("Executing simple task 1")
 			time.Sleep(time.Millisecond * 500) // Simulate work
 			return nil
@@ -217,7 +217,7 @@ func CreateActionWrapperWorkflow() *gostate.Workflow {
 	basicStage.AddAction(NewBaseOperation(
 		"unreliable-task",
 		"Unreliable Task",
-		func(ctx *gostate.ActionContext) error {
+		func(ctx *gostage.ActionContext) error {
 			ctx.Logger.Info("Executing unreliable task")
 
 			// Generate random failure (deterministic for this example)
@@ -231,7 +231,7 @@ func CreateActionWrapperWorkflow() *gostate.Workflow {
 	))
 
 	// Create a stage for wrapped operations
-	wrappedStage := gostate.NewStage(
+	wrappedStage := gostage.NewStage(
 		"wrapped-operations",
 		"Wrapped Operations",
 		"Demonstrates operations with various wrappers",
@@ -241,7 +241,7 @@ func CreateActionWrapperWorkflow() *gostate.Workflow {
 	operation1 := NewBaseOperation(
 		"timed-task",
 		"Task with Timing",
-		func(ctx *gostate.ActionContext) error {
+		func(ctx *gostage.ActionContext) error {
 			ctx.Logger.Info("Executing timed task")
 			time.Sleep(time.Second * 1) // Simulate work
 			return nil
@@ -253,7 +253,7 @@ func CreateActionWrapperWorkflow() *gostate.Workflow {
 	operation2 := NewBaseOperation(
 		"logged-task",
 		"Task with Logging",
-		func(ctx *gostate.ActionContext) error {
+		func(ctx *gostage.ActionContext) error {
 			ctx.Logger.Info("Executing logged task")
 			time.Sleep(time.Millisecond * 700) // Simulate work
 			return nil
@@ -265,7 +265,7 @@ func CreateActionWrapperWorkflow() *gostate.Workflow {
 	operation3 := NewBaseOperation(
 		"retried-task",
 		"Task with Retry Logic",
-		func(ctx *gostate.ActionContext) error {
+		func(ctx *gostage.ActionContext) error {
 			ctx.Logger.Info("Executing retried task")
 
 			// Always fail the first time to demonstrate retry
@@ -292,18 +292,18 @@ func CreateActionWrapperWorkflow() *gostate.Workflow {
 	wrappedStage.AddAction(NewRetryWrapper(operation3, 3, time.Millisecond*500))
 
 	// Create a composite stage
-	compositeStage := gostate.NewStage(
+	compositeStage := gostage.NewStage(
 		"composite-operations",
 		"Composite Operations",
 		"Demonstrates composite actions combining multiple operations",
 	)
 
 	// Create a composite action with multiple sub-actions
-	subActions := []gostate.Action{
+	subActions := []gostage.Action{
 		NewBaseOperation(
 			"sub-task-1",
 			"Sub Task 1",
-			func(ctx *gostate.ActionContext) error {
+			func(ctx *gostage.ActionContext) error {
 				ctx.Logger.Info("Executing sub-task 1")
 				time.Sleep(time.Millisecond * 200)
 				return nil
@@ -312,7 +312,7 @@ func CreateActionWrapperWorkflow() *gostate.Workflow {
 		NewBaseOperation(
 			"sub-task-2",
 			"Sub Task 2",
-			func(ctx *gostate.ActionContext) error {
+			func(ctx *gostage.ActionContext) error {
 				ctx.Logger.Info("Executing sub-task 2")
 				time.Sleep(time.Millisecond * 300)
 				return nil
@@ -321,7 +321,7 @@ func CreateActionWrapperWorkflow() *gostate.Workflow {
 		NewBaseOperation(
 			"sub-task-3",
 			"Sub Task 3",
-			func(ctx *gostate.ActionContext) error {
+			func(ctx *gostage.ActionContext) error {
 				ctx.Logger.Info("Executing sub-task 3")
 				time.Sleep(time.Millisecond * 100)
 				return nil
@@ -340,7 +340,7 @@ func CreateActionWrapperWorkflow() *gostate.Workflow {
 	compositeStage.AddAction(timedCompositeAction)
 
 	// Create a deeply nested wrapper stage
-	nestedStage := gostate.NewStage(
+	nestedStage := gostage.NewStage(
 		"nested-wrappers",
 		"Nested Wrappers",
 		"Demonstrates deeply nested action wrappers",
@@ -350,7 +350,7 @@ func CreateActionWrapperWorkflow() *gostate.Workflow {
 	deepOperation := NewBaseOperation(
 		"deep-task",
 		"Deeply Wrapped Task",
-		func(ctx *gostate.ActionContext) error {
+		func(ctx *gostage.ActionContext) error {
 			ctx.Logger.Info("Executing deeply wrapped task")
 			time.Sleep(time.Millisecond * 800)
 			return nil
