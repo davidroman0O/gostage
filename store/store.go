@@ -51,6 +51,7 @@ func (s *KVStore) PutWithTTLAndMetadata(key string, value any, ttl time.Duration
 	}
 
 	t := reflect.TypeOf(value)
+	k := t.Kind() // Get the kind once
 
 	var expiresAt *time.Time
 	if ttl > 0 {
@@ -71,7 +72,7 @@ func (s *KVStore) PutWithTTLAndMetadata(key string, value any, ttl time.Duration
 		// Update the UpdatedAt timestamp
 		meta.UpdatedAt = time.Now()
 	}
-	s.data[key] = entry{typ: t, blob: blob, expiresAt: expiresAt, metadata: meta}
+	s.data[key] = entry{typ: t, typeKind: k, blob: blob, expiresAt: expiresAt, metadata: meta}
 	s.mu.Unlock()
 	return nil
 }
@@ -97,18 +98,70 @@ func Get[T any](s *KVStore, key string) (T, error) {
 		return zero, ErrExpired
 	}
 
+	// Get the requested type once
 	want := reflect.TypeOf((*T)(nil)).Elem()
-	if e.typ != want {
-		return zero, fmt.Errorf("%w: wanted %v, got %v",
-			ErrTypeMismatch, want, e.typ)
+	wantKind := want.Kind()
+
+	// If requesting an interface, check if the stored type implements it
+	if wantKind == reflect.Interface {
+		// Use the cached typeKind to check if the stored object can be an interface implementation
+		// Some types can't implement interfaces (like basic types)
+		if !canImplementInterface(e.typeKind) {
+			return zero, fmt.Errorf("%w: wanted interface %v, but stored value type %v (kind: %v) can't implement interfaces",
+				ErrTypeMismatch, want, e.typ, e.typeKind)
+		}
+
+		// Do the actual interface implementation check
+		if !e.typ.Implements(want) {
+			return zero, fmt.Errorf("%w: wanted interface %v, got %v which doesn't implement it",
+				ErrTypeMismatch, want, e.typ)
+		}
+
+		// The stored type implements the requested interface
+		// First, unmarshal into the concrete type
+		instance := reflect.New(e.typ).Interface()
+		if err := json.Unmarshal(e.blob, instance); err != nil {
+			return zero, err
+		}
+
+		// Get the value and convert it directly to the requested interface type
+		val := reflect.ValueOf(instance).Elem().Interface()
+		result, ok := val.(T)
+		if !ok {
+			return zero, fmt.Errorf("type assertion failed: %T cannot be converted to requested interface", val)
+		}
+
+		return result, nil
 	}
 
+	// For non-interface types, require an exact match
+	if e.typ != want {
+		return zero, fmt.Errorf("%w: wanted %v (kind: %v), got %v (kind: %v)",
+			ErrTypeMismatch, want, wantKind, e.typ, e.typeKind)
+	}
+
+	// For exact type matches, unmarshal directly
 	var v T
 	if err := json.Unmarshal(e.blob, &v); err != nil {
 		return zero, err
 	}
 
 	return v, nil
+}
+
+// Helper function to determine if a reflect.Kind can implement interfaces
+func canImplementInterface(kind reflect.Kind) bool {
+	switch kind {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128,
+		reflect.Bool, reflect.String, reflect.Chan, reflect.Func, reflect.UnsafePointer:
+		return false
+	case reflect.Interface, reflect.Ptr, reflect.Struct, reflect.Map, reflect.Array, reflect.Slice:
+		return true
+	default:
+		return false
+	}
 }
 
 // GetOrDefault retrieves a value of type T for the given key.
@@ -322,6 +375,7 @@ func (s *KVStore) UpdateField(key string, fieldPath string, fieldValue interface
 
 	s.data[key] = entry{
 		typ:       e.typ,
+		typeKind:  e.typeKind,
 		blob:      newBlob,
 		expiresAt: e.expiresAt,
 		metadata:  e.metadata,
@@ -382,6 +436,7 @@ func (s *KVStore) UpdateFields(key string, fields map[string]interface{}) error 
 
 	s.data[key] = entry{
 		typ:       e.typ,
+		typeKind:  e.typeKind,
 		blob:      newBlob,
 		expiresAt: e.expiresAt,
 		metadata:  e.metadata,
@@ -615,7 +670,7 @@ func (s *KVStore) GetMetadata(key string) (*Metadata, error) {
 	if e.metadata == nil {
 		meta := NewMetadata()
 		s.mu.Lock()
-		s.data[key] = entry{typ: e.typ, blob: e.blob, expiresAt: e.expiresAt, metadata: meta}
+		s.data[key] = entry{typ: e.typ, typeKind: e.typeKind, blob: e.blob, expiresAt: e.expiresAt, metadata: meta}
 		s.mu.Unlock()
 		return meta, nil
 	}
@@ -848,7 +903,8 @@ func (s *KVStore) Clone() *KVStore {
 			}
 		}
 
-		// Add to new store with the same properties
+		// Since we'll use Put methods that will recompute the typeKind, we can directly
+		// modify the internal data structure to preserve the original typeKind
 		if metadata != nil {
 			if ttl > 0 {
 				newStore.PutWithTTLAndMetadata(key, value, ttl, metadata)
@@ -861,6 +917,12 @@ func (s *KVStore) Clone() *KVStore {
 			} else {
 				newStore.Put(key, value)
 			}
+		}
+
+		// Ensure the typeKind is preserved after adding the entry
+		if currentEntry, exists := newStore.data[key]; exists {
+			currentEntry.typeKind = e.typeKind
+			newStore.data[key] = currentEntry
 		}
 	}
 
@@ -951,7 +1013,7 @@ func (s *KVStore) CopyFrom(source *KVStore) (int, error) {
 		}
 
 		// Create the entry directly
-		s.data[key] = entry{typ: e.typ, blob: e.blob, expiresAt: expiresAt, metadata: metadata}
+		s.data[key] = entry{typ: e.typ, typeKind: e.typeKind, blob: e.blob, expiresAt: expiresAt, metadata: metadata}
 		copied++
 	}
 
@@ -1034,7 +1096,7 @@ func (s *KVStore) CopyFromWithOverwrite(source *KVStore) (copied int, overwritte
 		}
 
 		// Create the entry directly
-		s.data[key] = entry{typ: e.typ, blob: e.blob, expiresAt: expiresAt, metadata: metadata}
+		s.data[key] = entry{typ: e.typ, typeKind: e.typeKind, blob: e.blob, expiresAt: expiresAt, metadata: metadata}
 
 		if exists {
 			overwritten++

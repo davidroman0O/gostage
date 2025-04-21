@@ -115,6 +115,7 @@ func (m *Metadata) RemoveProperty(key string) bool {
 // Entry holds the serialized value plus its concrete Go type.
 type entry struct {
 	typ       reflect.Type
+	typeKind  reflect.Kind // Store the kind for quick access
 	blob      []byte
 	expiresAt *time.Time // nil means no expiration
 	metadata  *Metadata  // nil means no metadata
