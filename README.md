@@ -25,6 +25,7 @@ gostage provides a structured approach to workflow management with these core co
 - **Conditional Execution** - Enable/disable specific components at runtime
 - **Rich Metadata** - Associate tags and properties with workflow components
 - **Serializable State** - Store workflow state during and between executions
+- **Extensible Middleware** - Add cross-cutting concerns like logging, error handling, and retry logic
 
 ## Installation
 
@@ -90,7 +91,10 @@ func main() {
 	
 	// Create a runner
 	runner := gostage.NewRunner()
-	
+
+	// Add middleware for logging, error handling, etc.
+	runner.Use(gostage.LoggingMiddleware())
+
 	// Execute the workflow
 	if err := runner.Execute(context.Background(), wf, logger); err != nil {
 		fmt.Printf("Error executing workflow: %v\n", err)
@@ -155,16 +159,99 @@ wf := gostage.NewWorkflow(
 // Add stages to the workflow
 wf.AddStage(stage1)
 wf.AddStage(stage2)
+```
 
-// Set up a logger
-logger := gostage.NewDefaultLogger()
+### Runner
 
+Runners execute workflows and can be customized with middleware:
+
+```go
 // Create a runner
 runner := gostage.NewRunner()
+
+// Add middleware for logging, error handling, etc.
+runner.Use(gostage.LoggingMiddleware())
 
 // Execute the workflow
 runner.Execute(context.Background(), wf, logger)
 ```
+
+Runners can also be extended to create domain-specific workflow executors (see the "Extending the Runner" section below).
+
+### Middleware
+
+Middleware provides a powerful way to intercept and enhance workflow execution with cross-cutting concerns. Each middleware wraps the execution flow, allowing you to perform actions before and after workflow execution.
+
+```go
+// Create a runner with multiple middleware components
+runner := gostage.NewRunner(
+    gostage.WithMiddleware(
+        gostage.LoggingMiddleware(),                       // Built-in logging
+        ErrorHandlingMiddleware([]string{"non-critical"}), // Custom error handling
+        TimingMiddleware(),                                // Performance monitoring
+        RetryMiddleware(3, 100*time.Millisecond),          // Automatic retries
+    ),
+)
+```
+
+Key characteristics of middleware:
+
+- **Pre/Post Execution** - Run code before and after workflow execution
+- **Error Handling** - Catch, transform, or recover from errors
+- **Context Modification** - Add values to or modify the execution context
+- **Chain Execution** - Multiple middleware components work together in a chain
+
+#### Creating Custom Middleware
+
+Creating your own middleware is straightforward:
+
+```go
+func MyCustomMiddleware() gostage.Middleware {
+    return func(next gostage.RunnerFunc) gostage.RunnerFunc {
+        return func(ctx context.Context, wf *gostage.Workflow, logger gostage.Logger) error {
+            // Pre-execution logic
+            logger.Info("Starting workflow execution with custom middleware")
+            
+            // Execute the next middleware in the chain (or the workflow itself)
+            err := next(ctx, wf, logger)
+            
+            // Post-execution logic
+            logger.Info("Workflow execution completed with result: %v", err == nil)
+            
+            // Optionally transform or handle the error
+            return err
+        }
+    }
+}
+```
+
+#### Common Middleware Patterns
+
+The library includes examples of several middleware patterns:
+
+1. **Error Handling Middleware** - Catch and recover from specific errors
+2. **Retry Middleware** - Automatically retry workflows that fail
+3. **Timing Middleware** - Measure and record execution time
+4. **Validation Middleware** - Ensure workflows meet certain criteria
+5. **State Injection Middleware** - Add initial state to workflows
+6. **Tracing Middleware** - Add distributed tracing capabilities
+7. **Audit Middleware** - Record workflow execution for compliance
+
+See the `examples/middleware` directory for complete implementations of these patterns.
+
+#### Middleware Order
+
+The order of middleware registration is important. Middleware is applied in reverse order, so the last middleware registered is the first to execute and the closest to the actual workflow execution.
+
+```go
+runner.Use(
+    middlewareA, // Applied third (outer layer)
+    middlewareB, // Applied second (middle layer)
+    middlewareC, // Applied first (inner layer, closest to workflow)
+)
+```
+
+This structure allows outer middleware to take action based on the results of inner middleware.
 
 ### State Management
 
@@ -273,6 +360,49 @@ complexActions := ctx.FilterActions(func(a gostage.Action) bool {
 })
 ```
 
+### Extending the Runner
+
+The Runner can be extended to create domain-specific workflow execution environments:
+
+```go
+// Create a custom runner by embedding the base Runner
+type ExtendedRunner struct {
+    // Embed the base runner
+    *gostage.Runner
+
+    // Add domain-specific components
+    configProvider   ConfigProvider
+    resourceManager  ResourceManager
+    
+    // Add custom settings
+    defaultEnvironment string
+    setupTimeout       time.Duration
+}
+
+// Override Execute to add custom preparation logic
+func (r *ExtendedRunner) Execute(ctx context.Context, wf *Workflow, logger Logger) error {
+    // Add preparation logic
+    if err := r.prepareWorkflow(wf); err != nil {
+        return err
+    }
+    
+    // Call the base implementation
+    return r.Runner.Execute(ctx, wf, logger)
+}
+```
+
+This pattern is helpful when you need to:
+
+1. **Provide domain-specific initialization** - Set up resources, load configuration
+2. **Share common resources** - Make services, clients, or tools available to all actions
+3. **Create a specialized execution environment** - Add middleware specific to your domain
+4. **Simplify workflow creation** - Pre-configure workflows with standard components
+
+The `examples/extended_runner` directory shows a complete example of this pattern, including:
+- How to properly store and retrieve domain objects in the workflow store
+- How to provide helper functions for accessing typed resources
+- How to create a fluent configuration API for your extended runner
+
 ## Use Cases
 
 gostage is well-suited for various workflow scenarios:
@@ -282,6 +412,8 @@ gostage is well-suited for various workflow scenarios:
 - **Business Workflows** - Model complex business processes with state tracking
 - **Resource Provisioning** - Set up resource discovery and provisioning sequences
 - **Data Processing** - Orchestrate complex data operations with state management
+- **Error-Tolerant Flows** - Build resilient workflows with retry logic and error recovery
+- **Audited Processes** - Implement compliance requirements with audit trails and validation checks
 
 ## Examples
 
@@ -292,6 +424,9 @@ The repository includes several examples demonstrating different features:
 - File operations workflow
 - Action wrapping patterns
 - Conditional execution with enable/disable
+- Extended Runner pattern for domain-specific workflows
+- Middleware patterns for cross-cutting concerns
+- Error handling and recovery strategies
 
 Check the `examples/` directory for complete examples.
 
