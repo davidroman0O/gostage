@@ -302,17 +302,23 @@ func main() {
 	fmt.Printf("Description: %s\n", wf.Description)
 	fmt.Printf("Initial Stages: %d\n\n", len(wf.Stages))
 
-	// Execute the workflow
-	fmt.Println("Executing workflow...")
+	fmt.Println("Executing resource discovery workflow...")
 
 	// Create a context and a console logger
 	ctx := context.Background()
 	logger := common.NewConsoleLogger(common.LogLevelInfo)
 
-	if err := wf.Execute(ctx, logger); err != nil {
+	// Create a runner
+	runner := gostage.NewRunner()
+
+	// Execute the workflow
+	if err := runner.Execute(ctx, wf, logger); err != nil {
 		fmt.Printf("Error executing workflow: %v\n", err)
-		return
+	} else {
+		fmt.Println("\nWorkflow completed successfully!")
 	}
 
-	fmt.Println("\nWorkflow completed successfully!")
+	fmt.Println("\nFinal workflow structure:")
+	fmt.Printf("- Workflow: %s (%s)\n", wf.Name, wf.ID)
+	fmt.Printf("- Total stages: %d\n", len(wf.Stages))
 }

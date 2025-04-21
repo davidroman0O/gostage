@@ -1,7 +1,6 @@
 package gostage
 
 import (
-	"context"
 	"fmt"
 	"time"
 
@@ -256,117 +255,6 @@ func (w *Workflow) GetAction(stageID, actionID string) (Action, error) {
 	}
 
 	return nil, fmt.Errorf("action %s not found in stage %s", actionID, stageID)
-}
-
-// Execute runs the entire workflow by executing each stage in sequence
-func (w *Workflow) Execute(ctx context.Context, logger Logger) error {
-	if len(w.Stages) == 0 {
-		return fmt.Errorf("workflow '%s' has no stages to execute", w.ID)
-	}
-
-	logger.Info("Starting workflow: %s (%s)", w.Name, w.ID)
-
-	// Update workflow status in store
-	workflowKey := PrefixWorkflow + w.ID
-	w.Store.SetProperty(workflowKey, PropStatus, StatusRunning)
-
-	// Initialize the disabled stages map if it doesn't exist
-	if _, ok := w.Context["disabledStages"]; !ok {
-		w.Context["disabledStages"] = make(map[string]bool)
-	}
-
-	disabledStages, ok := w.Context["disabledStages"].(map[string]bool)
-	if !ok {
-		disabledStages = make(map[string]bool)
-		w.Context["disabledStages"] = disabledStages
-	}
-
-	// We need to execute stages one by one, as dynamic stages can be inserted during execution
-	for i := 0; i < len(w.Stages); i++ {
-		stage := w.Stages[i]
-		stageKey := PrefixStage + stage.ID
-
-		// Update stage status in store
-		w.Store.SetProperty(stageKey, PropStatus, StatusRunning)
-
-		// Skip disabled stages
-		if disabledStages[stage.ID] {
-			logger.Info("Skipping disabled stage: %s (%s)", stage.Name, stage.ID)
-			w.Store.SetProperty(stageKey, PropStatus, StatusSkipped)
-			continue
-		}
-
-		logger.Info("Starting stage %d/%d: %s (%s)", i+1, len(w.Stages), stage.Name, stage.ID)
-
-		// Merge stage-specific initial store into workflow store if provided
-		if stage.InitialStore != nil {
-			collisions, err := w.Store.Merge(stage.InitialStore, store.Overwrite)
-			if err != nil {
-				w.Store.SetProperty(stageKey, PropStatus, StatusFailed)
-				return fmt.Errorf("failed to merge stage store: %w", err)
-			}
-			if len(collisions) > 0 {
-				logger.Debug("Stage store had %d key collisions with workflow store", len(collisions))
-			}
-		}
-
-		if err := stage.Execute(ctx, w, logger); err != nil {
-			w.Store.SetProperty(stageKey, PropStatus, StatusFailed)
-			w.Store.SetProperty(workflowKey, PropStatus, StatusFailed)
-			return fmt.Errorf("stage '%s' failed: %w", stage.ID, err)
-		}
-
-		// Check if any dynamic stages were generated
-		if dynamicStages, ok := w.Context["dynamicStages"]; ok {
-			if stages, ok := dynamicStages.([]*Stage); ok && len(stages) > 0 {
-				logger.Debug("Found %d dynamic stages to insert after stage %s", len(stages), stage.ID)
-
-				// Insert the new stages after the current one
-				newStages := make([]*Stage, 0, len(w.Stages)+len(stages))
-				newStages = append(newStages, w.Stages[:i+1]...)
-
-				// Add each dynamic stage to the store
-				for _, dynStage := range stages {
-					// Add dynamic tag to these stages
-					if !dynStage.HasTag(TagDynamic) {
-						dynStage.AddTag(TagDynamic)
-					}
-
-					// Store in KV store
-					dynStageKey := PrefixStage + dynStage.ID
-					dynStageInfo := dynStage.toStageInfo()
-
-					meta := store.NewMetadata()
-					meta.Tags = append(meta.Tags, dynStage.Tags...)
-					meta.Description = dynStage.Description
-					meta.SetProperty(PropOrder, i+1+len(newStages)-len(w.Stages[:i+1]))
-					meta.SetProperty(PropStatus, StatusPending)
-					meta.SetProperty(PropCreatedBy, "stage:"+stage.ID)
-
-					w.Store.PutWithMetadata(dynStageKey, dynStageInfo, meta)
-				}
-
-				newStages = append(newStages, stages...)
-				if i+1 < len(w.Stages) {
-					newStages = append(newStages, w.Stages[i+1:]...)
-				}
-				w.Stages = newStages
-
-				// Remove the dynamic stages from context to avoid re-processing
-				delete(w.Context, "dynamicStages")
-
-				// Update workflow in store
-				w.saveToStore()
-			}
-		}
-
-		logger.Info("Completed stage %d/%d: %s", i+1, len(w.Stages), stage.Name)
-		w.Store.SetProperty(stageKey, PropStatus, StatusCompleted)
-	}
-
-	logger.Info("Workflow completed successfully: %s", w.Name)
-	w.Store.SetProperty(workflowKey, PropStatus, StatusCompleted)
-	return nil
 }
 
 // GetContext returns a value from the workflow context

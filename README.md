@@ -88,8 +88,11 @@ func main() {
 	// Set up a logger
 	logger := gostage.NewDefaultLogger()
 	
+	// Create a runner
+	runner := gostage.NewRunner()
+	
 	// Execute the workflow
-	if err := wf.Execute(context.Background(), logger); err != nil {
+	if err := runner.Execute(context.Background(), wf, logger); err != nil {
 		fmt.Printf("Error executing workflow: %v\n", err)
 		return
 	}
@@ -153,8 +156,14 @@ wf := gostage.NewWorkflow(
 wf.AddStage(stage1)
 wf.AddStage(stage2)
 
+// Set up a logger
+logger := gostage.NewDefaultLogger()
+
+// Create a runner
+runner := gostage.NewRunner()
+
 // Execute the workflow
-wf.Execute(context.Background(), logger)
+runner.Execute(context.Background(), wf, logger)
 ```
 
 ### State Management

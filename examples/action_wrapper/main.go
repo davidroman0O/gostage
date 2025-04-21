@@ -388,14 +388,19 @@ func main() {
 	fmt.Printf("Description: %s\n", wf.Description)
 	fmt.Printf("Stages: %d\n\n", len(wf.Stages))
 
-	// Execute the workflow
 	fmt.Println("Executing workflow...")
 
-	// Create a context and a console logger
+	// Create a context
 	ctx := context.Background()
+
+	// Create a logger
 	logger := common.NewConsoleLogger(common.LogLevelInfo)
 
-	if err := wf.Execute(ctx, logger); err != nil {
+	// Create a runner
+	runner := gostage.NewRunner()
+
+	// Execute the workflow
+	if err := runner.Execute(ctx, wf, logger); err != nil {
 		fmt.Printf("Error executing workflow: %v\n", err)
 		return
 	}

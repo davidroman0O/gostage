@@ -42,7 +42,8 @@ func TestDynamicActionEdgeCases(t *testing.T) {
 
 		// Execute workflow
 		logger := &TestLogger{t: t}
-		err := wf.Execute(context.Background(), logger)
+		runner := NewRunner()
+		err := runner.Execute(context.Background(), wf, logger)
 
 		// Should execute without errors - both actions should execute despite having the same name
 		assert.NoError(t, err)
@@ -86,7 +87,8 @@ func TestDynamicActionEdgeCases(t *testing.T) {
 
 		// Execute workflow
 		logger := &TestLogger{t: t}
-		err := wf.Execute(context.Background(), logger)
+		runner := NewRunner()
+		err := runner.Execute(context.Background(), wf, logger)
 
 		// Should execute without errors
 		assert.NoError(t, err)
@@ -130,7 +132,8 @@ func TestDynamicActionEdgeCases(t *testing.T) {
 
 		// Execute workflow
 		logger := &TestLogger{t: t}
-		err := wf.Execute(context.Background(), logger)
+		runner := NewRunner()
+		err := runner.Execute(context.Background(), wf, logger)
 
 		// Should execute without errors
 		assert.NoError(t, err)
@@ -181,7 +184,8 @@ func TestNestedErrorWrapping(t *testing.T) {
 
 		// Execute workflow
 		logger := &TestLogger{t: t}
-		err := wf.Execute(context.Background(), logger)
+		runner := NewRunner()
+		err := runner.Execute(context.Background(), wf, logger)
 
 		// Should fail with error
 		assert.Error(t, err)
@@ -231,7 +235,8 @@ func TestNestedErrorWrapping(t *testing.T) {
 
 		// Execute workflow
 		logger := &TestLogger{t: t}
-		err := wf.Execute(context.Background(), logger)
+		runner := NewRunner()
+		err := runner.Execute(context.Background(), wf, logger)
 
 		// Should fail with error from action2
 		assert.Error(t, err)
@@ -388,7 +393,8 @@ func TestMemoryUsage(t *testing.T) {
 		// Execute workflows in a loop
 		for i := 0; i < 100; i++ {
 			wf := createWorkflow()
-			err := wf.Execute(context.Background(), NewDefaultLogger())
+			runner := NewRunner()
+			err := runner.Execute(context.Background(), wf, NewDefaultLogger())
 			assert.NoError(t, err)
 
 			// Force garbage collection

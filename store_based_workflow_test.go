@@ -110,7 +110,8 @@ func TestStoreBasedWorkflow(t *testing.T) {
 
 	// Execute the workflow
 	logger := &TestLogger{t: t}
-	err = workflow.Execute(context.Background(), logger)
+	runner := NewRunner()
+	err = runner.Execute(context.Background(), workflow, logger)
 	assert.NoError(t, err)
 
 	// Verify all actions executed
@@ -222,7 +223,8 @@ func TestWorkflowAndStageMetadata(t *testing.T) {
 
 	// Execute the workflow
 	logger := &TestLogger{t: t}
-	err = workflow.Execute(context.Background(), logger)
+	runner := NewRunner()
+	err = runner.Execute(context.Background(), workflow, logger)
 	assert.NoError(t, err)
 
 	// Verify new data was added

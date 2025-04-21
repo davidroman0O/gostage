@@ -207,7 +207,10 @@ func main() {
 	ctx := context.Background()
 	logger := common.NewConsoleLogger(common.LogLevelInfo)
 
-	if err := wf.Execute(ctx, logger); err != nil {
+	// Create a runner
+	runner := gostage.NewRunner()
+
+	if err := runner.Execute(ctx, wf, logger); err != nil {
 		fmt.Printf("Error executing workflow: %v\n", err)
 		return
 	}

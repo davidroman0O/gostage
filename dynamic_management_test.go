@@ -63,9 +63,10 @@ func TestDynamicEnableDisable(t *testing.T) {
 	workflow.AddStage(stage2)
 	workflow.AddStage(stage3)
 
-	// Run the workflow
+	// Execute the workflow with dynamic stages
 	logger := &TestLogger{t: t}
-	err := workflow.Execute(context.Background(), logger)
+	runner := NewRunner()
+	err := runner.Execute(context.Background(), workflow, logger)
 	assert.NoError(t, err)
 
 	// Verify execution counts - the third stage and action-2-2 should be skipped
@@ -243,9 +244,10 @@ func TestDynamicStageAndActionManagement(t *testing.T) {
 	managerStage.AddAction(managerAction)
 	workflow.AddStage(managerStage)
 
-	// Execute context
+	// Execute the workflow
 	logger := &TestLogger{t: t}
-	err := workflow.Execute(context.Background(), logger)
+	runner := NewRunner()
+	err := runner.Execute(context.Background(), workflow, logger)
 	assert.NoError(t, err)
 
 	// === Verification Sub-tests ===
@@ -346,6 +348,7 @@ func TestFilteringAndQuerying(t *testing.T) {
 
 	// Run the workflow
 	logger := &TestLogger{t: t}
-	err := workflow.Execute(context.Background(), logger)
+	runner := NewRunner()
+	err := runner.Execute(context.Background(), workflow, logger)
 	assert.NoError(t, err)
 }

@@ -265,8 +265,19 @@ func (s *KVStore) UpdateField(key string, fieldPath string, fieldValue interface
 		return err
 	}
 
-	if err := xreflect.SetEmbedField(instance, fieldPath, fieldValue); err != nil {
-		return fmt.Errorf("failed to update field: %w", err)
+	// Use recover to catch panics from type conversion errors
+	var setErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				setErr = fmt.Errorf("type conversion error: %v", r)
+			}
+		}()
+		setErr = xreflect.SetEmbedField(instance, fieldPath, fieldValue)
+	}()
+
+	if setErr != nil {
+		return fmt.Errorf("failed to update field: %w", setErr)
 	}
 
 	newBlob, err := json.Marshal(instance)
@@ -278,6 +289,7 @@ func (s *KVStore) UpdateField(key string, fieldPath string, fieldValue interface
 		typ:       e.typ,
 		blob:      newBlob,
 		expiresAt: e.expiresAt,
+		metadata:  e.metadata,
 	}
 
 	return nil
@@ -312,8 +324,19 @@ func (s *KVStore) UpdateFields(key string, fields map[string]interface{}) error 
 	}
 
 	for fieldPath, fieldValue := range fields {
-		if err := xreflect.SetEmbedField(instance, fieldPath, fieldValue); err != nil {
-			return fmt.Errorf("failed to update field %s: %w", fieldPath, err)
+		// Use recover to catch panics from type conversion errors
+		var setErr error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					setErr = fmt.Errorf("type conversion error: %v", r)
+				}
+			}()
+			setErr = xreflect.SetEmbedField(instance, fieldPath, fieldValue)
+		}()
+
+		if setErr != nil {
+			return fmt.Errorf("failed to update field %s: %w", fieldPath, setErr)
 		}
 	}
 
@@ -326,6 +349,7 @@ func (s *KVStore) UpdateFields(key string, fields map[string]interface{}) error 
 		typ:       e.typ,
 		blob:      newBlob,
 		expiresAt: e.expiresAt,
+		metadata:  e.metadata,
 	}
 
 	return nil

@@ -67,10 +67,10 @@ func TestExtendedActionFiltering(t *testing.T) {
 	// Add stage to workflow
 	workflow.AddStage(stage)
 
-	// Execute the workflow (to make the ActionContext methods testable within an action)
-	// We don't need to check the error here, just ensure the validation action runs.
+	// Execute the workflow to populate the action context
 	logger := &TestLogger{t: t}
-	_ = workflow.Execute(context.Background(), logger)
+	runner := NewRunner()
+	_ = runner.Execute(context.Background(), workflow, logger)
 }
 
 // Helper to create a standard workflow setup for context tests

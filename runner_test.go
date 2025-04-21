@@ -5,7 +5,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/davidroman0O/gostage/store"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -150,4 +152,359 @@ func TestRunWorkflowWithContext(t *testing.T) {
 	// Should succeed because we check that the context is cancelled
 	assert.True(t, result.Success)
 	assert.True(t, contextChecked)
+}
+
+// TestRunner_Execute tests that a workflow is executed successfully with the runner
+func TestRunner_Execute(t *testing.T) {
+	// Create a simple workflow with one stage and one action
+	workflow := NewWorkflow("test-wf", "Test Workflow", "A test workflow")
+	stage := NewStage("test-stage", "Test Stage", "A test stage")
+
+	// Create a test action that just sets a value in the store
+	action := NewActionFunc("test-action", "Test action", func(ctx *ActionContext) error {
+		ctx.Store.Put("test-key", "test-value")
+		return nil
+	})
+
+	stage.AddAction(action)
+	workflow.AddStage(stage)
+
+	// Create a logger that captures logs
+	logger := &TestLogger{t: t}
+
+	// Create a runner
+	runner := NewRunner(WithLogger(logger))
+
+	// Execute the workflow
+	err := runner.Execute(context.Background(), workflow, logger)
+
+	// Check for errors
+	if err != nil {
+		t.Errorf("Expected no error, got: %v", err)
+	}
+
+	// Check that the action was executed
+	value, err := store.Get[string](workflow.Store, "test-key")
+	if err != nil {
+		t.Errorf("Expected to find key in store, got error: %v", err)
+	}
+
+	if value != "test-value" {
+		t.Errorf("Expected value to be 'test-value', got: %s", value)
+	}
+}
+
+// TestRunner_Middleware tests that middleware functions are executed correctly
+func TestRunner_Middleware(t *testing.T) {
+	// Create a simple workflow
+	workflow := NewWorkflow("test-wf", "Test Workflow", "A test workflow")
+	stage := NewStage("test-stage", "Test Stage", "A test stage")
+
+	action := NewActionFunc("test-action", "Test action", func(ctx *ActionContext) error {
+		return nil
+	})
+
+	stage.AddAction(action)
+	workflow.AddStage(stage)
+
+	// Create a logger
+	logger := &TestLogger{t: t}
+
+	// Create a middleware that sets a key in the workflow store
+	middleware := func(next RunnerFunc) RunnerFunc {
+		return func(ctx context.Context, w *Workflow, l Logger) error {
+			// Set value before execution
+			w.Store.Put("middleware-key", "middleware-value")
+
+			// Call the next function in the chain
+			err := next(ctx, w, l)
+
+			// Set another value after execution
+			w.Store.Put("middleware-after", "after-value")
+
+			return err
+		}
+	}
+
+	// Create a runner with the middleware
+	runner := NewRunner(
+		WithLogger(logger),
+		WithMiddleware(middleware),
+	)
+
+	// Execute the workflow
+	err := runner.Execute(context.Background(), workflow, logger)
+
+	// Check for errors
+	if err != nil {
+		t.Errorf("Expected no error, got: %v", err)
+	}
+
+	// Check that middleware was executed
+	beforeValue, err := store.Get[string](workflow.Store, "middleware-key")
+	if err != nil {
+		t.Errorf("Expected to find middleware-key in store, got error: %v", err)
+	}
+
+	if beforeValue != "middleware-value" {
+		t.Errorf("Expected value to be 'middleware-value', got: %s", beforeValue)
+	}
+
+	// Check that middleware was executed after workflow
+	afterValue, err := store.Get[string](workflow.Store, "middleware-after")
+	if err != nil {
+		t.Errorf("Expected to find middleware-after in store, got error: %v", err)
+	}
+
+	if afterValue != "after-value" {
+		t.Errorf("Expected value to be 'after-value', got: %s", afterValue)
+	}
+}
+
+// TestRunner_MultipleMiddleware tests that multiple middleware functions are executed in the correct order
+func TestRunner_MultipleMiddleware(t *testing.T) {
+	// Create a simple workflow
+	workflow := NewWorkflow("test-wf", "Test Workflow", "A test workflow")
+	stage := NewStage("test-stage", "Test Stage", "A test stage")
+
+	// Create a test action that adds to the order
+	action := NewActionFunc("test-action", "Test action", func(ctx *ActionContext) error {
+		// Get the current order
+		orderValue, err := store.GetOrDefault[string](ctx.Store, "order", "")
+		if err != nil {
+			return err
+		}
+
+		// Add our position
+		orderValue += "action-"
+
+		// Store the updated order
+		ctx.Store.Put("order", orderValue)
+		return nil
+	})
+
+	stage.AddAction(action)
+	workflow.AddStage(stage)
+
+	// Create a logger
+	logger := &TestLogger{t: t}
+
+	// Create middlewares that add to the execution order
+	middleware1 := func(next RunnerFunc) RunnerFunc {
+		return func(ctx context.Context, w *Workflow, l Logger) error {
+			// Get the current order
+			orderValue, err := store.GetOrDefault[string](w.Store, "order", "")
+			if err == nil {
+				// Add our position before
+				orderValue += "m1-before-"
+				w.Store.Put("order", orderValue)
+			}
+
+			// Call the next function
+			err = next(ctx, w, l)
+
+			// Get the updated order
+			orderValue, err = store.GetOrDefault[string](w.Store, "order", "")
+			if err == nil {
+				// Add our position after
+				orderValue += "m1-after-"
+				w.Store.Put("order", orderValue)
+			}
+
+			return err
+		}
+	}
+
+	middleware2 := func(next RunnerFunc) RunnerFunc {
+		return func(ctx context.Context, w *Workflow, l Logger) error {
+			// Get the current order
+			orderValue, err := store.GetOrDefault[string](w.Store, "order", "")
+			if err == nil {
+				// Add our position before
+				orderValue += "m2-before-"
+				w.Store.Put("order", orderValue)
+			}
+
+			// Call the next function
+			err = next(ctx, w, l)
+
+			// Get the updated order
+			orderValue, err = store.GetOrDefault[string](w.Store, "order", "")
+			if err == nil {
+				// Add our position after
+				orderValue += "m2-after-"
+				w.Store.Put("order", orderValue)
+			}
+
+			return err
+		}
+	}
+
+	// Create a runner with the middlewares
+	runner := NewRunner(
+		WithLogger(logger),
+		WithMiddleware(middleware1, middleware2),
+	)
+
+	// Execute the workflow
+	err := runner.Execute(context.Background(), workflow, logger)
+
+	// Check for errors
+	if err != nil {
+		t.Errorf("Expected no error, got: %v", err)
+	}
+
+	// Check the execution order
+	orderValue, err := store.Get[string](workflow.Store, "order")
+	if err != nil {
+		t.Errorf("Expected to find order in store, got error: %v", err)
+	}
+
+	// The expected order should be: m1-before-m2-before-action-m2-after-m1-after
+	expectedOrder := "m1-before-m2-before-action-m2-after-m1-after-"
+	if orderValue != expectedOrder {
+		t.Errorf("Expected order to be '%s', got: %s", expectedOrder, orderValue)
+	}
+}
+
+// TestRunner_MiddlewareErrors tests that errors from middleware are properly propagated
+func TestRunner_MiddlewareErrors(t *testing.T) {
+	// Create a simple workflow
+	workflow := NewWorkflow("test-wf", "Test Workflow", "A test workflow")
+	stage := NewStage("test-stage", "Test Stage", "A test stage")
+
+	action := NewActionFunc("test-action", "Test action", func(ctx *ActionContext) error {
+		return nil
+	})
+
+	stage.AddAction(action)
+	workflow.AddStage(stage)
+
+	// Create a logger
+	logger := &TestLogger{t: t}
+
+	// Create a middleware that returns an error
+	expectedError := errors.New("middleware error")
+	errorMiddleware := func(next RunnerFunc) RunnerFunc {
+		return func(ctx context.Context, w *Workflow, l Logger) error {
+			return expectedError
+		}
+	}
+
+	// Create a runner with the middleware
+	runner := NewRunner(
+		WithLogger(logger),
+		WithMiddleware(errorMiddleware),
+	)
+
+	// Execute the workflow
+	err := runner.Execute(context.Background(), workflow, logger)
+
+	// Check that the expected error was returned
+	if err != expectedError {
+		t.Errorf("Expected error: %v, got: %v", expectedError, err)
+	}
+}
+
+// TestStoreInjectionMiddleware tests the built-in store injection middleware
+func TestStoreInjectionMiddleware(t *testing.T) {
+	// Create a simple workflow
+	workflow := NewWorkflow("test-wf", "Test Workflow", "A test workflow")
+	stage := NewStage("test-stage", "Test Stage", "A test stage")
+
+	// Create an action that checks for the injected value
+	action := NewActionFunc("test-action", "Test action", func(ctx *ActionContext) error {
+		value, err := store.Get[string](ctx.Store, "injected-key")
+		if err != nil {
+			return errors.New("injected value not found")
+		}
+
+		if value != "injected-value" {
+			return errors.New("injected value not correct")
+		}
+
+		return nil
+	})
+
+	stage.AddAction(action)
+	workflow.AddStage(stage)
+
+	// Create a logger
+	logger := &TestLogger{t: t}
+
+	// Create a store injection middleware
+	injectionValues := map[string]interface{}{
+		"injected-key": "injected-value",
+	}
+
+	// Create a runner with the store injection middleware
+	runner := NewRunner(
+		WithLogger(logger),
+		WithMiddleware(StoreInjectionMiddleware(injectionValues)),
+	)
+
+	// Execute the workflow
+	err := runner.Execute(context.Background(), workflow, logger)
+
+	// Check for errors
+	if err != nil {
+		t.Errorf("Expected no error, got: %v", err)
+	}
+}
+
+// TestTimeLimitMiddleware tests the built-in time limit middleware
+func TestTimeLimitMiddleware(t *testing.T) {
+	// Create a simple workflow
+	workflow := NewWorkflow("test-wf", "Test Workflow", "A test workflow")
+	stage := NewStage("test-stage", "Test Stage", "A test stage")
+
+	// Create an action that sleeps longer than the timeout
+	action := NewActionFunc("test-action", "Test action", func(ctx *ActionContext) error {
+		// Sleep for longer than the timeout
+		select {
+		case <-time.After(200 * time.Millisecond):
+			return nil
+		case <-ctx.GoContext.Done():
+			return ctx.GoContext.Err()
+		}
+	})
+
+	stage.AddAction(action)
+	workflow.AddStage(stage)
+
+	// Create a logger
+	logger := &TestLogger{t: t}
+
+	// Create a runner with the time limit middleware (100ms timeout)
+	runner := NewRunner(
+		WithLogger(logger),
+		WithMiddleware(TimeLimitMiddleware(100*time.Millisecond)),
+	)
+
+	// Execute the workflow
+	err := runner.Execute(context.Background(), workflow, logger)
+
+	// Check that we got a context deadline exceeded error
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Expected context deadline exceeded error, got: %v", err)
+	}
+}
+
+// NewActionFunc creates a new action from a function
+func NewActionFunc(name, description string, fn func(*ActionContext) error) Action {
+	return &funcAction{
+		BaseAction: NewBaseAction(name, description),
+		fn:         fn,
+	}
+}
+
+// funcAction implements Action using a function
+type funcAction struct {
+	BaseAction
+	fn func(*ActionContext) error
+}
+
+// Execute runs the action function
+func (a *funcAction) Execute(ctx *ActionContext) error {
+	return a.fn(ctx)
 }
