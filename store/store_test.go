@@ -850,11 +850,8 @@ func TestSchemaMatch(t *testing.T) {
 				"id": map[string]interface{}{"type": "integer"}, // Wrong type
 			},
 		}
-		// Note: SchemaMatch currently only checks for property existence, not type equality within properties.
-		// This assertion might need adjustment depending on desired SchemaMatch behavior.
-		// For now, assuming it passes if the property exists regardless of type difference in sub-schema.
-		assert.True(t, SchemaMatch(targetSchema, pattern), "SchemaMatch should currently ignore type differences in property sub-schemas (verify this behavior)")
-		// To make it fail on type mismatch, SchemaMatch would need deeper comparison.
+		// SchemaMatch now checks for property type matches, so this should fail
+		assert.False(t, SchemaMatch(targetSchema, pattern), "SchemaMatch should fail when property types don't match")
 	})
 
 	t.Run("no_match_missing_nested_property", func(t *testing.T) {
@@ -938,5 +935,494 @@ func TestAssertToMap(t *testing.T) {
 	t.Run("invalid_input_nil", func(t *testing.T) {
 		_, ok := assertToMap(nil)
 		assert.False(t, ok)
+	})
+}
+
+// TestCloning tests the store cloning functionality
+func TestCloning(t *testing.T) {
+	// Define test types
+	type User struct {
+		Name  string
+		Email string
+		Age   int
+	}
+
+	type Nested struct {
+		Title string
+		Count int
+		Data  map[string]string
+	}
+
+	// Setup the original store with various data types and options
+	originalStore := NewKVStore()
+
+	// 1. Basic value
+	err := originalStore.Put("simple", "hello world")
+	assert.NoError(t, err)
+
+	// 2. Struct
+	user := User{Name: "John Doe", Email: "john@example.com", Age: 30}
+	err = originalStore.Put("user", user)
+	assert.NoError(t, err)
+
+	// 3. Entry with TTL
+	err = originalStore.PutWithTTL("expiring", 42, 1*time.Hour)
+	assert.NoError(t, err)
+
+	// 4. Entry with metadata
+	meta := NewMetadata()
+	meta.AddTag("important")
+	meta.SetProperty("priority", 1)
+	meta.Description = "Test metadata"
+
+	nested := Nested{
+		Title: "Test Nested",
+		Count: 5,
+		Data: map[string]string{
+			"key1": "value1",
+			"key2": "value2",
+		},
+	}
+	err = originalStore.PutWithMetadata("nested", nested, meta)
+	assert.NoError(t, err)
+
+	// Test basic Clone() functionality
+	t.Run("clone_basic", func(t *testing.T) {
+		// Clone the store
+		clonedStore := originalStore.Clone()
+
+		// Verify store count
+		assert.Equal(t, originalStore.Count(), clonedStore.Count())
+
+		// Check every key exists
+		assert.Contains(t, clonedStore.ListKeys(), "simple")
+		assert.Contains(t, clonedStore.ListKeys(), "user")
+		assert.Contains(t, clonedStore.ListKeys(), "expiring")
+		assert.Contains(t, clonedStore.ListKeys(), "nested")
+
+		// Check basic value
+		simpleVal, err := Get[string](clonedStore, "simple")
+		assert.NoError(t, err)
+		assert.Equal(t, "hello world", simpleVal)
+
+		// Check struct data
+		userVal, err := Get[User](clonedStore, "user")
+		assert.NoError(t, err)
+		assert.Equal(t, "John Doe", userVal.Name)
+		assert.Equal(t, "john@example.com", userVal.Email)
+		assert.Equal(t, 30, userVal.Age)
+
+		// Check nested struct
+		nestedVal, err := Get[Nested](clonedStore, "nested")
+		assert.NoError(t, err)
+		assert.Equal(t, "Test Nested", nestedVal.Title)
+		assert.Equal(t, 5, nestedVal.Count)
+		assert.Equal(t, "value1", nestedVal.Data["key1"])
+		assert.Equal(t, "value2", nestedVal.Data["key2"])
+	})
+
+	// Test metadata cloning
+	t.Run("clone_metadata", func(t *testing.T) {
+		clonedStore := originalStore.Clone()
+
+		// Check metadata was cloned
+		meta, err := clonedStore.GetMetadata("nested")
+		assert.NoError(t, err)
+		assert.NotNil(t, meta)
+
+		// Check tags
+		assert.Contains(t, meta.Tags, "important")
+
+		// Check properties
+		priority, exists := meta.GetProperty("priority")
+		assert.True(t, exists)
+		assert.Equal(t, 1, priority)
+
+		// Check description
+		assert.Equal(t, "Test metadata", meta.Description)
+	})
+
+	// Test reference isolation
+	t.Run("clone_isolation", func(t *testing.T) {
+		clonedStore := originalStore.Clone()
+
+		// 1. Modify original - should not affect clone
+		originalStore.Put("simple", "modified value")
+		simpleVal, err := Get[string](clonedStore, "simple")
+		assert.NoError(t, err)
+		assert.Equal(t, "hello world", simpleVal, "Clone should not be affected by changes to original")
+
+		// 2. Modify clone - should not affect original
+		clonedStore.Put("user", User{Name: "Jane Doe", Email: "jane@example.com", Age: 25})
+		userVal, err := Get[User](originalStore, "user")
+		assert.NoError(t, err)
+		assert.Equal(t, "John Doe", userVal.Name, "Original should not be affected by changes to clone")
+
+		// 3. Modify metadata in original - should not affect clone
+		origMeta, _ := originalStore.GetMetadata("nested")
+		origMeta.AddTag("new-tag")
+
+		cloneMeta, _ := clonedStore.GetMetadata("nested")
+		assert.NotContains(t, cloneMeta.Tags, "new-tag", "Clone metadata should not be affected by changes to original metadata")
+
+		// 4. Modify metadata in clone - should not affect original
+		cloneMeta.AddTag("clone-only")
+
+		origMeta, _ = originalStore.GetMetadata("nested")
+		assert.NotContains(t, origMeta.Tags, "clone-only", "Original metadata should not be affected by changes to clone metadata")
+	})
+
+	// Test TTL preservation
+	t.Run("clone_ttl", func(t *testing.T) {
+		// Add a short TTL entry to test
+		originalStore.PutWithTTL("quick-expire", "will expire", 50*time.Millisecond)
+
+		// Clone immediately
+		clonedStore := originalStore.Clone()
+
+		// Verify entry exists in both stores
+		_, err := Get[string](originalStore, "quick-expire")
+		assert.NoError(t, err)
+
+		_, err = Get[string](clonedStore, "quick-expire")
+		assert.NoError(t, err)
+
+		// Wait for expiration
+		time.Sleep(100 * time.Millisecond)
+
+		// Verify entry expired in both stores
+		_, err = Get[string](originalStore, "quick-expire")
+		assert.Error(t, err)
+		assert.Equal(t, ErrExpired, err)
+
+		_, err = Get[string](clonedStore, "quick-expire")
+		assert.Error(t, err)
+		assert.Equal(t, ErrExpired, err)
+	})
+
+	// Test CloneFrom
+	t.Run("clone_from", func(t *testing.T) {
+		// Test with a valid store
+		newStore := CloneFrom(originalStore)
+		assert.Equal(t, originalStore.Count(), newStore.Count())
+
+		// Test with nil
+		nilStore := CloneFrom(nil)
+		assert.NotNil(t, nilStore)
+		assert.Equal(t, 0, nilStore.Count())
+	})
+}
+
+// TestCopyFrom tests copying entries from one store to another
+func TestCopyFrom(t *testing.T) {
+	// Define test types
+	type Item struct {
+		ID    string
+		Value int
+	}
+
+	// Setup the source store
+	sourceStore := NewKVStore()
+
+	// Populate source store
+	err := sourceStore.Put("key1", "value1")
+	assert.NoError(t, err)
+
+	err = sourceStore.Put("key2", 123)
+	assert.NoError(t, err)
+
+	item := Item{ID: "item1", Value: 42}
+	err = sourceStore.Put("item", item)
+	assert.NoError(t, err)
+
+	meta := NewMetadata()
+	meta.AddTag("source")
+	meta.SetProperty("source-prop", true)
+	err = sourceStore.PutWithMetadata("meta-key", "metadata-value", meta)
+	assert.NoError(t, err)
+
+	err = sourceStore.PutWithTTL("ttl-key", "expires", 1*time.Hour)
+	assert.NoError(t, err)
+
+	t.Run("copy_to_empty_store", func(t *testing.T) {
+		// Create empty destination store
+		destStore := NewKVStore()
+
+		// Copy from source to destination
+		copied, err := destStore.CopyFrom(sourceStore)
+		assert.NoError(t, err)
+		assert.Equal(t, 5, copied) // Should copy all 5 entries
+
+		// Verify all keys were copied
+		assert.Equal(t, 5, destStore.Count())
+
+		// Verify values were copied correctly
+		val1, err := Get[string](destStore, "key1")
+		assert.NoError(t, err)
+		assert.Equal(t, "value1", val1)
+
+		val2, err := Get[int](destStore, "key2")
+		assert.NoError(t, err)
+		assert.Equal(t, 123, val2)
+
+		itemVal, err := Get[Item](destStore, "item")
+		assert.NoError(t, err)
+		assert.Equal(t, "item1", itemVal.ID)
+		assert.Equal(t, 42, itemVal.Value)
+
+		// Verify metadata was copied
+		meta, err := destStore.GetMetadata("meta-key")
+		assert.NoError(t, err)
+		assert.True(t, meta.HasTag("source"))
+		prop, exists := meta.GetProperty("source-prop")
+		assert.True(t, exists)
+		assert.Equal(t, true, prop)
+	})
+
+	t.Run("copy_with_existing_entries", func(t *testing.T) {
+		// Create destination with some existing entries
+		destStore := NewKVStore()
+
+		// Add some entries to destination, including one with same key as source
+		err := destStore.Put("key1", "dest-value") // Same key as in source
+		assert.NoError(t, err)
+
+		err = destStore.Put("dest-only", "only in dest")
+		assert.NoError(t, err)
+
+		// Copy from source to destination
+		copied, err := destStore.CopyFrom(sourceStore)
+		assert.NoError(t, err)
+		assert.Equal(t, 4, copied) // Should copy 4 entries (skipping key1)
+
+		// Verify destination has both unique keys from source and dest
+		assert.Equal(t, 6, destStore.Count())
+
+		// Verify the conflicting key was not overwritten
+		val1, err := Get[string](destStore, "key1")
+		assert.NoError(t, err)
+		assert.Equal(t, "dest-value", val1, "Existing value should not be overwritten")
+
+		// Verify original dest entry still exists
+		destOnly, err := Get[string](destStore, "dest-only")
+		assert.NoError(t, err)
+		assert.Equal(t, "only in dest", destOnly)
+
+		// Verify new entries from source were added
+		val2, err := Get[int](destStore, "key2")
+		assert.NoError(t, err)
+		assert.Equal(t, 123, val2)
+	})
+
+	t.Run("copy_with_expired_entries", func(t *testing.T) {
+		// Create source with an expired entry
+		tempSource := NewKVStore()
+
+		// Add a regular entry
+		err := tempSource.Put("permanent", "stays")
+		assert.NoError(t, err)
+
+		// Add an entry that will expire
+		err = tempSource.PutWithTTL("will-expire", "gone", 10*time.Millisecond)
+		assert.NoError(t, err)
+
+		// Wait for expiration
+		time.Sleep(20 * time.Millisecond)
+
+		// Create destination
+		destStore := NewKVStore()
+
+		// Copy from source to destination
+		copied, err := destStore.CopyFrom(tempSource)
+		assert.NoError(t, err)
+		assert.Equal(t, 1, copied, "Should only copy the non-expired entry")
+
+		// Verify only non-expired entry exists
+		assert.Equal(t, 1, destStore.Count())
+		assert.Contains(t, destStore.ListKeys(), "permanent")
+		assert.NotContains(t, destStore.ListKeys(), "will-expire")
+	})
+
+	t.Run("copy_with_nil_source", func(t *testing.T) {
+		destStore := NewKVStore()
+
+		// Try to copy from nil source
+		copied, err := destStore.CopyFrom(nil)
+		assert.Error(t, err)
+		assert.Equal(t, 0, copied)
+		assert.Contains(t, err.Error(), "source store cannot be nil")
+	})
+
+	t.Run("reference_isolation", func(t *testing.T) {
+		// Create source and destination stores
+		source := NewKVStore()
+		dest := NewKVStore()
+
+		// Add complex data to source
+		nested := map[string]interface{}{
+			"nested1": "value1",
+			"nested2": 42,
+		}
+		err := source.Put("complex", nested)
+		assert.NoError(t, err)
+
+		// Copy to destination
+		copied, err := dest.CopyFrom(source)
+		assert.NoError(t, err)
+		assert.Equal(t, 1, copied)
+
+		// Modify source data
+		nested["nested1"] = "modified"
+		err = source.Put("complex", nested)
+		assert.NoError(t, err)
+
+		// Get data from destination - should not be affected
+		result, err := Get[map[string]interface{}](dest, "complex")
+		assert.NoError(t, err)
+		assert.Equal(t, "value1", result["nested1"], "Destination data should not be affected by source changes")
+	})
+}
+
+// TestCopyFromWithOverwrite tests copying entries with overwrite from one store to another
+func TestCopyFromWithOverwrite(t *testing.T) {
+	// Setup the source store
+	sourceStore := NewKVStore()
+
+	// Populate source store
+	err := sourceStore.Put("key1", "source-value1")
+	assert.NoError(t, err)
+
+	err = sourceStore.Put("key2", 123)
+	assert.NoError(t, err)
+
+	meta := NewMetadata()
+	meta.AddTag("source-tag")
+	err = sourceStore.PutWithMetadata("meta-key", "source-meta-value", meta)
+	assert.NoError(t, err)
+
+	// Setup the destination store
+	destStore := NewKVStore()
+
+	// Add some entries to destination with overlapping keys
+	err = destStore.Put("key1", "dest-value1") // Same key as in source
+	assert.NoError(t, err)
+
+	// Different destination metadata
+	destMeta := NewMetadata()
+	destMeta.AddTag("dest-tag")
+	err = destStore.PutWithMetadata("meta-key", "dest-meta-value", destMeta)
+	assert.NoError(t, err)
+
+	err = destStore.Put("dest-only", "only in dest")
+	assert.NoError(t, err)
+
+	t.Run("copy_with_overwrite", func(t *testing.T) {
+		// Make a copy of the destination for this test
+		testDest := destStore.Clone()
+
+		// Copy from source to destination with overwrite
+		copied, overwritten, err := testDest.CopyFromWithOverwrite(sourceStore)
+		assert.NoError(t, err)
+		assert.Equal(t, 1, copied, "Should copy 1 new entry")
+		assert.Equal(t, 2, overwritten, "Should overwrite 2 entries")
+
+		// Verify destination has entries from both
+		assert.Equal(t, 4, testDest.Count())
+
+		// Verify the conflicting keys were overwritten with source values
+		val1, err := Get[string](testDest, "key1")
+		assert.NoError(t, err)
+		assert.Equal(t, "source-value1", val1, "Existing value should be overwritten")
+
+		metaVal, err := Get[string](testDest, "meta-key")
+		assert.NoError(t, err)
+		assert.Equal(t, "source-meta-value", metaVal)
+
+		// Verify metadata was overwritten
+		meta, err := testDest.GetMetadata("meta-key")
+		assert.NoError(t, err)
+		assert.True(t, meta.HasTag("source-tag"))
+		assert.False(t, meta.HasTag("dest-tag"))
+
+		// Verify original dest entry still exists
+		destOnly, err := Get[string](testDest, "dest-only")
+		assert.NoError(t, err)
+		assert.Equal(t, "only in dest", destOnly)
+
+		// Verify new entries from source were added
+		val2, err := Get[int](testDest, "key2")
+		assert.NoError(t, err)
+		assert.Equal(t, 123, val2)
+	})
+
+	t.Run("metadata_isolation_after_overwrite", func(t *testing.T) {
+		// Make a copy of the destination for this test
+		testDest := destStore.Clone()
+
+		// Copy from source to destination with overwrite
+		copied, overwritten, err := testDest.CopyFromWithOverwrite(sourceStore)
+		assert.NoError(t, err)
+		assert.Greater(t, copied+overwritten, 0, "Should have copied or overwritten at least one entry")
+
+		// Get metadata from destination
+		destMeta, err := testDest.GetMetadata("meta-key")
+		assert.NoError(t, err)
+
+		// Get metadata from source
+		sourceMeta, err := sourceStore.GetMetadata("meta-key")
+		assert.NoError(t, err)
+
+		// Modify source metadata
+		sourceMeta.AddTag("new-source-tag")
+
+		// Verify destination metadata not affected
+		assert.False(t, destMeta.HasTag("new-source-tag"))
+
+		// Modify destination metadata
+		destMeta.AddTag("new-dest-tag")
+
+		// Verify source metadata not affected
+		assert.False(t, sourceMeta.HasTag("new-dest-tag"))
+	})
+
+	t.Run("copy_with_nil_source", func(t *testing.T) {
+		testDest := NewKVStore()
+
+		// Try to copy from nil source
+		copied, overwritten, err := testDest.CopyFromWithOverwrite(nil)
+		assert.Error(t, err)
+		assert.Equal(t, 0, copied)
+		assert.Equal(t, 0, overwritten)
+		assert.Contains(t, err.Error(), "source store cannot be nil")
+	})
+
+	t.Run("expired_entries", func(t *testing.T) {
+		// Create source with an expired entry
+		tempSource := NewKVStore()
+
+		// Add a regular entry
+		err := tempSource.Put("permanent", "stays")
+		assert.NoError(t, err)
+
+		// Add an entry that will expire
+		err = tempSource.PutWithTTL("will-expire", "gone", 10*time.Millisecond)
+		assert.NoError(t, err)
+
+		// Wait for expiration
+		time.Sleep(20 * time.Millisecond)
+
+		// Create destination
+		testDest := NewKVStore()
+
+		// Copy from source to destination
+		copied, overwritten, err := testDest.CopyFromWithOverwrite(tempSource)
+		assert.NoError(t, err)
+		assert.Equal(t, 1, copied, "Should only copy the non-expired entry")
+		assert.Equal(t, 0, overwritten)
+
+		// Verify only non-expired entry exists
+		assert.Equal(t, 1, testDest.Count())
+		assert.Contains(t, testDest.ListKeys(), "permanent")
+		assert.NotContains(t, testDest.ListKeys(), "will-expire")
 	})
 }

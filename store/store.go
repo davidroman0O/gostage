@@ -232,9 +232,44 @@ func (s *KVStore) GetTypeSchema(key string) (interface{}, error) {
 func TypeToSchema(t reflect.Type) interface{} {
 	instance := reflect.New(t).Interface()
 	reflector := jsonschema.Reflector{
-		ExpandedStruct: true,
+		ExpandedStruct:            true,
+		DoNotReference:            true,  // Avoid using $ref, which can make schema validation more complex
+		AllowAdditionalProperties: false, // Strictly match schema properties
 	}
-	return reflector.Reflect(instance)
+
+	// Get the schema and convert it to a map
+	schema := reflector.Reflect(instance)
+
+	// Marshal and unmarshal to convert to a map[string]interface{}
+	data, err := json.Marshal(schema)
+	if err != nil {
+		// Return a basic schema if marshaling fails
+		return map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		}
+	}
+
+	var schemaMap map[string]interface{}
+	if err := json.Unmarshal(data, &schemaMap); err != nil {
+		// Return a basic schema if unmarshaling fails
+		return map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		}
+	}
+
+	// Ensure type is set correctly if missing
+	if _, exists := schemaMap["type"]; !exists {
+		schemaMap["type"] = "object"
+	}
+
+	// Ensure properties exists
+	if _, exists := schemaMap["properties"]; !exists {
+		schemaMap["properties"] = map[string]interface{}{}
+	}
+
+	return schemaMap
 }
 
 // UpdateField updates a single field in a stored object using dot notation.
@@ -495,9 +530,17 @@ func SchemaMatch(target, pattern interface{}) bool {
 
 			// If the property is an object, recursively check
 			if propPatternMap, ok := assertToMap(propPattern); ok {
-				// Only check if target can be converted to map
-				if _, ok := assertToMap(propTarget); !ok {
+				propTargetMap, ok := assertToMap(propTarget)
+				if !ok {
 					return false
+				}
+
+				// Check if property type matches
+				if patternType, hasType := propPatternMap["type"]; hasType {
+					targetType, hasTargetType := propTargetMap["type"]
+					if !hasTargetType || patternType != targetType {
+						return false
+					}
 				}
 
 				// If it has properties, recurse
@@ -526,6 +569,10 @@ func SchemaMatch(target, pattern interface{}) bool {
 
 // assertToMap tries to convert an interface to a map[string]interface{}
 func assertToMap(v interface{}) (map[string]interface{}, bool) {
+	if v == nil {
+		return nil, false
+	}
+
 	if m, ok := v.(map[string]interface{}); ok {
 		return m, true
 	}
@@ -748,4 +795,248 @@ func (s *KVStore) FindKeysByProperty(propertyKey string, propertyValue interface
 		}
 	}
 	return keys
+}
+
+// Clone creates a new KVStore with a deep copy of all entries from this store.
+// The returned store will have the same data but no shared references with the original.
+func (s *KVStore) Clone() *KVStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Create a new store
+	newStore := NewKVStore()
+
+	// Copy all entries, handling expired keys
+	for key, e := range s.data {
+		// Skip expired entries
+		if e.expiresAt != nil && time.Now().After(*e.expiresAt) {
+			continue
+		}
+
+		// Create a new instance of the stored value
+		instance := reflect.New(e.typ).Interface()
+		if err := json.Unmarshal(e.blob, instance); err != nil {
+			// Skip problematic entries
+			continue
+		}
+
+		// Get the actual value (not the pointer)
+		value := reflect.ValueOf(instance).Elem().Interface()
+
+		// Handle TTL if present
+		var ttl time.Duration
+		if e.expiresAt != nil {
+			ttl = time.Until(*e.expiresAt)
+			if ttl <= 0 {
+				continue // Skip if expired during processing
+			}
+		}
+
+		// Handle metadata if present
+		var metadata *Metadata
+		if e.metadata != nil {
+			metadata = &Metadata{
+				Tags:        append([]string{}, e.metadata.Tags...),
+				Properties:  make(map[string]interface{}),
+				Description: e.metadata.Description,
+				CreatedAt:   e.metadata.CreatedAt,
+				UpdatedAt:   e.metadata.UpdatedAt,
+			}
+			// Deep copy properties
+			for k, v := range e.metadata.Properties {
+				metadata.Properties[k] = v
+			}
+		}
+
+		// Add to new store with the same properties
+		if metadata != nil {
+			if ttl > 0 {
+				newStore.PutWithTTLAndMetadata(key, value, ttl, metadata)
+			} else {
+				newStore.PutWithMetadata(key, value, metadata)
+			}
+		} else {
+			if ttl > 0 {
+				newStore.PutWithTTL(key, value, ttl)
+			} else {
+				newStore.Put(key, value)
+			}
+		}
+	}
+
+	return newStore
+}
+
+// CloneFrom creates a new KVStore with all entries copied from the provided store.
+// This is a static helper method that internally calls Clone().
+func CloneFrom(source *KVStore) *KVStore {
+	if source == nil {
+		return NewKVStore()
+	}
+	return source.Clone()
+}
+
+// CopyFrom copies all entries from the source store into this store.
+// This is a deep copy operation, so no references are shared between the stores.
+// Existing entries in the destination store are preserved, and only non-existing keys are copied.
+// Returns the number of entries copied.
+func (s *KVStore) CopyFrom(source *KVStore) (int, error) {
+	if source == nil {
+		return 0, errors.New("source store cannot be nil")
+	}
+
+	// First read all data from source store with only a read lock
+	source.mu.RLock()
+	entriesToCopy := make(map[string]entry)
+	for key, e := range source.data {
+		// Skip expired entries
+		if e.expiresAt != nil && time.Now().After(*e.expiresAt) {
+			continue
+		}
+		entriesToCopy[key] = e
+	}
+	source.mu.RUnlock()
+
+	// Then lock the destination store to modify it
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	copied := 0
+
+	// Copy entries that don't already exist in the destination
+	for key, e := range entriesToCopy {
+		// Skip keys that already exist in the destination
+		if _, exists := s.data[key]; exists {
+			continue
+		}
+
+		// Create a new instance of the stored value for validation
+		// This ensures the blob can be unmarshaled to the specified type
+		instance := reflect.New(e.typ).Interface()
+		if err := json.Unmarshal(e.blob, instance); err != nil {
+			// Skip problematic entries
+			continue
+		}
+
+		// Handle TTL if present
+		var ttl time.Duration
+		if e.expiresAt != nil {
+			ttl = time.Until(*e.expiresAt)
+			if ttl <= 0 {
+				continue // Skip if expired during processing
+			}
+		}
+
+		// Handle metadata if present
+		var metadata *Metadata
+		if e.metadata != nil {
+			metadata = &Metadata{
+				Tags:        append([]string{}, e.metadata.Tags...),
+				Properties:  make(map[string]interface{}),
+				Description: e.metadata.Description,
+				CreatedAt:   e.metadata.CreatedAt,
+				UpdatedAt:   e.metadata.UpdatedAt,
+			}
+			// Deep copy properties
+			for k, v := range e.metadata.Properties {
+				metadata.Properties[k] = v
+			}
+		}
+
+		// Create the entry directly in the destination's data map
+		var expiresAt *time.Time
+		if ttl > 0 {
+			exp := time.Now().Add(ttl)
+			expiresAt = &exp
+		}
+
+		// Create the entry directly
+		s.data[key] = entry{typ: e.typ, blob: e.blob, expiresAt: expiresAt, metadata: metadata}
+		copied++
+	}
+
+	return copied, nil
+}
+
+// CopyFromWithOverwrite copies all entries from the source store into this store,
+// overwriting any existing entries in the destination with the same keys.
+// This is a deep copy operation, so no references are shared between the stores.
+// Returns the number of entries copied and the number of entries overwritten.
+func (s *KVStore) CopyFromWithOverwrite(source *KVStore) (copied int, overwritten int, err error) {
+	if source == nil {
+		return 0, 0, errors.New("source store cannot be nil")
+	}
+
+	// First read all data from source store with only a read lock
+	source.mu.RLock()
+	entriesToCopy := make(map[string]entry)
+	for key, e := range source.data {
+		// Skip expired entries
+		if e.expiresAt != nil && time.Now().After(*e.expiresAt) {
+			continue
+		}
+		entriesToCopy[key] = e
+	}
+	source.mu.RUnlock()
+
+	// Then lock the destination store to modify it
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Copy all entries
+	for key, e := range entriesToCopy {
+		// Check if key exists in destination
+		_, exists := s.data[key]
+
+		// Create a new instance of the stored value for validation
+		// This ensures the blob can be unmarshaled to the specified type
+		instance := reflect.New(e.typ).Interface()
+		if err := json.Unmarshal(e.blob, instance); err != nil {
+			// Skip problematic entries
+			continue
+		}
+
+		// Handle TTL if present
+		var ttl time.Duration
+		if e.expiresAt != nil {
+			ttl = time.Until(*e.expiresAt)
+			if ttl <= 0 {
+				continue // Skip if expired during processing
+			}
+		}
+
+		// Handle metadata if present
+		var metadata *Metadata
+		if e.metadata != nil {
+			metadata = &Metadata{
+				Tags:        append([]string{}, e.metadata.Tags...),
+				Properties:  make(map[string]interface{}),
+				Description: e.metadata.Description,
+				CreatedAt:   e.metadata.CreatedAt,
+				UpdatedAt:   e.metadata.UpdatedAt,
+			}
+			// Deep copy properties
+			for k, v := range e.metadata.Properties {
+				metadata.Properties[k] = v
+			}
+		}
+
+		// Create the entry directly in the destination's data map
+		var expiresAt *time.Time
+		if ttl > 0 {
+			exp := time.Now().Add(ttl)
+			expiresAt = &exp
+		}
+
+		// Create the entry directly
+		s.data[key] = entry{typ: e.typ, blob: e.blob, expiresAt: expiresAt, metadata: metadata}
+
+		if exists {
+			overwritten++
+		} else {
+			copied++
+		}
+	}
+
+	return copied, overwritten, nil
 }
