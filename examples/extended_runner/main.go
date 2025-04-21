@@ -91,6 +91,13 @@ func (m *ResourceManager) GetActiveEnvironments() []*DeploymentEnvironment {
 	return result
 }
 
+// UpdateResource updates a resource with the given properties
+func (m *ResourceManager) UpdateResource(resourceID string, properties map[string]interface{}) error {
+	// In a real implementation, this would update resource properties in a database or other storage
+	fmt.Printf("Updating resource %s with properties: %v\n", resourceID, properties)
+	return nil
+}
+
 // ExtendedRunner extends the basic runner with domain-specific functionality
 type ExtendedRunner struct {
 	// Embed the base runner
@@ -209,18 +216,18 @@ func (r *ExtendedRunner) Execute(ctx context.Context, wf *gostage.Workflow, logg
 
 // GetResourceManager retrieves the resource manager from the context
 func GetResourceManager(ctx *gostage.ActionContext) (*ResourceManager, error) {
-	return store.Get[*ResourceManager](ctx.Store, "system.resourceManager")
+	return store.Get[*ResourceManager](ctx.Store(), "system.resourceManager")
 }
 
 // GetDeploymentEnvironment retrieves the current deployment environment
 func GetDeploymentEnvironment(ctx *gostage.ActionContext) (*DeploymentEnvironment, error) {
-	return store.Get[*DeploymentEnvironment](ctx.Store, "deployment.environment")
+	return store.Get[*DeploymentEnvironment](ctx.Store(), "deployment.environment")
 }
 
 // GetConfig retrieves a configuration value directly from the store
 func GetConfig(ctx *gostage.ActionContext, key string) (string, error) {
 	configKey := "config." + key
-	value, err := store.Get[string](ctx.Store, configKey)
+	value, err := store.Get[string](ctx.Store(), configKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to get config value for %s: %w", key, err)
 	}
@@ -297,6 +304,46 @@ func CreateDeploymentWorkflow() *gostage.Workflow {
 	wf.AddStage(deployStage)
 
 	return wf
+}
+
+// UpdateResourceAction updates a resource
+type UpdateResourceAction struct {
+	gostage.BaseAction
+}
+
+// Execute performs the update
+func (a *UpdateResourceAction) Execute(ctx *gostage.ActionContext) error {
+	// Get the resource manager from the store
+	resourceManager, err := store.Get[*ResourceManager](ctx.Store(), "resource.manager")
+	if err != nil {
+		return fmt.Errorf("failed to get resource manager: %w", err)
+	}
+
+	// Get deployment environment
+	deployEnv, err := store.Get[*DeploymentEnvironment](ctx.Store(), "deployment.environment")
+	if err != nil {
+		return fmt.Errorf("failed to get deployment environment: %w", err)
+	}
+
+	// Get resource ID to update
+	resourceID, err := store.Get[string](ctx.Store(), "resource.id")
+	if err != nil {
+		return fmt.Errorf("failed to get resource ID: %w", err)
+	}
+
+	// Perform the update using the resource manager
+	ctx.Logger.Info("Updating resource %s in environment %s", resourceID, deployEnv.Name)
+	err = resourceManager.UpdateResource(resourceID, map[string]interface{}{
+		"environment": deployEnv.Name,
+		"updatedAt":   time.Now().Format(time.RFC3339),
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to update resource: %w", err)
+	}
+
+	ctx.Logger.Info("Resource %s updated successfully", resourceID)
+	return nil
 }
 
 // Main function to run the example

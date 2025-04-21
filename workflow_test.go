@@ -86,13 +86,13 @@ func TestWorkflowExecution(t *testing.T) {
 
 	// Create a stage with initial store data
 	stage := NewStage("test-stage", "Test Stage", "A test stage")
-	err = stage.InitialStore.Put("stage-key", "stage-value")
+	err = stage.SetInitialData("stage-key", "stage-value")
 	assert.NoError(t, err)
 
 	// Add an action that checks the stores
 	action := NewTestAction("test-action", "Test Action", func(ctx *ActionContext) error {
 		// Check workflow key exists
-		val, err := store.Get[string](ctx.Store, "workflow-key")
+		val, err := store.Get[string](ctx.Store(), "workflow-key")
 		if err != nil {
 			return fmt.Errorf("workflow key not found: %w", err)
 		}
@@ -101,7 +101,7 @@ func TestWorkflowExecution(t *testing.T) {
 		}
 
 		// Check stage key exists (should be merged into workflow store)
-		val, err = store.Get[string](ctx.Store, "stage-key")
+		val, err = store.Get[string](ctx.Store(), "stage-key")
 		if err != nil {
 			return fmt.Errorf("stage key not found: %w", err)
 		}
@@ -110,7 +110,7 @@ func TestWorkflowExecution(t *testing.T) {
 		}
 
 		// Set a new key
-		err = ctx.Store.Put("action-key", "action-value")
+		err = ctx.Store().Put("action-key", "action-value")
 		if err != nil {
 			return fmt.Errorf("failed to set action key: %w", err)
 		}
@@ -243,7 +243,6 @@ func TestActionTags(t *testing.T) {
 		Workflow:  workflow,
 		Stage:     stage,
 		Action:    nil,
-		Store:     workflow.Store,
 		Logger:    logger,
 	}
 
@@ -296,4 +295,60 @@ func TestStageAndWorkflowTags(t *testing.T) {
 	stagesByUniqueTag := workflow.ListStagesByTag("unique-tag")
 	assert.Len(t, stagesByUniqueTag, 1)
 	assert.Equal(t, "stage2", stagesByUniqueTag[0].ID)
+}
+
+// TestWorkflowWithStage tests creating a workflow with a stage that has initial data
+func TestWorkflowWithStage(t *testing.T) {
+	// Create a workflow
+	workflow := NewWorkflow("test-wf", "Test Workflow", "A test workflow")
+	workflow.Store.Put("workflow-key", "workflow-value")
+
+	// Create a stage with initial data
+	stage := NewStage("test-stage", "Test Stage", "A test stage")
+	stage.SetInitialData("stage-key", "stage-value")
+
+	// Add an action to the stage
+	stage.AddAction(NewTestAction("test-action", "Test Action", func(ctx *ActionContext) error {
+		// Check workflow key exists
+		val, err := store.Get[string](ctx.Store(), "workflow-key")
+		if err != nil {
+			return fmt.Errorf("workflow key not found: %w", err)
+		}
+		if val != "workflow-value" {
+			return fmt.Errorf("expected workflow-value, got %s", val)
+		}
+
+		// Check stage key exists (should be merged into workflow store)
+		val, err = store.Get[string](ctx.Store(), "stage-key")
+		if err != nil {
+			return fmt.Errorf("stage key not found: %w", err)
+		}
+		if val != "stage-value" {
+			return fmt.Errorf("expected stage-value, got %s", val)
+		}
+
+		// Set a new key
+		err = ctx.Store().Put("action-key", "action-value")
+		if err != nil {
+			return fmt.Errorf("failed to set action key: %w", err)
+		}
+
+		return nil
+	}))
+
+	// Add the stage to the workflow
+	workflow.AddStage(stage)
+
+	// Create a runner and execute the workflow
+	runner := NewRunner()
+	options := DefaultRunOptions()
+	options.Logger = &TestLogger{t: t}
+
+	result := runner.ExecuteWithOptions(workflow, options)
+	assert.True(t, result.Success)
+
+	// Verify action key was set
+	val, err := store.Get[string](workflow.Store, "action-key")
+	assert.NoError(t, err)
+	assert.Equal(t, "action-value", val)
 }

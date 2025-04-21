@@ -31,7 +31,7 @@ func NewSimpleAction(name, description string, fn func(ctx context.Context, stor
 func (a *SimpleAction) Execute(ctx *gostage.ActionContext) error {
 	fmt.Printf("SimpleAction Execute called for action: %s\n", a.name)
 	if a.executeFunc != nil {
-		return a.executeFunc(ctx.GoContext, ctx.Store)
+		return a.executeFunc(ctx.GoContext, ctx.Store())
 	}
 	return nil
 }
@@ -344,52 +344,52 @@ func (a *FailingAction) Tags() []string {
 
 // CounterAction is an action that fails a certain number of times before succeeding
 type CounterAction struct {
-	name        string
-	failUntil   int
-	currentTry  int
-	successData string
+	gostage.BaseAction
+	count       int
+	successData map[string]interface{}
 }
 
 // NewCounterAction creates a new counter action
-func NewCounterAction(name string, failUntil int, successData string) *CounterAction {
+func NewCounterAction(name string, count int, successData map[string]interface{}) *CounterAction {
 	return &CounterAction{
-		name:        name,
-		failUntil:   failUntil,
-		currentTry:  0,
+		BaseAction:  gostage.NewBaseAction(name, fmt.Sprintf("Action that counts to %d", count)),
+		count:       count,
 		successData: successData,
 	}
 }
 
-// Execute implements the Action interface
+// Execute counts to the specified number
 func (a *CounterAction) Execute(ctx *gostage.ActionContext) error {
-	a.currentTry++
-	if a.currentTry <= a.failUntil {
-		return fmt.Errorf("action %s: attempt %d of %d failed deliberately", a.name, a.currentTry, a.failUntil)
+	// Simulating some work
+	result := 0
+	for i := 1; i <= a.count; i++ {
+		result += i
 	}
 
-	// Success after the specified number of failures
-	ctx.Store.Put("counter.result", a.successData)
+	// Store the result
+	ctx.Store().Put("counter.result", a.successData)
+
 	return nil
 }
 
 // GetName implements the Action interface
 func (a *CounterAction) GetName() string {
-	return a.name
+	return a.Name()
 }
 
-// Name implements the Action interface
+// Name implements the Action interface - inherit from BaseAction
 func (a *CounterAction) Name() string {
-	return a.name
+	return a.BaseAction.Name()
 }
 
-// Description implements the Action interface
+// Description implements the Action interface - inherit from BaseAction
 func (a *CounterAction) Description() string {
-	return fmt.Sprintf("Action that succeeds after %d failures", a.failUntil)
+	return a.BaseAction.Description()
 }
 
-// Tags returns the action's tags
+// Tags implements the Action interface
 func (a *CounterAction) Tags() []string {
-	return []string{}
+	return []string{"counter"}
 }
 
 // CreateMiddlewareTestWorkflow creates a test workflow for demonstrating middleware
@@ -425,7 +425,7 @@ func CreateMiddlewareTestWorkflow(shouldFail bool) *gostage.Workflow {
 	}
 
 	// Add a counter action that will succeed after 2 failures
-	counterAction := NewCounterAction("counter-action", 2, "Success data after retries")
+	counterAction := NewCounterAction("counter-action", 2, map[string]interface{}{"Success data after retries": "Success data after retries"})
 	stage1.AddAction(counterAction)
 
 	// Add the stage to the workflow
@@ -565,6 +565,70 @@ func LoggingMiddleware() gostage.Middleware {
 			}
 
 			return err
+		}
+	}
+}
+
+// TrackedAction wraps another action to track its execution
+type TrackedAction struct {
+	gostage.BaseAction
+	wrappedAction gostage.Action
+	executeFunc   func(ctx *gostage.ActionContext) error
+}
+
+// Execute implements the Action interface for TrackedAction
+func (a *TrackedAction) Execute(ctx *gostage.ActionContext) error {
+	if a.executeFunc != nil {
+		return a.executeFunc(ctx)
+	}
+	return a.wrappedAction.Execute(ctx)
+}
+
+// Tags returns the wrapped action's tags
+func (a *TrackedAction) Tags() []string {
+	return a.wrappedAction.Tags()
+}
+
+// TrackingMiddleware creates a middleware that tracks execution of actions
+func TrackingMiddleware() gostage.Middleware {
+	return func(next gostage.RunnerFunc) gostage.RunnerFunc {
+		return func(ctx context.Context, workflow *gostage.Workflow, logger gostage.Logger) error {
+			// Wrap all actions with tracking capability
+			for _, stage := range workflow.Stages {
+				for i, action := range stage.Actions {
+					// Replace the action with a wrapped version
+					stage.Actions[i] = &TrackedAction{
+						BaseAction: gostage.NewBaseAction(
+							action.Name(),
+							action.Description(),
+						),
+						wrappedAction: action,
+						executeFunc: func(ctx *gostage.ActionContext) error {
+							// Before execution
+							startTime := time.Now()
+							logger.Debug("Starting action: %s", action.Name())
+
+							// Execute the wrapped action
+							err := action.Execute(ctx)
+
+							// After execution
+							duration := time.Since(startTime)
+							if err != nil {
+								logger.Error("Action %s failed after %v: %v",
+									action.Name(), duration, err)
+							} else {
+								logger.Debug("Action %s completed in %v",
+									action.Name(), duration)
+							}
+
+							return err
+						},
+					}
+				}
+			}
+
+			// Continue with execution
+			return next(ctx, workflow, logger)
 		}
 	}
 }

@@ -21,9 +21,10 @@ const (
 
 // Resource represents a discovered resource
 type Resource struct {
-	ID   string       `json:"id"`
-	Type ResourceType `json:"type"`
-	Name string       `json:"name"`
+	ID       string       `json:"id"`
+	Type     ResourceType `json:"type"`
+	Name     string       `json:"name"`
+	Critical bool         `json:"critical"`
 }
 
 // ResourceFinderAction discovers resources and generates stages for each type
@@ -45,51 +46,42 @@ func (a *ResourceFinderAction) Execute(ctx *gostage.ActionContext) error {
 	// In a real implementation, this would discover actual resources
 	// For this example, we'll simulate finding different resource types
 	resources := []Resource{
-		{ID: "db1", Type: ResourceDatabase, Name: "User Database"},
-		{ID: "s3bucket", Type: ResourceStorage, Name: "Asset Storage"},
-		{ID: "vm1", Type: ResourceCompute, Name: "Application Server"},
-		{ID: "vpc1", Type: ResourceNetwork, Name: "Main VPC"},
+		{ID: "db1", Type: ResourceDatabase, Name: "User Database", Critical: true},
+		{ID: "s3bucket", Type: ResourceStorage, Name: "Asset Storage", Critical: false},
+		{ID: "vm1", Type: ResourceCompute, Name: "Application Server", Critical: true},
+		{ID: "vpc1", Type: ResourceNetwork, Name: "Main VPC", Critical: false},
 	}
 
 	// Store the resources for reference
-	ctx.Store.Put("discovered.resources", resources)
+	ctx.Store().Put("discovered.resources", resources)
 	ctx.Logger.Info("Discovered %d resources", len(resources))
 
-	// Create resource-specific stages based on discovered resources
-	resourceTypes := map[ResourceType]bool{}
-
-	// Group by resource type
+	// For each discovered resource, create a processing stage
 	for _, resource := range resources {
-		resourceTypes[resource.Type] = true
-	}
-
-	// Create a stage for each resource type
-	for resourceType := range resourceTypes {
 		// Create a new stage for this resource type
-		stageName := fmt.Sprintf("%s-resources", resourceType)
-		stageID := fmt.Sprintf("process-%s", resourceType)
-		stageDescription := fmt.Sprintf("Process %s resources", resourceType)
-
-		stage := gostage.NewStageWithTags(
-			stageID,
-			stageName,
-			stageDescription,
-			[]string{string(resourceType), "dynamic"},
+		stage := gostage.NewStage(
+			fmt.Sprintf("process-%s", resource.Type),
+			fmt.Sprintf("Process %s Resources", resource.Type),
+			fmt.Sprintf("Process all %s resources", resource.Type),
 		)
 
-		// Store the resource type in the stage's initial store
-		stage.InitialStore.Put("resource.type", string(resourceType))
+		// Add appropriate tags
+		stage.AddTag(string(resource.Type))
 
-		// Add resource-specific actions to the stage
-		stage.AddAction(NewResourceProcessorAction(
-			fmt.Sprintf("process-%s", resourceType),
-			fmt.Sprintf("Process %s Resources", resourceType),
-			resourceType,
-		))
+		// Add initial data to the stage's store
+		stage.SetInitialData("resource.type", resource.Type)
 
-		// Add the stage to be inserted after the current stage
+		// Add the appropriate action for this resource type
+		stage.AddAction(&ResourceProcessorAction{
+			BaseAction: gostage.NewBaseAction(
+				fmt.Sprintf("process-%s", resource.Type),
+				fmt.Sprintf("Process %s Resources", resource.Type),
+			),
+			resourceType: resource.Type,
+		})
+
+		// Add this stage to be executed after the current one
 		ctx.AddDynamicStage(stage)
-		ctx.Logger.Info("Created dynamic stage for %s resources", resourceType)
 	}
 
 	return nil
@@ -112,7 +104,7 @@ func NewResourceProcessorAction(name, description string, resourceType ResourceT
 // Execute processes resources of a specific type
 func (a *ResourceProcessorAction) Execute(ctx *gostage.ActionContext) error {
 	// Get all discovered resources
-	resources, err := store.Get[[]Resource](ctx.Store, "discovered.resources")
+	resources, err := store.Get[[]Resource](ctx.Store(), "discovered.resources")
 	if err != nil {
 		return fmt.Errorf("failed to get resources: %w", err)
 	}
@@ -133,7 +125,7 @@ func (a *ResourceProcessorAction) Execute(ctx *gostage.ActionContext) error {
 
 		// Store processing results
 		resultKey := fmt.Sprintf("processed.%s.%s", a.resourceType, resource.ID)
-		ctx.Store.Put(resultKey, true)
+		ctx.Store().Put(resultKey, true)
 	}
 
 	// Generate new dynamic actions based on processed resources
@@ -169,7 +161,7 @@ func (a *ResourceBackupAction) Execute(ctx *gostage.ActionContext) error {
 	ctx.Logger.Info("Backing up %s resources...", a.resourceType)
 
 	// Get all discovered resources
-	resources, err := store.Get[[]Resource](ctx.Store, "discovered.resources")
+	resources, err := store.Get[[]Resource](ctx.Store(), "discovered.resources")
 	if err != nil {
 		return fmt.Errorf("failed to get resources: %w", err)
 	}
@@ -188,7 +180,7 @@ func (a *ResourceBackupAction) Execute(ctx *gostage.ActionContext) error {
 		ctx.Logger.Info("Created backup for %s: %s", resource.Name, backupID)
 
 		// Store backup metadata
-		ctx.Store.Put(fmt.Sprintf("backup.%s", resource.ID), backupID)
+		ctx.Store().Put(fmt.Sprintf("backup.%s", resource.ID), backupID)
 	}
 
 	return nil
@@ -252,7 +244,7 @@ func (a *ReportAction) Execute(ctx *gostage.ActionContext) error {
 	ctx.Logger.Info("Generating resource processing report")
 
 	// Get all discovered resources
-	resources, err := store.Get[[]Resource](ctx.Store, "discovered.resources")
+	resources, err := store.Get[[]Resource](ctx.Store(), "discovered.resources")
 	if err != nil {
 		return fmt.Errorf("failed to get resources: %w", err)
 	}
@@ -264,13 +256,13 @@ func (a *ReportAction) Execute(ctx *gostage.ActionContext) error {
 	for _, resource := range resources {
 		// Count processed resources
 		resultKey := fmt.Sprintf("processed.%s.%s", resource.Type, resource.ID)
-		if processed, err := store.Get[bool](ctx.Store, resultKey); err == nil && processed {
+		if processed, err := store.Get[bool](ctx.Store(), resultKey); err == nil && processed {
 			summary[resource.Type]++
 		}
 
 		// Count backed up resources
 		backupKey := fmt.Sprintf("backup.%s", resource.ID)
-		if _, err := store.Get[string](ctx.Store, backupKey); err == nil {
+		if _, err := store.Get[string](ctx.Store(), backupKey); err == nil {
 			backed[resource.Type]++
 		}
 	}
@@ -282,7 +274,7 @@ func (a *ReportAction) Execute(ctx *gostage.ActionContext) error {
 	}
 
 	// Store report for future reference
-	ctx.Store.Put("processing.report", map[string]interface{}{
+	ctx.Store().Put("processing.report", map[string]interface{}{
 		"summary": summary,
 		"backups": backed,
 	})

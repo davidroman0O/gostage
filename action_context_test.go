@@ -75,35 +75,45 @@ func TestExtendedActionFiltering(t *testing.T) {
 
 // Helper to create a standard workflow setup for context tests
 func setupActionContextTest(t *testing.T) (*Workflow, *ActionContext) {
-	wf := NewWorkflow("ctx-test-wf", "Context Test Workflow", "Workflow for testing ActionContext")
+	// Create a workflow with stages and actions
+	wf := NewWorkflow("test-wf", "Test Workflow", "Test workflow for action context")
 
-	stage1 := NewStageWithTags("stage-setup", "Setup Stage", "Setup", []string{"setup", "core"})
-	stage1.AddAction(NewTestActionWithTags("action-s1-init", "Init Action", []string{"init", "core"}, nil))
-	stage1.AddAction(NewTestActionWithTags("action-s1-db", "DB Setup", []string{"db", "setup"}, nil))
+	// Create stages with appropriate tags
+	stageSetup := NewStageWithTags("stage-setup", "Setup Stage", "Setup stage", []string{"setup", "core"})
+	stageProcess := NewStageWithTags("stage-process", "Processing Stage", "Process stage", []string{"process", "core"})
+	stageCleanup := NewStageWithTags("stage-cleanup", "Cleanup Stage", "Cleanup stage", []string{"cleanup"})
 
-	stage2 := NewStageWithTags("stage-process", "Processing Stage", "Processing", []string{"process", "core"})
-	stage2.AddAction(NewTestActionWithTags("action-s2-main", "Main Process", []string{"main"}, nil))
-	stage2.AddAction(NewTestActionWithTags("action-s2-optional", "Optional Process", []string{"optional"}, nil))
+	// Add actions to the setup stage
+	stageSetup.AddAction(NewTestActionWithTags("action-s1-init", "Initialize", []string{"init", "core"}, nil))
+	stageSetup.AddAction(NewTestActionWithTags("action-s1-db", "DB Setup", []string{"db"}, nil))
 
-	stage3 := NewStageWithTags("stage-cleanup", "Cleanup Stage", "Cleanup", []string{"cleanup"})
-	stage3.AddAction(NewTestActionWithTags("action-s3-files", "Clean Files", []string{"files"}, nil))
-	stage3.AddAction(NewTestActionWithTags("action-s3-db", "DB Cleanup", []string{"db", "cleanup"}, nil))
+	// Add actions to the process stage
+	stageProcess.AddAction(NewTestActionWithTags("action-s2-main", "Process Data", []string{"main"}, nil))
+	stageProcess.AddAction(NewTestActionWithTags("action-s2-optional", "Optional Processing", []string{"optional"}, nil))
 
-	wf.AddStage(stage1)
-	wf.AddStage(stage2)
-	wf.AddStage(stage3)
+	// Add actions to the cleanup stage
+	stageCleanup.AddAction(NewTestActionWithTags("action-s3-db", "DB Cleanup", []string{"cleanup", "db"}, nil))
+	stageCleanup.AddAction(NewTestActionWithTags("action-s3-files", "File Cleanup", []string{"cleanup", "files"}, nil))
 
-	// Create a basic context (assuming execution within stage1, action-s1-init)
+	// Add the stages to the workflow
+	wf.AddStage(stageSetup)
+	wf.AddStage(stageProcess)
+	wf.AddStage(stageCleanup)
+
+	// Create an action context
 	ctx := &ActionContext{
 		GoContext:       context.Background(),
 		Workflow:        wf,
-		Stage:           stage1,
-		Action:          stage1.Actions[0],
-		Store:           wf.Store,
+		Stage:           stageSetup,
+		Action:          stageSetup.Actions[0],
 		Logger:          &TestLogger{t: t},
 		disabledActions: make(map[string]bool),
 		disabledStages:  make(map[string]bool),
 	}
+
+	// Add some data to the store
+	wf.Store.Put("key1", "value1")
+	wf.Store.Put("key2", "value2")
 
 	return wf, ctx
 }
@@ -525,4 +535,68 @@ func TestActionContextModification(t *testing.T) {
 
 	// Dynamic Add/Remove tests omitted here as they are covered elsewhere or harder to isolate
 	// specifically in the context modification test function.
+}
+
+// TestActionContext tests various functions of the ActionContext
+func TestActionContext(t *testing.T) {
+	// Create a workflow and stage
+	workflow := NewWorkflow("test-wf", "Test Workflow", "A workflow for testing")
+	stage1 := NewStage("stage1", "Stage 1", "First test stage")
+	stage2 := NewStage("stage2", "Stage 2", "Second test stage")
+
+	// Add stages to workflow
+	workflow.AddStage(stage1)
+	workflow.AddStage(stage2)
+
+	// Create an action
+	action := NewTestAction("test-action", "Test Action", func(ctx *ActionContext) error {
+		return nil
+	})
+
+	// Create context
+	ctx := &ActionContext{
+		GoContext:       context.Background(),
+		Workflow:        workflow,
+		Stage:           stage1,
+		Action:          action,
+		Logger:          NewDefaultLogger(),
+		dynamicActions:  []Action{},
+		dynamicStages:   []*Stage{},
+		disabledActions: make(map[string]bool),
+		disabledStages:  make(map[string]bool),
+	}
+
+	// Test store access
+	store := ctx.Store()
+	assert.NotNil(t, store)
+	assert.Equal(t, workflow.Store, store)
+
+	// Test stage finding
+	foundStage := ctx.FindStage("stage2")
+	assert.NotNil(t, foundStage)
+	assert.Equal(t, "stage2", foundStage.ID)
+
+	// Test dynamic action generation
+	newAction := NewTestAction("dynamic-action", "Dynamic Action", func(ctx *ActionContext) error {
+		return nil
+	})
+	ctx.AddDynamicAction(newAction)
+	assert.Len(t, ctx.dynamicActions, 1)
+
+	// Test dynamic stage generation
+	newStage := NewStage("dynamic-stage", "Dynamic Stage", "A dynamically generated stage")
+	ctx.AddDynamicStage(newStage)
+	assert.Len(t, ctx.dynamicStages, 1)
+
+	// Test action enable/disable
+	ctx.DisableAction("test-action")
+	assert.False(t, ctx.IsActionEnabled("test-action"))
+	ctx.EnableAction("test-action")
+	assert.True(t, ctx.IsActionEnabled("test-action"))
+
+	// Test stage enable/disable
+	ctx.DisableStage("stage1")
+	assert.False(t, ctx.IsStageEnabled("stage1"))
+	ctx.EnableStage("stage1")
+	assert.True(t, ctx.IsStageEnabled("stage1"))
 }

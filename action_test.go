@@ -1,9 +1,11 @@
 package gostage
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
+	"github.com/davidroman0O/gostage/store"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -83,7 +85,7 @@ func TestBaseActionImplementation(t *testing.T) {
 func TestActionWithExecutor(t *testing.T) {
 	// Test execution through a custom action that embeds BaseAction
 	executed := false
-	action := &TestAction{
+	action := &TestActionImpl{
 		BaseAction: NewBaseAction("test-action", "Test Action"),
 		executeFunc: func(ctx *ActionContext) error {
 			executed = true
@@ -104,7 +106,7 @@ func TestActionWithExecutor(t *testing.T) {
 func TestActionWithError(t *testing.T) {
 	// Test an action that returns an error
 	expectedErr := "execution failed"
-	action := &TestAction{
+	action := &TestActionImpl{
 		BaseAction: NewBaseAction("error-action", "Error Action"),
 		executeFunc: func(ctx *ActionContext) error {
 			return &CustomError{
@@ -141,9 +143,8 @@ func TestActionTagsManagement(t *testing.T) {
 	assert.Contains(t, action.Tags(), "tag2")
 
 	// Create a test action that can manage its tags
-	testAction := &TestAction{
+	testAction := &TestActionImpl{
 		BaseAction:  action,
-		customTags:  action.tags,
 		executeFunc: nil,
 	}
 
@@ -153,9 +154,8 @@ func TestActionTagsManagement(t *testing.T) {
 	assert.Contains(t, testAction.Tags(), "tag3")
 
 	// Test having empty customTags but base tags
-	emptyTagsAction := &TestAction{
+	emptyTagsAction := &TestActionImpl{
 		BaseAction:  action,
-		customTags:  []string{},
 		executeFunc: nil,
 	}
 
@@ -168,7 +168,7 @@ func TestNestedActionExecution(t *testing.T) {
 	innerExecuted := false
 	outerExecuted := false
 
-	innerAction := &TestAction{
+	innerAction := &TestActionImpl{
 		BaseAction: NewBaseAction("inner-action", "Inner Action"),
 		executeFunc: func(ctx *ActionContext) error {
 			innerExecuted = true
@@ -176,7 +176,7 @@ func TestNestedActionExecution(t *testing.T) {
 		},
 	}
 
-	outerAction := &TestAction{
+	outerAction := &TestActionImpl{
 		BaseAction: NewBaseAction("outer-action", "Outer Action"),
 		executeFunc: func(ctx *ActionContext) error {
 			// Execute the inner action from the outer one
@@ -198,7 +198,7 @@ func TestNestedActionExecution(t *testing.T) {
 
 func TestActionErrorHandling(t *testing.T) {
 	// Create an action with error handling
-	innerAction := &TestAction{
+	innerAction := &TestActionImpl{
 		BaseAction: NewBaseAction("error-action", "Error Action"),
 		executeFunc: func(ctx *ActionContext) error {
 			return &CustomError{
@@ -209,7 +209,7 @@ func TestActionErrorHandling(t *testing.T) {
 	}
 
 	// Create an action that catches and transforms the error
-	handlingAction := &TestAction{
+	handlingAction := &TestActionImpl{
 		BaseAction: NewBaseAction("handling-action", "Error Handling Action"),
 		executeFunc: func(ctx *ActionContext) error {
 			err := innerAction.Execute(ctx)
@@ -253,7 +253,7 @@ func TestActionErrorHandling(t *testing.T) {
 func TestActionExecution(t *testing.T) {
 	// Create an action that runs in phases
 	var executionPhase string
-	phaseAction := &TestAction{
+	phaseAction := &TestActionImpl{
 		BaseAction: NewBaseAction("phase-action", "Phase-based Action"),
 		executeFunc: func(ctx *ActionContext) error {
 			// First set the phase to "running"
@@ -281,7 +281,7 @@ func TestCompositeAction(t *testing.T) {
 	actionExecutions := make(map[string]bool)
 
 	// Create child actions
-	action1 := &TestAction{
+	action1 := &TestActionImpl{
 		BaseAction: NewBaseAction("action1", "Action 1"),
 		executeFunc: func(ctx *ActionContext) error {
 			actionExecutions["action1"] = true
@@ -289,7 +289,7 @@ func TestCompositeAction(t *testing.T) {
 		},
 	}
 
-	action2 := &TestAction{
+	action2 := &TestActionImpl{
 		BaseAction: NewBaseAction("action2", "Action 2"),
 		executeFunc: func(ctx *ActionContext) error {
 			actionExecutions["action2"] = true
@@ -297,7 +297,7 @@ func TestCompositeAction(t *testing.T) {
 		},
 	}
 
-	action3 := &TestAction{
+	action3 := &TestActionImpl{
 		BaseAction: NewBaseAction("action3", "Action 3"),
 		executeFunc: func(ctx *ActionContext) error {
 			actionExecutions["action3"] = true
@@ -306,7 +306,7 @@ func TestCompositeAction(t *testing.T) {
 	}
 
 	// Create a composite action that executes all three
-	compositeAction := &TestAction{
+	compositeAction := &TestActionImpl{
 		BaseAction: NewBaseAction("composite", "Composite Action"),
 		executeFunc: func(ctx *ActionContext) error {
 			err := action1.Execute(ctx)
@@ -371,7 +371,7 @@ func TestCustomError(t *testing.T) {
 // Test action implements interface
 func TestActionInterface(t *testing.T) {
 	// Create a custom action that implements the Action interface
-	action := &TestAction{
+	action := &TestActionImpl{
 		BaseAction: NewBaseAction("test", "Test"),
 		executeFunc: func(ctx *ActionContext) error {
 			return nil
@@ -381,7 +381,7 @@ func TestActionInterface(t *testing.T) {
 	// Verify it implements the interface
 	var actionInterface Action = action
 
-	// If this compiles, it means TestAction implements Action
+	// If this compiles, it means TestActionImpl implements Action
 	assert.Equal(t, "test", actionInterface.Name())
 	assert.Equal(t, "Test", actionInterface.Description())
 	assert.Empty(t, actionInterface.Tags())
@@ -393,4 +393,118 @@ func TestActionInterface(t *testing.T) {
 
 	err := actionInterface.Execute(ctx)
 	assert.NoError(t, err)
+}
+
+// TestBaseAction tests the basic methods of the BaseAction struct
+func TestBaseAction(t *testing.T) {
+	// Create a basic action
+	action := BaseAction{
+		name:        "test-action",
+		description: "Test action",
+		tags:        []string{"test", "example"},
+	}
+
+	// Test the basic methods
+	assert.Equal(t, "test-action", action.Name())
+	assert.Equal(t, "Test action", action.Description())
+	assert.Equal(t, []string{"test", "example"}, action.Tags())
+
+	// Test adding a tag
+	action.AddTag("new-tag")
+	assert.Contains(t, action.Tags(), "new-tag")
+}
+
+func TestSimpleAction(t *testing.T) {
+	// Create a simple action with the constructor
+	action := NewBaseAction("simple-action", "A simple action")
+
+	// Test basic properties
+	assert.Equal(t, "simple-action", action.Name())
+	assert.Equal(t, "A simple action", action.Description())
+	assert.Empty(t, action.Tags())
+}
+
+func TestActionWithTags(t *testing.T) {
+	// Remove customTags tests that aren't relevant anymore
+	// Create an action with tags using the constructor
+	action := NewBaseActionWithTags("tagged-action", "Action with tags", []string{"tag1", "tag2"})
+
+	// Test properties
+	assert.Equal(t, "tagged-action", action.Name())
+	assert.Equal(t, "Action with tags", action.Description())
+	assert.Equal(t, []string{"tag1", "tag2"}, action.Tags())
+}
+
+// TestActionImpl implements Action interface for testing
+type TestActionImpl struct {
+	BaseAction
+	executeFunc func(*ActionContext) error
+}
+
+// NewTestActionImpl creates a new test action with the given function
+func NewTestActionImpl(name, description string, executeFunc func(*ActionContext) error) *TestActionImpl {
+	return &TestActionImpl{
+		BaseAction:  NewBaseAction(name, description),
+		executeFunc: executeFunc,
+	}
+}
+
+// Execute runs the test action
+func (a *TestActionImpl) Execute(ctx *ActionContext) error {
+	if a.executeFunc != nil {
+		return a.executeFunc(ctx)
+	}
+	return nil
+}
+
+// TestActionExecute tests the execution of an action
+func TestActionExecute(t *testing.T) {
+	workflow := NewWorkflow("wf1", "Workflow 1", "Test workflow")
+
+	// Simple counter action
+	counterAction := NewTestActionImpl("counter", "Count items", func(ctx *ActionContext) error {
+		items := []string{"a", "b", "c"}
+		ctx.Store().Put("count", len(items))
+		return nil
+	})
+
+	// Create a context for execution
+	ctx := &ActionContext{
+		GoContext: context.Background(),
+		Workflow:  workflow,
+		Stage:     nil,
+		Action:    counterAction,
+		Logger:    NewDefaultLogger(),
+	}
+
+	// Execute the action
+	err := counterAction.Execute(ctx)
+	assert.NoError(t, err)
+
+	// Verify the result using the store's Get method
+	count, err := store.Get[int](workflow.Store, "count")
+	assert.NoError(t, err)
+	assert.Equal(t, 3, count)
+}
+
+// Fix redeclaration of TestAction by changing references
+func TestCustomActionImplementation(t *testing.T) {
+	// Create a custom action with an execute function
+	executed := false
+	action := &TestActionImpl{
+		BaseAction: NewBaseAction("test-action", "Test Action"),
+		executeFunc: func(ctx *ActionContext) error {
+			executed = true
+			return nil
+		},
+	}
+
+	// Create context and execute
+	ctx := &ActionContext{
+		Logger: &TestLogger{t: t},
+	}
+
+	err := action.Execute(ctx)
+	assert.NoError(t, err)
+	assert.True(t, executed, "Execute function should have been called")
 }

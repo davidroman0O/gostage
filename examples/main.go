@@ -15,12 +15,31 @@ type GreetingAction struct {
 
 // Implement the Execute method required by the Action interface
 func (a GreetingAction) Execute(ctx *gostage.ActionContext) error {
-	name, err := store.GetOrDefault(ctx.Store, "user.name", "World")
+	name, err := store.GetOrDefault(ctx.Store(), "user.name", "World")
 	if err != nil {
 		return err
 	}
 
 	ctx.Logger.Info("Hello, %s!", name)
+	return nil
+}
+
+// MyAction is a simple action implementation
+type MyAction struct {
+	gostage.BaseAction
+}
+
+// Execute implements the Action interface
+func (a *MyAction) Execute(ctx *gostage.ActionContext) error {
+	// Get configuration or use a default
+	timeout, err := store.GetOrDefault[int](ctx.Store(), "timeout", 30)
+	if err != nil {
+		return err
+	}
+
+	ctx.Logger.Info("Using timeout: %d seconds", timeout)
+	// ... implementation ...
+
 	return nil
 }
 

@@ -49,7 +49,7 @@ type StageState struct {
 
 // ActionContext provides access to the workflow environment.
 // It is passed to an Action's Execute method and provides access to
-// the workflow, stage, store, logger, and various utilities for
+// the workflow, stage, logger, and various utilities for
 // dynamic action and stage management.
 type ActionContext struct {
 	// GoContext is the embedded Go context
@@ -59,9 +59,6 @@ type ActionContext struct {
 	Workflow *Workflow
 	Stage    *Stage
 	Action   Action
-
-	// Store provides access to the key-value store for workflow data
-	Store *store.KVStore
 
 	// Logger for output and debugging
 	Logger Logger
@@ -77,6 +74,11 @@ type ActionContext struct {
 
 	// Track stages to disable
 	disabledStages map[string]bool
+}
+
+// Store returns the workflow's key-value store for data access
+func (ctx *ActionContext) Store() *store.KVStore {
+	return ctx.Workflow.Store
 }
 
 // BaseAction provides a common implementation for simple actions.

@@ -47,18 +47,18 @@ func TestStoreBasedWorkflow(t *testing.T) {
 		actionKey := PrefixAction + stage1.ID + ":" + "action1"
 
 		// Make sure the action has metadata before setting properties
-		err := ensureKeyHasMetadata(ctx.Store, actionKey, "Action 1")
+		err := ensureKeyHasMetadata(ctx.Store(), actionKey, "Action 1")
 		if err != nil {
 			return err
 		}
 
-		err = ctx.Store.SetProperty(actionKey, PropStatus, StatusRunning)
+		err = ctx.Store().SetProperty(actionKey, PropStatus, StatusRunning)
 		if err != nil {
 			return err
 		}
 
 		// Verify status is set in the store
-		value, err := ctx.Store.GetProperty(actionKey, PropStatus)
+		value, err := ctx.Store().GetProperty(actionKey, PropStatus)
 		if err != nil {
 			return err
 		}
@@ -84,10 +84,10 @@ func TestStoreBasedWorkflow(t *testing.T) {
 		executionData["action3"] = true
 
 		// Verify stages and actions are properly stored in KV store
-		stageKeys := ctx.Store.FindKeysByTag("setup")
+		stageKeys := ctx.Store().FindKeysByTag("setup")
 		assert.True(t, len(stageKeys) > 0, "Should find stage with setup tag")
 
-		actionKeys := ctx.Store.FindKeysByTag("process")
+		actionKeys := ctx.Store().FindKeysByTag("process")
 		assert.True(t, len(actionKeys) > 0, "Should find action with process tag")
 
 		// Disable stage by tag
@@ -200,20 +200,20 @@ func TestWorkflowAndStageMetadata(t *testing.T) {
 	// Add an action that verifies and updates the data
 	action := NewTestAction("test-action", "Test Action", func(ctx *ActionContext) error {
 		// Retrieve custom data from the store
-		versionVal, err := store.Get[string](ctx.Store, "custom-version")
+		versionVal, err := store.Get[string](ctx.Store(), "custom-version")
 		assert.NoError(t, err)
 		assert.Equal(t, "1.0.0", versionVal)
 
-		envVal, err := store.Get[string](ctx.Store, "custom-environment")
+		envVal, err := store.Get[string](ctx.Store(), "custom-environment")
 		assert.NoError(t, err)
 		assert.Equal(t, "testing", envVal)
 
-		importanceVal, err := store.Get[string](ctx.Store, "custom-stage-importance")
+		importanceVal, err := store.Get[string](ctx.Store(), "custom-stage-importance")
 		assert.NoError(t, err)
 		assert.Equal(t, "high", importanceVal)
 
 		// Add more data during execution
-		err = ctx.Store.Put("custom-last-run", "today")
+		err = ctx.Store().Put("custom-last-run", "today")
 		assert.NoError(t, err)
 
 		return nil
@@ -232,3 +232,5 @@ func TestWorkflowAndStageMetadata(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "today", lastRunVal)
 }
+
+// StatusAction is a simple action that updates its own status

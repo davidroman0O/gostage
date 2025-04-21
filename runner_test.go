@@ -162,7 +162,7 @@ func TestRunner_Execute(t *testing.T) {
 
 	// Create a test action that just sets a value in the store
 	action := NewActionFunc("test-action", "Test action", func(ctx *ActionContext) error {
-		ctx.Store.Put("test-key", "test-value")
+		ctx.Store().Put("test-key", "test-value")
 		return nil
 	})
 
@@ -270,7 +270,7 @@ func TestRunner_MultipleMiddleware(t *testing.T) {
 	// Create a test action that adds to the order
 	action := NewActionFunc("test-action", "Test action", func(ctx *ActionContext) error {
 		// Get the current order
-		orderValue, err := store.GetOrDefault[string](ctx.Store, "order", "")
+		orderValue, err := store.GetOrDefault[string](ctx.Store(), "order", "")
 		if err != nil {
 			return err
 		}
@@ -279,7 +279,7 @@ func TestRunner_MultipleMiddleware(t *testing.T) {
 		orderValue += "action-"
 
 		// Store the updated order
-		ctx.Store.Put("order", orderValue)
+		ctx.Store().Put("order", orderValue)
 		return nil
 	})
 
@@ -414,7 +414,7 @@ func TestStoreInjectionMiddleware(t *testing.T) {
 
 	// Create an action that checks for the injected value
 	action := NewActionFunc("test-action", "Test action", func(ctx *ActionContext) error {
-		value, err := store.Get[string](ctx.Store, "injected-key")
+		value, err := store.Get[string](ctx.Store(), "injected-key")
 		if err != nil {
 			return errors.New("injected value not found")
 		}
@@ -507,4 +507,50 @@ type funcAction struct {
 // Execute runs the action function
 func (a *funcAction) Execute(ctx *ActionContext) error {
 	return a.fn(ctx)
+}
+
+// TestMiddleware tests that middleware can modify workflow execution
+func TestMiddleware(t *testing.T) {
+	// Create a simple middleware that adds values to the store
+	middleware := func(next RunnerFunc) RunnerFunc {
+		return func(ctx context.Context, w *Workflow, l Logger) error {
+			// Set value before execution
+			w.Store.Put("middleware-key", "middleware-value")
+
+			// Call the next function in the chain
+			err := next(ctx, w, l)
+
+			// Set another value after execution
+			w.Store.Put("middleware-after", "after-value")
+
+			return err
+		}
+	}
+
+	// Create a workflow with a store
+	workflow := NewWorkflow("test-wf", "Test Workflow", "Test workflow")
+
+	// Create a stage with an action that checks store values
+	stage := NewStage("test-stage", "Test Stage", "Test stage")
+	stage.AddAction(NewTestAction("test-action", "Test Action", func(ctx *ActionContext) error {
+		// The middleware should have set this value
+		val, err := store.Get[string](ctx.Store(), "middleware-key")
+		assert.NoError(t, err)
+		assert.Equal(t, "middleware-value", val)
+		return nil
+	}))
+
+	workflow.AddStage(stage)
+
+	// Create a runner with the middleware
+	runner := NewRunner(WithMiddleware(middleware))
+
+	// Execute the workflow
+	err := runner.Execute(context.Background(), workflow, NewDefaultLogger())
+	assert.NoError(t, err)
+
+	// Check the after value was set
+	val, err := store.Get[string](workflow.Store, "middleware-after")
+	assert.NoError(t, err)
+	assert.Equal(t, "after-value", val)
 }

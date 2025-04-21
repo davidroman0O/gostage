@@ -52,8 +52,7 @@ func (a *StageControlAction) Execute(ctx *gostage.ActionContext) error {
 	return nil
 }
 
-// ConditionalAction determines whether to enable/disable other actions
-// based on conditions stored in the workflow
+// ConditionalAction enables or disables other actions based on configuration
 type ConditionalAction struct {
 	gostage.BaseAction
 }
@@ -65,24 +64,26 @@ func NewConditionalAction(name, description string) *ConditionalAction {
 	}
 }
 
-// Execute implements the conditional behavior
+// Execute checks a condition and enables/disables actions
 func (a *ConditionalAction) Execute(ctx *gostage.ActionContext) error {
-	// Example: Check a condition in the store and disable actions based on it
-	envValue, err := store.Get[string](ctx.Store, "environment")
+	// Get the condition from the store
+	condition, err := store.Get[string](ctx.Store(), "condition")
 	if err != nil {
-		return fmt.Errorf("failed to get environment: %w", err)
+		return fmt.Errorf("failed to get condition: %w", err)
 	}
 
-	ctx.Logger.Info("Current environment: %s", envValue)
-
-	if envValue == "development" {
-		// Disable production-only actions
-		ctx.DisableActionsByTag("production-only")
-		ctx.Logger.Info("Disabled all production-only actions")
-	} else if envValue == "production" {
-		// Disable development-only actions
-		ctx.DisableActionsByTag("dev-only")
-		ctx.Logger.Info("Disabled all development-only actions")
+	// Enable/disable actions based on condition
+	switch condition {
+	case "debug":
+		ctx.Logger.Info("Debug mode enabled, enabling debug actions")
+		ctx.EnableActionsByTag("debug")
+		ctx.DisableActionsByTag("production")
+	case "production":
+		ctx.Logger.Info("Production mode enabled, disabling debug actions")
+		ctx.DisableActionsByTag("debug")
+		ctx.EnableActionsByTag("production")
+	default:
+		return fmt.Errorf("unknown condition: %s", condition)
 	}
 
 	return nil

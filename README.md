@@ -259,19 +259,19 @@ gostage includes a key-value store with type safety:
 
 ```go
 // Store data
-ctx.Store.Put("order.id", "ORD-12345")
+ctx.Store().Put("order.id", "ORD-12345")
 
 // Retrieve data with type safety
-orderId, err := store.Get[string](ctx.Store, "order.id")
+orderId, err := store.Get[string](ctx.Store(), "order.id")
 
 // Store with TTL (time-to-live)
-ctx.Store.PutWithTTL("session.token", token, 24*time.Hour)
+ctx.Store().PutWithTTL("session.token", token, 24*time.Hour)
 
 // Store with metadata
 metadata := store.NewMetadata()
 metadata.AddTag("sensitive")
 metadata.SetProperty("source", "external-api")
-ctx.Store.PutWithMetadata("customer.data", customerData, metadata)
+ctx.Store().PutWithMetadata("customer.data", customerData, metadata)
 ```
 
 ## Advanced Features
@@ -332,7 +332,7 @@ ctx.DisableActionsByTag("optional")
 ctx.DisableStage("cleanup-stage")
 
 // Enable/disable based on conditions
-if !ctx.Store.HasTag("important-resource", "protected") {
+if !ctx.Store().HasTag("important-resource", "protected") {
     ctx.EnableStage("cleanup-stage")
 }
 ```
@@ -436,4 +436,68 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details. 
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## API Changes
+
+### Store Access in ActionContext
+
+In version 2.0+, the `ActionContext` no longer has a direct `Store` field. Instead, it provides a
+`Store()` method that returns the workflow's store. This ensures that all actions operate on the same
+store instance and clarifies the ownership relationship.
+
+Before:
+```go
+func (a *MyAction) Execute(ctx *ActionContext) error {
+    // Direct field access
+    ctx.Store.Put("key", value)
+    
+    data, err := store.Get[MyType](ctx.Store, "other-key")
+    // ...
+}
+```
+
+After:
+```go
+func (a *MyAction) Execute(ctx *ActionContext) error {
+    // Method call to get the store
+    ctx.Store().Put("key", value)
+    
+    data, err := store.Get[MyType](ctx.Store(), "other-key")
+    // ...
+}
+```
+
+### Stage Initial Store
+
+In version 2.0+, the `Stage` no longer exposes the `InitialStore` field directly. Instead, it provides
+methods for interacting with the initial store data.
+
+Before:
+```go
+stage := NewStage("my-stage", "My Stage", "Description")
+stage.InitialStore.Put("key", value)
+```
+
+After:
+```go
+stage := NewStage("my-stage", "My Stage", "Description")
+stage.SetInitialData("key", value)
+```
+
+## Core Components
+
+1. **Workflows** - The top-level container representing an entire process
+2. **Stages** - Sequential phases within a workflow, each containing multiple actions
+3. **Actions** - Individual units of work that implement specific tasks
+4. **State Store** - A type-safe key-value store for workflow data
+
+## Features
+
+- Sequential execution of stages and actions
+- Dynamic modification of workflows during execution
+- Tag-based organization and filtering
+- Type-safe state storage with support for any Go type
+- Conditional execution based on runtime state
+- Rich metadata for traceability and organization
+- Serializable workflow state for persistence 

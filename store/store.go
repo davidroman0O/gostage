@@ -988,6 +988,11 @@ func (s *KVStore) CopyFromWithOverwrite(source *KVStore) (copied int, overwritte
 		// Check if key exists in destination
 		_, exists := s.data[key]
 
+		// Skip if the type is nil
+		if e.typ == nil {
+			continue
+		}
+
 		// Create a new instance of the stored value for validation
 		// This ensures the blob can be unmarshaled to the specified type
 		instance := reflect.New(e.typ).Interface()

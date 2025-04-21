@@ -211,7 +211,7 @@ func (w *Workflow) GetStage(stageID string) (*Stage, error) {
 		Description:  stageInfo.Description,
 		Tags:         stageInfo.Tags,
 		Actions:      []Action{},
-		InitialStore: store.NewKVStore(),
+		initialStore: store.NewKVStore(),
 	}
 
 	// Load actions for this stage

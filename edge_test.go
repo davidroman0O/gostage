@@ -324,7 +324,6 @@ func TestWorkflowRaces(t *testing.T) {
 					GoContext:       context.Background(),
 					Workflow:        wf,
 					Stage:           stage,
-					Store:           wf.Store,
 					Logger:          &TestLogger{t: t},
 					disabledActions: make(map[string]bool),
 					disabledStages:  make(map[string]bool),
@@ -374,7 +373,7 @@ func TestMemoryUsage(t *testing.T) {
 						fmt.Sprintf("Action %d in Stage %d", j, i),
 						func(ctx *ActionContext) error {
 							// Create some data in the store
-							ctx.Store.Put(fmt.Sprintf("key-%d-%d", i, j), fmt.Sprintf("value-%d-%d", i, j))
+							ctx.Store().Put(fmt.Sprintf("key-%d-%d", i, j), fmt.Sprintf("value-%d-%d", i, j))
 							return nil
 						})
 					stage.AddAction(action)
@@ -419,4 +418,56 @@ func getMemUsage() uint64 {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	return m.HeapAlloc
+}
+
+// MaxCountAction is a simple action that generates a lot of keys
+type MaxCountAction struct {
+	BaseAction
+	countX, countY int
+}
+
+// Execute generates a lot of keys
+func (a *MaxCountAction) Execute(ctx *ActionContext) error {
+	for i := 0; i < a.countX; i++ {
+		for j := 0; j < a.countY; j++ {
+			ctx.Store().Put(fmt.Sprintf("key-%d-%d", i, j), fmt.Sprintf("value-%d-%d", i, j))
+		}
+	}
+	return nil
+}
+
+// TestActionContextWithLargeData tests edge cases with large data size
+func TestActionContextWithLargeData(t *testing.T) {
+	// Create a workflow
+	workflow := NewWorkflow("large-data-wf", "Large Data Workflow", "A workflow for testing with large data")
+
+	// Create a stage
+	stage := NewStage("large-data-stage", "Large Data Stage", "A stage for testing large data")
+	workflow.AddStage(stage)
+
+	// Create an action
+	action := &MaxCountAction{
+		BaseAction: NewBaseAction("max-count", "Max Count"),
+		countX:     10,
+		countY:     10,
+	}
+	stage.AddAction(action)
+
+	// Test with a custom context directly
+	actionCtx := &ActionContext{
+		GoContext: context.Background(),
+		Workflow:  workflow,
+		Stage:     stage,
+		Action:    action,
+		Logger:    NewDefaultLogger(),
+	}
+
+	// Execute the action
+	err := action.Execute(actionCtx)
+	assert.NoError(t, err)
+
+	// Verify we've stored approximately 100 keys
+	// Note: Other tests might have added keys to the store, so we check for at least 100
+	keys := workflow.Store.ListKeys()
+	assert.GreaterOrEqual(t, len(keys), 100, "Should have at least 100 keys in the store")
 }

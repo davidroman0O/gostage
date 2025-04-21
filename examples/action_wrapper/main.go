@@ -57,7 +57,7 @@ func (a *TimingWrapper) Execute(ctx *gostage.ActionContext) error {
 	ctx.Logger.Info("Completed %s in %v", a.wrappedAction.Name(), executionTime)
 
 	// Store execution time in the workflow store
-	ctx.Store.Put(fmt.Sprintf("timing.%s", a.wrappedAction.Name()), executionTime.String())
+	ctx.Store().Put(fmt.Sprintf("timing.%s", a.wrappedAction.Name()), executionTime.String())
 
 	// Pass through any error from the wrapped action
 	return err
@@ -270,7 +270,7 @@ func CreateActionWrapperWorkflow() *gostage.Workflow {
 
 			// Always fail the first time to demonstrate retry
 			attemptKey := "retry.attempt.count"
-			attemptCount, err := store.GetOrDefault(ctx.Store, attemptKey, 0)
+			attemptCount, err := store.GetOrDefault(ctx.Store(), attemptKey, 0)
 			if err != nil {
 				// If there's an error, start with 0
 				attemptCount = 0
@@ -278,7 +278,7 @@ func CreateActionWrapperWorkflow() *gostage.Workflow {
 
 			// Increment attempt count
 			attemptCount++
-			ctx.Store.Put(attemptKey, attemptCount)
+			ctx.Store().Put(attemptKey, attemptCount)
 
 			// Fail on first attempt
 			if attemptCount == 1 {
