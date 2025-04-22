@@ -9,6 +9,14 @@ import (
 	"github.com/davidroman0O/gostage/store"
 )
 
+// ActionRunnerFunc is the core function type for executing an action.
+type ActionRunnerFunc func(ctx *ActionContext, action Action, index int, isLast bool) error
+
+// ActionMiddleware represents a function that wraps action execution.
+// It allows performing operations before and after an action executes,
+// with information about the action's position in the execution sequence.
+type ActionMiddleware func(next ActionRunnerFunc) ActionRunnerFunc
+
 // Action is a single unit of work within a stage.
 // Actions are the building blocks of workflows and represent individual tasks
 // that need to be executed. Actions can be organized using tags and can be
@@ -74,6 +82,10 @@ type ActionContext struct {
 
 	// Track stages to disable
 	disabledStages map[string]bool
+
+	// Information about the action's position in execution
+	ActionIndex  int
+	IsLastAction bool
 }
 
 // Store returns the workflow's key-value store for data access

@@ -118,26 +118,48 @@ func (r *Runner) executeWorkflow(ctx context.Context, w *Workflow, logger Logger
 		w.Context["disabledStages"] = disabledStages
 	}
 
-	// We need to execute stages one by one, as dynamic stages can be inserted during execution
-	for i := 0; i < len(w.Stages); i++ {
-		stage := w.Stages[i]
-		stageKey := PrefixStage + stage.ID
-
-		// Update stage status in store
-		w.Store.SetProperty(stageKey, PropStatus, StatusRunning)
-
+	// Define a core function that executes a stage with workflow middleware
+	executeStageWithMiddleware := func(ctx context.Context, stage *Stage, workflow *Workflow, logger Logger) error {
 		// Skip disabled stages
 		if disabledStages[stage.ID] {
 			logger.Debug("Skipping disabled stage: %s", stage.Name)
-			continue
+			return nil
 		}
 
+		// Update stage status in store
+		stageKey := PrefixStage + stage.ID
+		workflow.Store.SetProperty(stageKey, PropStatus, StatusRunning)
+
 		// Execute the stage
-		logger.Debug("Executing stage %d/%d: %s", i+1, len(w.Stages), stage.Name)
-		if err := r.executeStage(ctx, stage, w, logger); err != nil {
-			w.Store.SetProperty(stageKey, PropStatus, StatusFailed)
-			w.Store.SetProperty(workflowKey, PropStatus, StatusFailed)
+		logger.Debug("Executing stage: %s", stage.Name)
+		if err := r.executeStage(ctx, stage, workflow, logger); err != nil {
+			workflow.Store.SetProperty(stageKey, PropStatus, StatusFailed)
+			workflow.Store.SetProperty(workflowKey, PropStatus, StatusFailed)
 			return fmt.Errorf("stage '%s' failed: %w", stage.Name, err)
+		}
+
+		logger.Info("Completed stage: %s", stage.Name)
+		workflow.Store.SetProperty(stageKey, PropStatus, StatusCompleted)
+		return nil
+	}
+
+	// We need to execute stages one by one, as dynamic stages can be inserted during execution
+	for i := 0; i < len(w.Stages); i++ {
+		stage := w.Stages[i]
+
+		// Create a base stage runner function
+		stageRunner := executeStageWithMiddleware
+
+		// Apply workflow middleware in reverse order (so first middleware is outermost)
+		if w.middleware != nil && len(w.middleware) > 0 {
+			for j := len(w.middleware) - 1; j >= 0; j-- {
+				stageRunner = w.middleware[j](stageRunner)
+			}
+		}
+
+		// Execute stage with workflow middleware
+		if err := stageRunner(ctx, stage, w, logger); err != nil {
+			return err
 		}
 
 		// Check if any dynamic stages were generated
@@ -183,9 +205,6 @@ func (r *Runner) executeWorkflow(ctx context.Context, w *Workflow, logger Logger
 				w.saveToStore()
 			}
 		}
-
-		logger.Info("Completed stage %d/%d: %s", i+1, len(w.Stages), stage.Name)
-		w.Store.SetProperty(stageKey, PropStatus, StatusCompleted)
 	}
 
 	logger.Info("Workflow completed successfully: %s", w.Name)
@@ -241,90 +260,119 @@ func (r *Runner) executeStage(ctx context.Context, s *Stage, workflow *Workflow,
 		}
 	}
 
-	// We need to execute actions one by one, as dynamic actions can be inserted during execution
-	for i := 0; i < len(s.Actions); i++ {
-		action := s.Actions[i]
-		actionKey := PrefixAction + s.ID + ":" + action.Name()
+	// Define the core stage execution function
+	executeStageCore := func(ctx context.Context, stage *Stage, wf *Workflow, logger Logger) error {
+		// We need to execute actions one by one, as dynamic actions can be inserted during execution
+		for i := 0; i < len(stage.Actions); i++ {
+			action := stage.Actions[i]
+			actionKey := PrefixAction + stage.ID + ":" + action.Name()
 
-		// Update action status in store
-		workflow.Store.SetProperty(actionKey, PropStatus, StatusRunning)
+			// Update action status in store
+			wf.Store.SetProperty(actionKey, PropStatus, StatusRunning)
 
-		// Skip disabled actions
-		if actionCtx.disabledActions[action.Name()] {
-			logger.Debug("Skipping disabled action: %s", action.Name())
-			workflow.Store.SetProperty(actionKey, PropStatus, StatusSkipped)
-			continue
-		}
+			// Skip disabled actions
+			if actionCtx.disabledActions[action.Name()] {
+				logger.Debug("Skipping disabled action: %s", action.Name())
+				wf.Store.SetProperty(actionKey, PropStatus, StatusSkipped)
+				continue
+			}
 
-		logger.Debug("Executing action %d/%d: %s", i+1, len(s.Actions), action.Name())
+			logger.Debug("Executing action %d/%d: %s", i+1, len(stage.Actions), action.Name())
 
-		// Update the context with the current action
-		actionCtx.Action = action
+			// Update the context with the current action and position info
+			actionCtx.Action = action
+			actionCtx.ActionIndex = i
+			actionCtx.IsLastAction = (i == len(stage.Actions)-1)
 
-		// Execute the action
-		if err := action.Execute(actionCtx); err != nil {
-			workflow.Store.SetProperty(actionKey, PropStatus, StatusFailed)
-			return fmt.Errorf("action '%s' failed: %w", action.Name(), err)
-		}
+			// Define the core action execution function
+			executeActionCore := func(ctx *ActionContext, act Action, index int, isLast bool) error {
+				return act.Execute(ctx)
+			}
 
-		// Check if the action generated new actions to be inserted
-		if len(actionCtx.dynamicActions) > 0 {
-			logger.Debug("Action generated %d new actions", len(actionCtx.dynamicActions))
+			// Create a function for running through any workflow-level action middleware
+			// We can add this feature later if needed
 
-			// Insert the new actions after the current one
-			newActions := make([]Action, 0, len(s.Actions)+len(actionCtx.dynamicActions))
-			newActions = append(newActions, s.Actions[:i+1]...)
+			// Execute the action
+			err := executeActionCore(actionCtx, action, i, actionCtx.IsLastAction)
+			if err != nil {
+				wf.Store.SetProperty(actionKey, PropStatus, StatusFailed)
+				return fmt.Errorf("action '%s' failed: %w", action.Name(), err)
+			}
 
-			// Store each dynamic action in the KV store
-			for _, dynAction := range actionCtx.dynamicActions {
-				// Create a key for the action
-				dynActionKey := PrefixAction + s.ID + ":" + dynAction.Name()
+			// Check if the action generated new actions to be inserted
+			if len(actionCtx.dynamicActions) > 0 {
+				logger.Debug("Action generated %d new actions", len(actionCtx.dynamicActions))
 
-				// Create metadata for the action
-				meta := store.NewMetadata()
-				for _, tag := range dynAction.Tags() {
-					meta.AddTag(tag)
+				// Insert the new actions after the current one
+				newActions := make([]Action, 0, len(stage.Actions)+len(actionCtx.dynamicActions))
+				newActions = append(newActions, stage.Actions[:i+1]...)
+
+				// Store each dynamic action in the KV store
+				for _, dynAction := range actionCtx.dynamicActions {
+					// Create a key for the action
+					dynActionKey := PrefixAction + stage.ID + ":" + dynAction.Name()
+
+					// Create metadata for the action
+					meta := store.NewMetadata()
+					for _, tag := range dynAction.Tags() {
+						meta.AddTag(tag)
+					}
+					meta.AddTag(TagDynamic)
+					meta.Description = dynAction.Description()
+					meta.SetProperty(PropCreatedBy, "action:"+action.Name())
+					meta.SetProperty(PropStatus, StatusPending)
+
+					// Store action metadata - since we can't easily serialize the actual action,
+					// we just store its metadata and track it through the in-memory struct
+					wf.Store.PutWithMetadata(dynActionKey, dynAction.Description(), meta)
 				}
-				meta.AddTag(TagDynamic)
-				meta.Description = dynAction.Description()
-				meta.SetProperty(PropCreatedBy, "action:"+action.Name())
-				meta.SetProperty(PropStatus, StatusPending)
 
-				// Store action metadata - since we can't easily serialize the actual action,
-				// we just store its metadata and track it through the in-memory struct
-				workflow.Store.PutWithMetadata(dynActionKey, dynAction.Description(), meta)
+				newActions = append(newActions, actionCtx.dynamicActions...)
+				if i+1 < len(stage.Actions) {
+					newActions = append(newActions, stage.Actions[i+1:]...)
+				}
+				stage.Actions = newActions
+
+				// Clear dynamic actions for the next iteration
+				actionCtx.dynamicActions = []Action{}
 			}
 
-			newActions = append(newActions, actionCtx.dynamicActions...)
-			if i+1 < len(s.Actions) {
-				newActions = append(newActions, s.Actions[i+1:]...)
+			// Check if the action generated new stages to be inserted
+			if len(actionCtx.dynamicStages) > 0 {
+				logger.Debug("Action generated %d new stages", len(actionCtx.dynamicStages))
+
+				// Store the stages to be added to the workflow after this stage completes
+				wf.Context["dynamicStages"] = actionCtx.dynamicStages
+
+				// Clear dynamic stages for the next iteration
+				actionCtx.dynamicStages = []*Stage{}
 			}
-			s.Actions = newActions
 
-			// Clear dynamic actions for the next iteration
-			actionCtx.dynamicActions = []Action{}
+			logger.Debug("Completed action %d/%d: %s", i+1, len(stage.Actions), action.Name())
+			wf.Store.SetProperty(actionKey, PropStatus, StatusCompleted)
 		}
 
-		// Check if the action generated new stages to be inserted
-		if len(actionCtx.dynamicStages) > 0 {
-			logger.Debug("Action generated %d new stages", len(actionCtx.dynamicStages))
-
-			// Store the stages to be added to the workflow after this stage completes
-			workflow.Context["dynamicStages"] = actionCtx.dynamicStages
-
-			// Clear dynamic stages for the next iteration
-			actionCtx.dynamicStages = []*Stage{}
-		}
-
-		logger.Debug("Completed action %d/%d: %s", i+1, len(s.Actions), action.Name())
-		workflow.Store.SetProperty(actionKey, PropStatus, StatusCompleted)
+		return nil
 	}
+
+	// Apply stage middleware
+	var stageHandler StageRunnerFunc = executeStageCore
+
+	// Apply middleware in reverse order (so the first middleware is the outermost wrapper)
+	if s.middleware != nil {
+		for i := len(s.middleware) - 1; i >= 0; i-- {
+			stageHandler = s.middleware[i](stageHandler)
+		}
+	}
+
+	// Execute stage with middleware chain
+	err := stageHandler(ctx, s, workflow, logger)
 
 	// Store the updated disabled maps back in the workflow context
 	workflow.Context["disabledActions"] = actionCtx.disabledActions
 	workflow.Context["disabledStages"] = actionCtx.disabledStages
 
-	return nil
+	return err
 }
 
 // RunResult contains the result of a workflow execution
@@ -504,6 +552,193 @@ func TimeLimitMiddleware(limit time.Duration) Middleware {
 
 			// Execute with the timeout context
 			return next(ctx, workflow, logger)
+		}
+	}
+}
+
+// Example middleware functions for stages
+
+// LoggingStageMiddleware creates a middleware that logs stage execution steps
+func LoggingStageMiddleware() StageMiddleware {
+	return func(next StageRunnerFunc) StageRunnerFunc {
+		return func(ctx context.Context, stage *Stage, workflow *Workflow, logger Logger) error {
+			logger.Info("Stage middleware: Starting stage %s", stage.Name)
+
+			start := time.Now()
+			err := next(ctx, stage, workflow, logger)
+			duration := time.Since(start)
+
+			if err != nil {
+				logger.Error("Stage middleware: Stage %s failed after %v: %v",
+					stage.Name, duration.Round(time.Millisecond), err)
+			} else {
+				logger.Info("Stage middleware: Stage %s completed in %v",
+					stage.Name, duration.Round(time.Millisecond))
+			}
+
+			return err
+		}
+	}
+}
+
+// ContainerStageMiddleware creates a middleware that "pops" a container at the start
+// of a stage and closes it at the end. This is a placeholder that demonstrates
+// the pattern - in a real implementation you would add your container logic.
+func ContainerStageMiddleware(containerImage string, containerName string) StageMiddleware {
+	return func(next StageRunnerFunc) StageRunnerFunc {
+		return func(ctx context.Context, stage *Stage, workflow *Workflow, logger Logger) error {
+			// Start the container
+			logger.Info("Starting container %s (image: %s) for stage %s",
+				containerName, containerImage, stage.Name)
+
+			// Here you would add your actual container startup logic:
+			// - Docker API calls
+			// - Command execution
+			// - Container configuration
+
+			// Execute the stage
+			err := next(ctx, stage, workflow, logger)
+
+			// Always stop the container, even if the stage failed
+			logger.Info("Stopping container %s for stage %s", containerName, stage.Name)
+
+			// Here you would add your container cleanup logic:
+			// - Stop container
+			// - Remove container
+			// - Cleanup resources
+
+			// Return any error from the stage execution
+			return err
+		}
+	}
+}
+
+// StoreInjectionStageMiddleware creates a middleware that injects values into the stage's initialStore
+func StoreInjectionStageMiddleware(keyValues map[string]interface{}) StageMiddleware {
+	return func(next StageRunnerFunc) StageRunnerFunc {
+		return func(ctx context.Context, stage *Stage, workflow *Workflow, logger Logger) error {
+			// Inject values into the initial store
+			for key, value := range keyValues {
+				stage.SetInitialData(key, value)
+			}
+
+			// Continue execution
+			return next(ctx, stage, workflow, logger)
+		}
+	}
+}
+
+// ActionProgressMiddleware creates a middleware that reports on action execution progress
+// This demonstrates how to implement middleware that runs at the action level
+func ActionProgressMiddleware() StageMiddleware {
+	return func(next StageRunnerFunc) StageRunnerFunc {
+		return func(ctx context.Context, stage *Stage, workflow *Workflow, logger Logger) error {
+			// Store the total action count for progress reporting
+			totalActions := len(stage.Actions)
+			logger.Info("Starting execution of %d actions in stage %s", totalActions, stage.Name)
+
+			// Save the current action count before execution
+			// (this accounts for dynamic actions that might be added)
+			beforeCount := len(stage.Actions)
+
+			// Execute the stage
+			err := next(ctx, stage, workflow, logger)
+
+			// Report on actions completed and any dynamically added
+			afterCount := len(stage.Actions)
+			dynamicCount := afterCount - beforeCount
+
+			if dynamicCount > 0 {
+				logger.Info("Completed stage %s with %d original actions plus %d dynamic actions",
+					stage.Name, beforeCount, dynamicCount)
+			} else {
+				logger.Info("Completed stage %s with %d actions", stage.Name, afterCount)
+			}
+
+			return err
+		}
+	}
+}
+
+// Example workflow middleware functions
+
+// LoggingStageExecutionMiddleware creates a workflow middleware that logs individual stage execution
+func LoggingStageExecutionMiddleware() WorkflowMiddleware {
+	return func(next WorkflowStageRunnerFunc) WorkflowStageRunnerFunc {
+		return func(ctx context.Context, stage *Stage, workflow *Workflow, logger Logger) error {
+			logger.Info("Workflow middleware: Starting stage %s in workflow %s", stage.Name, workflow.Name)
+
+			start := time.Now()
+			err := next(ctx, stage, workflow, logger)
+			duration := time.Since(start)
+
+			if err != nil {
+				logger.Error("Workflow middleware: Stage %s in workflow %s failed after %v: %v",
+					stage.Name, workflow.Name, duration.Round(time.Millisecond), err)
+			} else {
+				logger.Info("Workflow middleware: Stage %s in workflow %s completed in %v",
+					stage.Name, workflow.Name, duration.Round(time.Millisecond))
+			}
+
+			return err
+		}
+	}
+}
+
+// StageFilterMiddleware creates a workflow middleware that can conditionally skip stages
+func StageFilterMiddleware(filter func(*Stage) bool) WorkflowMiddleware {
+	return func(next WorkflowStageRunnerFunc) WorkflowStageRunnerFunc {
+		return func(ctx context.Context, stage *Stage, workflow *Workflow, logger Logger) error {
+			// Skip the stage if it doesn't pass the filter
+			if !filter(stage) {
+				logger.Info("Workflow middleware: Skipping stage %s based on filter criteria", stage.Name)
+				return nil
+			}
+
+			// Stage passes the filter, execute it
+			return next(ctx, stage, workflow, logger)
+		}
+	}
+}
+
+// StageDataInjectionMiddleware creates a workflow middleware that injects data into each stage's initialStore
+func StageDataInjectionMiddleware(getData func(*Stage) map[string]interface{}) WorkflowMiddleware {
+	return func(next WorkflowStageRunnerFunc) WorkflowStageRunnerFunc {
+		return func(ctx context.Context, stage *Stage, workflow *Workflow, logger Logger) error {
+			// Get the data to inject for this specific stage
+			data := getData(stage)
+
+			// Inject the data into the stage's initialStore
+			for key, value := range data {
+				stage.SetInitialData(key, value)
+			}
+
+			// Continue with stage execution
+			return next(ctx, stage, workflow, logger)
+		}
+	}
+}
+
+// StageNotificationMiddleware creates a workflow middleware that sends notifications before and after stage execution
+func StageNotificationMiddleware(
+	beforeNotify func(*Stage, *Workflow),
+	afterNotify func(*Stage, *Workflow, error)) WorkflowMiddleware {
+	return func(next WorkflowStageRunnerFunc) WorkflowStageRunnerFunc {
+		return func(ctx context.Context, stage *Stage, workflow *Workflow, logger Logger) error {
+			// Send notification before stage execution
+			if beforeNotify != nil {
+				beforeNotify(stage, workflow)
+			}
+
+			// Execute the stage
+			err := next(ctx, stage, workflow, logger)
+
+			// Send notification after stage execution, including any error
+			if afterNotify != nil {
+				afterNotify(stage, workflow, err)
+			}
+
+			return err
 		}
 	}
 }

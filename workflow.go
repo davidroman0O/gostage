@@ -1,11 +1,19 @@
 package gostage
 
 import (
+	"context"
 	"fmt"
 	"time"
 
 	"github.com/davidroman0O/gostage/store"
 )
+
+// WorkflowStageRunnerFunc is the core function type for executing a stage within a workflow.
+type WorkflowStageRunnerFunc func(ctx context.Context, stage *Stage, workflow *Workflow, logger Logger) error
+
+// WorkflowMiddleware represents a function that wraps stage execution within a workflow.
+// It allows performing operations before and after each stage executes.
+type WorkflowMiddleware func(next WorkflowStageRunnerFunc) WorkflowStageRunnerFunc
 
 // Workflow is a sequence of stages forming a complete process.
 // It provides the top-level coordination for executing a series of stages
@@ -33,6 +41,9 @@ type Workflow struct {
 	// Context stores arbitrary data for use during workflow execution
 	// Implementation-specific tools and state can be stored here
 	Context map[string]interface{}
+
+	// middleware contains workflow-level middleware that wraps stage execution
+	middleware []WorkflowMiddleware
 }
 
 // WorkflowInfo holds serializable workflow information.
@@ -60,12 +71,24 @@ func NewWorkflow(id, name, description string) *Workflow {
 		Store:       store.NewKVStore(),
 		Stages:      []*Stage{},
 		Context:     make(map[string]interface{}),
+		middleware:  []WorkflowMiddleware{},
 	}
 
 	// Store workflow info in the KV store with metadata
 	w.saveToStore()
 
 	return w
+}
+
+// Use adds middleware to the workflow's middleware chain
+// This middleware will be applied to each stage execution
+func (w *Workflow) Use(middleware ...WorkflowMiddleware) {
+	w.middleware = append(w.middleware, middleware...)
+}
+
+// GetMiddleware returns the workflow's middleware chain
+func (w *Workflow) GetMiddleware() []WorkflowMiddleware {
+	return w.middleware
 }
 
 // saveToStore saves or updates the workflow metadata in the store.

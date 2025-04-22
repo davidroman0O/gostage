@@ -26,6 +26,7 @@ gostage provides a structured approach to workflow management with these core co
 - **Rich Metadata** - Associate tags and properties with workflow components
 - **Serializable State** - Store workflow state during and between executions
 - **Extensible Middleware** - Add cross-cutting concerns like logging, error handling, and retry logic
+- **Hierarchical Middleware** - Customize workflow behavior at multiple levels
 
 ## Installation
 
@@ -491,6 +492,7 @@ stage.SetInitialData("key", value)
 2. **Stages** - Sequential phases within a workflow, each containing multiple actions
 3. **Actions** - Individual units of work that implement specific tasks
 4. **State Store** - A type-safe key-value store for workflow data
+5. **Middleware** - Customizable hooks that wrap execution at different levels
 
 ## Features
 
@@ -500,4 +502,195 @@ stage.SetInitialData("key", value)
 - Type-safe state storage with support for any Go type
 - Conditional execution based on runtime state
 - Rich metadata for traceability and organization
-- Serializable workflow state for persistence 
+- Serializable workflow state for persistence
+- Hierarchical middleware system
+
+## Middleware System
+
+GoStage provides a powerful hierarchical middleware system that allows you to customize behavior at different levels of execution:
+
+1. **Runner Middleware**: Wraps the entire workflow execution
+2. **Workflow Middleware**: Wraps individual stage executions
+3. **Stage Middleware**: Wraps all actions within a stage
+
+### Middleware Execution Flow
+
+The execution flow with middleware follows a nested pattern:
+
+```
+Runner Middleware (start)
+  Workflow (start)
+    Workflow Middleware for Stage 1 (start)
+      Stage 1 Middleware (start)
+        Actions in Stage 1
+      Stage 1 Middleware (end)
+    Workflow Middleware for Stage 1 (end)
+    
+    Workflow Middleware for Stage 2 (start)
+      Stage 2 Middleware (start)
+        Actions in Stage 2
+      Stage 2 Middleware (end)
+    Workflow Middleware for Stage 2 (end)
+  Workflow (end)
+Runner Middleware (end)
+```
+
+### Using Runner Middleware
+
+Runner middleware wraps the execution of an entire workflow:
+
+```go
+runner := gostage.NewRunner()
+
+// Add logging middleware
+runner.Use(func(next gostage.RunnerFunc) gostage.RunnerFunc {
+    return func(ctx context.Context, w *gostage.Workflow, logger gostage.Logger) error {
+        logger.Info("Starting workflow: %s", w.Name)
+        
+        err := next(ctx, w, logger)
+        
+        logger.Info("Completed workflow: %s", w.Name)
+        return err
+    }
+})
+
+// Execute the workflow
+runner.Execute(context.Background(), workflow, logger)
+```
+
+### Using Workflow Middleware
+
+Workflow middleware wraps the execution of each stage within a workflow:
+
+```go
+workflow := gostage.NewWorkflow("example", "Example Workflow", "A workflow with middleware")
+
+// Add stage notification middleware
+workflow.Use(func(next gostage.WorkflowStageRunnerFunc) gostage.WorkflowStageRunnerFunc {
+    return func(ctx context.Context, s *gostage.Stage, w *gostage.Workflow, logger gostage.Logger) error {
+        logger.Info("Starting stage: %s", s.Name)
+        
+        err := next(ctx, s, w, logger)
+        
+        logger.Info("Completed stage: %s", s.Name)
+        return err
+    }
+})
+
+// Add stages and actions...
+```
+
+### Using Stage Middleware
+
+Stage middleware wraps the execution of all actions within a stage:
+
+```go
+stage := gostage.NewStage("container-stage", "Container Stage", "A stage that runs in a container")
+
+// Add container middleware
+stage.Use(func(next gostage.StageRunnerFunc) gostage.StageRunnerFunc {
+    return func(ctx context.Context, s *gostage.Stage, w *gostage.Workflow, logger gostage.Logger) error {
+        // Start container
+        logger.Info("Starting container for stage: %s", s.Name)
+        
+        // Execute all actions in the container
+        err := next(ctx, s, w, logger)
+        
+        // Stop container (even if there was an error)
+        logger.Info("Stopping container for stage: %s", s.Name)
+        
+        return err
+    }
+})
+
+// Add actions that will run in the container...
+```
+
+### Built-in Middleware Functions
+
+The middleware system allows you to create various utility middleware functions. Here are examples of middleware you could build with the system:
+
+#### Example Runner Middleware
+
+```go
+// Example logging middleware for runners
+func LoggingMiddleware() gostage.Middleware {
+    return func(next gostage.RunnerFunc) gostage.RunnerFunc {
+        return func(ctx context.Context, w *gostage.Workflow, logger gostage.Logger) error {
+            start := time.Now()
+            logger.Info("Starting workflow: %s", w.Name)
+            
+            err := next(ctx, w, logger)
+            
+            elapsed := time.Since(start)
+            logger.Info("Completed workflow: %s (in %v)", w.Name, elapsed)
+            return err
+        }
+    }
+}
+
+// Example time limit middleware
+func TimeLimitMiddleware(duration time.Duration) gostage.Middleware {
+    return func(next gostage.RunnerFunc) gostage.RunnerFunc {
+        return func(ctx context.Context, w *gostage.Workflow, logger gostage.Logger) error {
+            ctx, cancel := context.WithTimeout(ctx, duration)
+            defer cancel()
+            
+            return next(ctx, w, logger)
+        }
+    }
+}
+```
+
+#### Example Workflow Middleware
+
+```go
+// Example stage notification middleware
+func StageNotificationMiddleware(beforeFn, afterFn func(stageName string)) gostage.WorkflowMiddleware {
+    return func(next gostage.WorkflowStageRunnerFunc) gostage.WorkflowStageRunnerFunc {
+        return func(ctx context.Context, s *gostage.Stage, w *gostage.Workflow, logger gostage.Logger) error {
+            if beforeFn != nil {
+                beforeFn(s.Name)
+            }
+            
+            err := next(ctx, s, w, logger)
+            
+            if afterFn != nil {
+                afterFn(s.Name)
+            }
+            
+            return err
+        }
+    }
+}
+```
+
+#### Example Stage Middleware
+
+```go
+// Example container middleware for stages
+func ContainerStageMiddleware(image, name string) gostage.StageMiddleware {
+    return func(next gostage.StageRunnerFunc) gostage.StageRunnerFunc {
+        return func(ctx context.Context, s *gostage.Stage, w *gostage.Workflow, logger gostage.Logger) error {
+            // Start container (pseudocode)
+            logger.Info("Starting container %s with image %s", name, image)
+            
+            // Run all actions in the container
+            err := next(ctx, s, w, logger)
+            
+            // Always stop container
+            logger.Info("Stopping container %s", name)
+            
+            return err
+        }
+    }
+}
+```
+
+## More Examples
+
+See the [examples](./examples) directory for more usage examples.
+
+## License
+
+[MIT License](LICENSE) 

@@ -1,8 +1,18 @@
 package gostage
 
 import (
+	"context"
+
 	"github.com/davidroman0O/gostage/store"
 )
+
+// StageRunnerFunc is the core function type for executing a stage.
+// It follows the same pattern as RunnerFunc for workflow execution.
+type StageRunnerFunc func(ctx context.Context, stage *Stage, workflow *Workflow, logger Logger) error
+
+// StageMiddleware represents a function that wraps stage execution.
+// It allows performing operations before and after a stage executes.
+type StageMiddleware func(next StageRunnerFunc) StageRunnerFunc
 
 // Stage is a logical phase within a workflow that contains a sequence of actions.
 // Stages provide organization and grouping of related actions and can be
@@ -21,6 +31,9 @@ type Stage struct {
 
 	// initialStore contains key-value data available at the start of stage execution
 	initialStore *store.KVStore
+
+	// middleware contains the middleware functions to apply during stage execution
+	middleware []StageMiddleware
 }
 
 // StageInfo holds serializable stage information for persistence and transmission.
@@ -43,6 +56,7 @@ func NewStage(id, name, description string) *Stage {
 		Actions:      []Action{},
 		Tags:         []string{},
 		initialStore: store.NewKVStore(),
+		middleware:   []StageMiddleware{},
 	}
 }
 
@@ -56,7 +70,19 @@ func NewStageWithTags(id, name, description string, tags []string) *Stage {
 		Actions:      []Action{},
 		Tags:         tags,
 		initialStore: store.NewKVStore(),
+		middleware:   []StageMiddleware{},
 	}
+}
+
+// Use adds middleware to the stage's middleware chain
+// Middleware is executed in the order it is added
+func (s *Stage) Use(middleware ...StageMiddleware) {
+	s.middleware = append(s.middleware, middleware...)
+}
+
+// GetMiddleware returns the stage's middleware chain
+func (s *Stage) GetMiddleware() []StageMiddleware {
+	return s.middleware
 }
 
 // toStageInfo converts a Stage to a serializable StageInfo.
