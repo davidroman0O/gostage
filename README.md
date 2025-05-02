@@ -443,7 +443,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ### Store Access in ActionContext
 
-In version 2.0+, the `ActionContext` no longer has a direct `Store` field. Instead, it provides a
+The `ActionContext` no longer has a direct `Store` field. Instead, it provides a
 `Store()` method that returns the workflow's store. This ensures that all actions operate on the same
 store instance and clarifies the ownership relationship.
 
@@ -471,7 +471,7 @@ func (a *MyAction) Execute(ctx *ActionContext) error {
 
 ### Stage Initial Store
 
-In version 2.0+, the `Stage` no longer exposes the `InitialStore` field directly. Instead, it provides
+The `Stage` no longer exposes the `InitialStore` field directly. Instead, it provides
 methods for interacting with the initial store data.
 
 Before:
