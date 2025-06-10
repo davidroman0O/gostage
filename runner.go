@@ -2,7 +2,11 @@ package gostage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/davidroman0O/gostage/store"
@@ -17,9 +21,7 @@ type Middleware func(next RunnerFunc) RunnerFunc
 // RunnerFunc is the core function type for executing a workflow.
 type RunnerFunc func(ctx context.Context, workflow *Workflow, logger Logger) error
 
-// Runner executes workflows and manages the execution pipeline.
-// It can be composed into other structures and supports middleware
-// for adding cross-cutting concerns to workflow execution.
+// Runner coordinates workflow execution and provides middleware support
 type Runner struct {
 	// Middleware chain to apply during workflow execution
 	middleware []Middleware
@@ -27,6 +29,10 @@ type Runner struct {
 	defaultLogger Logger
 	// Options for workflow execution
 	options RunOptions
+	// Broker handles IPC
+	Broker *RunnerBroker
+	// Spawn middleware for process lifecycle and communication
+	spawnMiddleware []SpawnMiddleware
 }
 
 // RunnerOption is a function that configures a Runner
@@ -53,19 +59,21 @@ func WithOptions(options RunOptions) RunnerOption {
 	}
 }
 
-// NewRunner creates a new workflow runner with the given options
+// NewRunner creates a new Runner with the given options
 func NewRunner(opts ...RunnerOption) *Runner {
-	runner := &Runner{
-		middleware:    []Middleware{},
-		defaultLogger: NewDefaultLogger(),
-		options:       DefaultRunOptions(),
+	r := &Runner{
+		middleware:      make([]Middleware, 0),
+		spawnMiddleware: make([]SpawnMiddleware, 0),
+		defaultLogger:   NewDefaultLogger(),
+		options:         DefaultRunOptions(),
+		Broker:          NewRunnerBroker(os.Stdout),
 	}
 
 	for _, opt := range opts {
-		opt(runner)
+		opt(r)
 	}
 
-	return runner
+	return r
 }
 
 // Use adds middleware to the runner's middleware chain
@@ -73,30 +81,28 @@ func (r *Runner) Use(middleware ...Middleware) {
 	r.middleware = append(r.middleware, middleware...)
 }
 
-// Execute runs a workflow with the configured middleware chain
+// Execute runs a workflow and its stages/actions.
+// It applies any configured middleware.
 func (r *Runner) Execute(ctx context.Context, workflow *Workflow, logger Logger) error {
+	// If no logger is provided, use the runner's default.
 	if logger == nil {
 		logger = r.defaultLogger
 	}
 
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	// Build the middleware chain
-	var handler RunnerFunc = r.executeWorkflow
-
-	// Apply middleware in reverse order
+	// Build the middleware chain and the core execution function
+	chain := r.executeWorkflow
 	for i := len(r.middleware) - 1; i >= 0; i-- {
-		handler = r.middleware[i](handler)
+		chain = r.middleware[i](chain)
 	}
 
-	// Execute the workflow with middleware chain
-	return handler(ctx, workflow, logger)
+	// Execute the chain
+	return chain(ctx, workflow, logger)
 }
 
 // executeWorkflow is the core workflow execution logic
 func (r *Runner) executeWorkflow(ctx context.Context, w *Workflow, logger Logger) error {
+	w.Context["runner"] = r // Expose runner to the context
+
 	if len(w.Stages) == 0 {
 		return fmt.Errorf("workflow '%s' has no stages to execute", w.ID)
 	}
@@ -741,4 +747,120 @@ func StageNotificationMiddleware(
 			return err
 		}
 	}
+}
+
+// Spawn executes a sub-workflow in a new child process with middleware support.
+// It sets up IPC pipes for communication and waits for the child to complete.
+func (r *Runner) Spawn(ctx context.Context, def SubWorkflowDef) error {
+	// Apply BeforeSpawn middleware
+	currentCtx := ctx
+	currentDef := def
+	var err error
+
+	for _, mw := range r.spawnMiddleware {
+		currentCtx, currentDef, err = mw.BeforeSpawn(currentCtx, currentDef)
+		if err != nil {
+			return fmt.Errorf("spawn middleware BeforeSpawn error: %w", err)
+		}
+	}
+
+	// Execute the actual spawn process
+	spawnErr := r.executeSpawn(currentCtx, currentDef)
+
+	// Apply AfterSpawn middleware (always run, even on error)
+	for _, mw := range r.spawnMiddleware {
+		if afterErr := mw.AfterSpawn(currentCtx, currentDef, spawnErr); afterErr != nil {
+			// Log the middleware error but don't override the original spawn error
+			fmt.Fprintf(os.Stderr, "spawn middleware AfterSpawn error: %v\n", afterErr)
+		}
+	}
+
+	return spawnErr
+}
+
+// executeSpawn contains the core spawn logic, separated for middleware integration
+func (r *Runner) executeSpawn(ctx context.Context, def SubWorkflowDef) error {
+	// 1. Serialize the workflow definition
+	defBytes, err := json.Marshal(def)
+	if err != nil {
+		return fmt.Errorf("failed to serialize sub-workflow definition: %w", err)
+	}
+
+	// 2. Get the path to the current executable
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to find executable path: %w", err)
+	}
+
+	// 3. Create the command to run the child process
+	cmd := exec.CommandContext(ctx, exePath, "--gostage-child")
+
+	// 4. Set up the IPC pipes
+	childStdin, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stdin pipe for child: %w", err)
+	}
+	defer childStdin.Close()
+
+	childStdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stdout pipe for child: %w", err)
+	}
+	defer childStdout.Close()
+
+	// Redirect child's stderr to the parent's for logging
+	cmd.Stderr = os.Stderr
+
+	// 5. Start the child process
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start child process: %w", err)
+	}
+
+	// Register OnChildMessage callbacks from spawn middleware
+	for _, mw := range r.spawnMiddleware {
+		r.Broker.AddMessageCallback(mw.OnChildMessage)
+	}
+
+	// 6. Start a goroutine to listen for messages from the child
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// The parent's runner broker listens for messages from the child's stdout
+		if err := r.Broker.Listen(childStdout); err != nil {
+			// Log this error. The runner's logger could be used here.
+			// For simplicity, we print to stderr for now.
+			fmt.Fprintf(os.Stderr, "error listening to child process: %v\n", err)
+		}
+	}()
+
+	// 7. Send the workflow definition to the child's stdin
+	_, err = childStdin.Write(defBytes)
+	if err != nil {
+		return fmt.Errorf("failed to write workflow definition to child: %w", err)
+	}
+	// Close stdin to signal the child that the definition is complete.
+	childStdin.Close()
+
+	// 8. Wait for the child process to finish
+	err = cmd.Wait()
+
+	// Wait for the listening goroutine to finish processing all messages
+	wg.Wait()
+
+	if err != nil {
+		return fmt.Errorf("child process exited with error: %w", err)
+	}
+
+	return nil
+}
+
+// UseSpawnMiddleware adds spawn middleware to the runner
+func (r *Runner) UseSpawnMiddleware(middleware ...SpawnMiddleware) {
+	r.spawnMiddleware = append(r.spawnMiddleware, middleware...)
+}
+
+// AddIPCMiddleware adds IPC middleware to the runner's broker
+func (r *Runner) AddIPCMiddleware(middleware ...IPCMiddleware) {
+	r.Broker.AddIPCMiddleware(middleware...)
 }

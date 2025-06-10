@@ -93,17 +93,53 @@ func (ctx *ActionContext) Store() *store.KVStore {
 	return ctx.Workflow.Store
 }
 
-// BaseAction provides a common implementation for simple actions.
-// It implements the core functionality of the Action interface,
-// making it easy to create custom actions by embedding this struct.
+// It's recommended that custom actions embed this struct to handle common properties.
 type BaseAction struct {
 	name        string
 	description string
 	tags        []string
 }
 
-// NewBaseAction creates a new base action with the given name and description.
-// The returned BaseAction can be embedded in custom action types.
+// GetActionBaseFields uses reflection to access BaseAction fields from any Action.
+// It returns the BaseAction fields if found, or nil if the action doesn't embed BaseAction.
+func GetActionBaseFields(action Action) *BaseAction {
+	if action == nil {
+		return nil
+	}
+
+	// Use reflection to find embedded BaseAction
+	val := reflect.ValueOf(action)
+	if val.Kind() == reflect.Ptr {
+		val = val.Elem()
+	}
+
+	if val.Kind() != reflect.Struct {
+		return nil
+	}
+
+	// Look for embedded BaseAction field
+	typ := val.Type()
+	for i := 0; i < val.NumField(); i++ {
+		field := val.Field(i)
+		fieldType := typ.Field(i)
+
+		// Check if this is an embedded BaseAction or a field of type BaseAction
+		if fieldType.Type == reflect.TypeOf(BaseAction{}) {
+			if field.CanAddr() {
+				return field.Addr().Interface().(*BaseAction)
+			}
+		}
+
+		// Also check for pointer to BaseAction
+		if fieldType.Type == reflect.TypeOf(&BaseAction{}) && !field.IsNil() {
+			return field.Interface().(*BaseAction)
+		}
+	}
+
+	return nil
+}
+
+// NewBaseAction creates a new BaseAction with a name and description.
 func NewBaseAction(name, description string) BaseAction {
 	return BaseAction{
 		name:        name,
@@ -112,8 +148,7 @@ func NewBaseAction(name, description string) BaseAction {
 	}
 }
 
-// NewBaseActionWithTags creates a new base action with name, description, and tags.
-// This is useful when the action needs to be categorized or filtered by tags.
+// NewBaseActionWithTags creates a new BaseAction with a name, description, and tags.
 func NewBaseActionWithTags(name, description string, tags []string) BaseAction {
 	return BaseAction{
 		name:        name,
@@ -122,33 +157,32 @@ func NewBaseActionWithTags(name, description string, tags []string) BaseAction {
 	}
 }
 
-// Name returns the action name.
-// This implements part of the Action interface.
-func (a BaseAction) Name() string {
+// Name returns the action's name.
+func (a *BaseAction) Name() string {
 	return a.name
 }
 
-// Description returns the action description.
-// This implements part of the Action interface.
-func (a BaseAction) Description() string {
+// Description returns a human-readable description of the action.
+func (a *BaseAction) Description() string {
 	return a.description
 }
 
-// Tags returns the action's tags.
-// This implements part of the Action interface.
-func (a BaseAction) Tags() []string {
+// Tags returns the action's tags for organization and filtering.
+func (a *BaseAction) Tags() []string {
 	return a.tags
 }
 
-// AddTag adds a tag to the action.
-// Tags can be used for organization, filtering, and conditional execution.
+// AddTag adds a new tag to the action, avoiding duplicates.
 func (a *BaseAction) AddTag(tag string) {
+	for _, t := range a.tags {
+		if t == tag {
+			return // Tag already exists
+		}
+	}
 	a.tags = append(a.tags, tag)
 }
 
-// AddDynamicAction adds a new action to be inserted after the current action.
-// This allows for dynamic workflow modification during execution.
-// The action will be executed immediately after the current action completes.
+// AddDynamicAction adds an action to be executed immediately after the current action.
 func (ctx *ActionContext) AddDynamicAction(action Action) {
 	ctx.dynamicActions = append(ctx.dynamicActions, action)
 }
@@ -650,4 +684,14 @@ func (ctx *ActionContext) EnableStagesByTag(tag string) int {
 		}
 	}
 	return enabledCount
+}
+
+// Send sends a message through the Runner's broker.
+// This is the primary way for an action to communicate with a parent process
+// or other external listeners.
+func (ctx *ActionContext) Send(msgType MessageType, payload interface{}) error {
+	if runner, ok := ctx.Workflow.Context["runner"].(*Runner); ok {
+		return runner.Broker.Send(msgType, payload)
+	}
+	return fmt.Errorf("runner not found in workflow context")
 }
