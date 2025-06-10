@@ -59,6 +59,13 @@ func WithOptions(options RunOptions) RunnerOption {
 	}
 }
 
+// WithBroker sets the broker for the runner
+func WithBroker(broker *RunnerBroker) RunnerOption {
+	return func(r *Runner) {
+		r.Broker = broker
+	}
+}
+
 // NewRunner creates a new Runner with the given options
 func NewRunner(opts ...RunnerOption) *Runner {
 	r := &Runner{
@@ -74,6 +81,14 @@ func NewRunner(opts ...RunnerOption) *Runner {
 	}
 
 	return r
+}
+
+// NewRunnerWithBroker creates a new Runner with the specified broker.
+// This is a convenience constructor commonly used for child processes.
+func NewRunnerWithBroker(broker *RunnerBroker, opts ...RunnerOption) *Runner {
+	// Create the runner with the broker option first
+	allOpts := append([]RunnerOption{WithBroker(broker)}, opts...)
+	return NewRunner(allOpts...)
 }
 
 // Use adds middleware to the runner's middleware chain

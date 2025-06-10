@@ -61,10 +61,8 @@ func childMain() {
 	broker := NewRunnerBroker(os.Stdout)
 	// 2. Create a logger that sends all logs through this broker.
 	brokerLogger := NewBrokerLogger(broker)
-	// 3. Create a runner. Its default logger will be ignored.
-	childRunner := NewRunner()
-	// 4. Manually set the runner's broker so ctx.Send works.
-	childRunner.Broker = broker
+	// 3. Create a runner with the broker using the convenience constructor.
+	childRunner := NewRunnerWithBroker(broker)
 
 	// The child process must have the same actions registered as the parent
 	// so it can instantiate them from the definition.

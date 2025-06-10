@@ -3,6 +3,7 @@ package gostage
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -553,4 +554,47 @@ func TestMiddleware(t *testing.T) {
 	val, err := store.Get[string](workflow.Store, "middleware-after")
 	assert.NoError(t, err)
 	assert.Equal(t, "after-value", val)
+}
+
+// TestNewRunnerWithBroker tests the new constructor with broker
+func TestNewRunnerWithBroker(t *testing.T) {
+	// Create a custom broker
+	broker := NewRunnerBroker(os.Stdout)
+
+	// Test NewRunnerWithBroker constructor
+	runner := NewRunnerWithBroker(broker)
+
+	// Verify the broker was set correctly
+	assert.Equal(t, broker, runner.Broker, "Broker should be set correctly")
+	assert.NotNil(t, runner.defaultLogger, "Default logger should be set")
+	assert.NotNil(t, runner.middleware, "Middleware slice should be initialized")
+
+	// Test with additional options
+	testLogger := &TestLogger{t: t}
+	runner2 := NewRunnerWithBroker(broker, WithLogger(testLogger))
+
+	assert.Equal(t, broker, runner2.Broker, "Broker should be set correctly")
+	assert.Equal(t, testLogger, runner2.defaultLogger, "Custom logger should be set")
+}
+
+// TestWithBrokerOption tests the WithBroker option
+func TestWithBrokerOption(t *testing.T) {
+	// Create a custom broker
+	broker := NewRunnerBroker(os.Stdout)
+
+	// Test WithBroker option
+	runner := NewRunner(WithBroker(broker))
+
+	// Verify the broker was set correctly
+	assert.Equal(t, broker, runner.Broker, "Broker should be set correctly via option")
+
+	// Test combining with other options
+	testLogger := &TestLogger{t: t}
+	runner2 := NewRunner(
+		WithBroker(broker),
+		WithLogger(testLogger),
+	)
+
+	assert.Equal(t, broker, runner2.Broker, "Broker should be set correctly")
+	assert.Equal(t, testLogger, runner2.defaultLogger, "Logger should be set correctly")
 }

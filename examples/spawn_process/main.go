@@ -106,9 +106,8 @@ func childMain() {
 	// Create logger that sends all messages to parent
 	logger := &ChildLogger{broker: broker}
 
-	// Create runner and set broker
-	runner := gostage.NewRunner()
-	runner.Broker = broker
+	// Create runner with broker using the convenience constructor
+	runner := gostage.NewRunnerWithBroker(broker)
 
 	// Register the simple action
 	gostage.RegisterAction("simple-test", func() gostage.Action {

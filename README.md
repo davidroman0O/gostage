@@ -360,6 +360,28 @@ func (a *ProcessInfoAction) Execute(ctx *gostage.ActionContext) error {
 }
 ```
 
+### Child Process Setup
+
+In child processes, create runners with brokers using the convenient constructor:
+
+```go
+func childMain() {
+    // Set up broker for parent communication
+    broker := gostage.NewRunnerBroker(os.Stdout)
+    
+    // Create runner with broker - clean and simple!
+    runner := gostage.NewRunnerWithBroker(broker)
+    
+    // Or use the option-based approach
+    runner := gostage.NewRunner(gostage.WithBroker(broker))
+    
+    // Now ctx.Send() will work properly in actions
+    // ... rest of child process logic
+}
+```
+
+**Note**: The `NewRunnerWithBroker()` constructor is a convenience method that's particularly useful for child processes, replacing the previous pattern of manual broker assignment.
+
 ### IPC Message Handling
 
 Set up message handlers in the parent to receive data from child processes:
