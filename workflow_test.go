@@ -37,7 +37,8 @@ type TestAction struct {
 	customTags  []string
 }
 
-// NewTestAction creates a new test action
+// NewTestAction creates a new test action with a name, description, and execution function.
+// It's a convenient helper for creating mock actions in tests.
 func NewTestAction(name, description string, executeFunc func(ctx *ActionContext) error) *TestAction {
 	return &TestAction{
 		BaseAction:  NewBaseAction(name, description),

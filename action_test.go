@@ -508,3 +508,32 @@ func TestCustomActionImplementation(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, executed, "Execute function should have been called")
 }
+
+// TestGetActionBaseFields tests the reflection-based helper function
+func TestGetActionBaseFields(t *testing.T) {
+	// Test with an action that embeds BaseAction
+	action := &TestActionImpl{
+		BaseAction:  NewBaseAction("test-action", "Test Action"),
+		executeFunc: nil,
+	}
+
+	// Test that reflection can find the BaseAction
+	base := GetActionBaseFields(action)
+	assert.NotNil(t, base, "Should be able to find embedded BaseAction")
+	assert.Equal(t, "test-action", base.Name())
+	assert.Equal(t, "Test Action", base.Description())
+
+	// Test modifying the base fields through reflection
+	base.name = "modified-name"
+	base.description = "Modified Description"
+	base.AddTag("new-tag")
+
+	// Verify changes are reflected in the original action
+	assert.Equal(t, "modified-name", action.Name())
+	assert.Equal(t, "Modified Description", action.Description())
+	assert.Contains(t, action.Tags(), "new-tag")
+
+	// Test with nil action
+	nilBase := GetActionBaseFields(nil)
+	assert.Nil(t, nilBase, "Should return nil for nil action")
+}

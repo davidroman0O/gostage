@@ -27,6 +27,9 @@ gostage provides a structured approach to workflow management with these core co
 - **Serializable State** - Store workflow state during and between executions
 - **Extensible Middleware** - Add cross-cutting concerns like logging, error handling, and retry logic
 - **Hierarchical Middleware** - Customize workflow behavior at multiple levels
+- **Process Spawning** - Execute workflows in separate child processes with full IPC
+- **Cross-Platform IPC** - Inter-process communication that works on Windows, Linux, macOS
+- **Advanced Middleware System** - Transform messages and manage process lifecycle
 
 ## Installation
 
@@ -143,6 +146,19 @@ stage := gostage.NewStageWithTags(
 
 // Add actions to the stage
 stage.AddAction(myAction)
+
+// Set initial data for the stage (replaces direct InitialStore access)
+stage.SetInitialData("key", value)
+```
+
+**Note**: In earlier versions, stages exposed an `InitialStore` field directly. This has been changed to use the `SetInitialData()` method for better encapsulation:
+
+```go
+// Before (deprecated)
+stage.InitialStore.Put("key", value)
+
+// After (current)
+stage.SetInitialData("key", value)
 ```
 
 ### Workflow
@@ -275,6 +291,512 @@ metadata.SetProperty("source", "external-api")
 ctx.Store().PutWithMetadata("customer.data", customerData, metadata)
 ```
 
+**Note**: The `ActionContext` provides store access through a `Store()` method rather than a direct field. This ensures all actions operate on the same store instance:
+
+```go
+// Before (deprecated) 
+ctx.Store.Put("key", value)
+data, err := store.Get[MyType](ctx.Store, "other-key")
+
+// After (current)
+ctx.Store().Put("key", value)
+data, err := store.Get[MyType](ctx.Store(), "other-key")
+```
+
+## Process Spawning and IPC
+
+gostage provides powerful process spawning capabilities that allow workflows to execute in separate child processes with full inter-process communication (IPC). This enables isolation, fault tolerance, and distributed execution.
+
+### Basic Process Spawning
+
+Execute workflows in separate child processes:
+
+```go
+// Create a runner with spawn capability
+runner := gostage.NewRunner()
+
+// Define a workflow to run in a child process
+workflowDef := gostage.SubWorkflowDef{
+    ID:          "child-workflow",
+    Name:        "Child Process Workflow", 
+    Description: "Runs in a separate process",
+    Stages: []gostage.StageDef{
+        {
+            ID: "main-stage",
+            Actions: []gostage.ActionDef{
+                {ID: "process-info"},
+            },
+        },
+    },
+}
+
+// Spawn the workflow in a child process
+err := runner.Spawn(context.Background(), workflowDef)
+```
+
+### Real Child Processes
+
+The spawn functionality creates actual operating system processes with different PIDs:
+
+```go
+type ProcessInfoAction struct {
+    gostage.BaseAction
+}
+
+func (a *ProcessInfoAction) Execute(ctx *gostage.ActionContext) error {
+    processID := os.Getpid()
+    parentPID := os.Getppid()
+    
+    ctx.Logger.Info("Child Process ID: %d", processID)
+    ctx.Logger.Info("Parent Process ID: %d", parentPID)
+    
+    // Child can send data back to parent via IPC
+    ctx.Send(gostage.MessageTypeStorePut, map[string]interface{}{
+        "key":   "child_pid",
+        "value": processID,
+    })
+    
+    return nil
+}
+```
+
+### Child Process Setup
+
+In child processes, create runners with brokers using the convenient constructor:
+
+```go
+func childMain() {
+    // Set up broker for parent communication
+    broker := gostage.NewRunnerBroker(os.Stdout)
+    
+    // Create runner with broker - clean and simple!
+    runner := gostage.NewRunnerWithBroker(broker)
+    
+    // Or use the option-based approach
+    runner := gostage.NewRunner(gostage.WithBroker(broker))
+    
+    // Now ctx.Send() will work properly in actions
+    // ... rest of child process logic
+}
+```
+
+**Note**: The `NewRunnerWithBroker()` constructor is a convenience method that's particularly useful for child processes, replacing the previous pattern of manual broker assignment.
+
+### IPC Message Handling
+
+Set up message handlers in the parent to receive data from child processes:
+
+```go
+runner := gostage.NewRunner()
+
+// Handle log messages from child processes
+runner.Broker.RegisterHandler(gostage.MessageTypeLog, func(msgType gostage.MessageType, payload json.RawMessage) error {
+    var logData map[string]string
+    json.Unmarshal(payload, &logData)
+    
+    level := logData["level"]
+    message := logData["message"]
+    
+    fmt.Printf("[CHILD-%s] %s\n", level, message)
+    return nil
+})
+
+// Handle store updates from child processes
+runner.Broker.RegisterHandler(gostage.MessageTypeStorePut, func(msgType gostage.MessageType, payload json.RawMessage) error {
+    var data map[string]interface{}
+    json.Unmarshal(payload, &data)
+    
+    key := data["key"].(string)
+    value := data["value"]
+    
+    fmt.Printf("📦 Received from child: %s = %v\n", key, value)
+    return nil
+})
+```
+
+### IPC Middleware System
+
+Transform and enhance messages between parent and child processes:
+
+```go
+// Message transformation middleware
+func MessageTransformMiddleware() gostage.IPCMiddlewareFunc {
+    return gostage.IPCMiddlewareFunc{
+        ProcessOutboundFunc: func(msgType gostage.MessageType, payload interface{}) (gostage.MessageType, interface{}, error) {
+            if msgType == gostage.MessageTypeLog {
+                if logData, ok := payload.(map[string]string); ok {
+                    // Add timestamp and prefix to all log messages
+                    logData["message"] = "[ENHANCED] " + logData["message"]
+                    logData["timestamp"] = time.Now().Format("15:04:05.000")
+                }
+            }
+            return msgType, payload, nil
+        },
+    }
+}
+
+// Add middleware to runner
+runner.AddIPCMiddleware(MessageTransformMiddleware())
+```
+
+### Spawn Middleware System
+
+Hook into the process lifecycle for monitoring and management:
+
+```go
+// Process lifecycle middleware
+func ProcessLifecycleMiddleware() gostage.SpawnMiddlewareFunc {
+    return gostage.SpawnMiddlewareFunc{
+        BeforeSpawnFunc: func(ctx context.Context, def gostage.SubWorkflowDef) (context.Context, gostage.SubWorkflowDef, error) {
+            fmt.Printf("🚀 About to spawn child process for workflow: %s\n", def.ID)
+            
+            // Add context values
+            enhancedCtx := context.WithValue(ctx, "spawn_time", time.Now())
+            return enhancedCtx, def, nil
+        },
+        AfterSpawnFunc: func(ctx context.Context, def gostage.SubWorkflowDef, err error) error {
+            if spawnTime, ok := ctx.Value("spawn_time").(time.Time); ok {
+                duration := time.Since(spawnTime)
+                fmt.Printf("⏱️ Child process completed in %v\n", duration)
+            }
+            return nil
+        },
+        OnChildMessageFunc: func(msgType gostage.MessageType, payload json.RawMessage) error {
+            fmt.Printf("📨 Received message type: %s\n", msgType)
+            return nil
+        },
+    }
+}
+
+// Add spawn middleware to runner
+runner.UseSpawnMiddleware(ProcessLifecycleMiddleware())
+```
+
+### Cross-Platform Compatibility
+
+The IPC system works seamlessly across all platforms:
+
+- **Windows**: Uses named pipes and `CreateProcess()`
+- **Linux**: Uses POSIX pipes and `fork()/exec()`
+- **macOS**: Uses POSIX pipes and `fork()/exec()`
+- **Other platforms**: Uses Go's standard cross-platform mechanisms
+
+```go
+// Cross-platform file operations in child process
+filename := filepath.Join(os.TempDir(), fmt.Sprintf("child_process_%d.txt", os.Getpid()))
+content := fmt.Sprintf("Created by child process %d on %s/%s\n", 
+    os.Getpid(), runtime.GOOS, runtime.GOARCH)
+
+err := os.WriteFile(filename, []byte(content), 0644)
+```
+
+### Advanced IPC Patterns
+
+#### Message Encryption Simulation
+
+```go
+func MessageEncryptionMiddleware() gostage.IPCMiddlewareFunc {
+    return gostage.IPCMiddlewareFunc{
+        ProcessOutboundFunc: func(msgType gostage.MessageType, payload interface{}) (gostage.MessageType, interface{}, error) {
+            if msgType == gostage.MessageTypeStorePut {
+                if storeData, ok := payload.(map[string]interface{}); ok {
+                    if key, exists := storeData["key"]; exists {
+                        if keyStr, ok := key.(string); ok && strings.Contains(keyStr, "sensitive") {
+                            storeData["encrypted"] = true
+                            storeData["key"] = "encrypted_" + keyStr
+                        }
+                    }
+                }
+            }
+            return msgType, payload, nil
+        },
+        ProcessInboundFunc: func(msgType gostage.MessageType, payload json.RawMessage) (gostage.MessageType, json.RawMessage, error) {
+            // Decrypt messages on the receiving end
+            if msgType == gostage.MessageTypeStorePut {
+                var storeData map[string]interface{}
+                if err := json.Unmarshal(payload, &storeData); err == nil {
+                    if encrypted, exists := storeData["encrypted"]; exists && encrypted == true {
+                        if key, exists := storeData["key"]; exists {
+                            if keyStr, ok := key.(string); ok && strings.HasPrefix(keyStr, "encrypted_") {
+                                storeData["key"] = strings.TrimPrefix(keyStr, "encrypted_")
+                                delete(storeData, "encrypted")
+                                if newPayload, err := json.Marshal(storeData); err == nil {
+                                    payload = json.RawMessage(newPayload)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return msgType, payload, nil
+        },
+    }
+}
+```
+
+#### Metrics Collection
+
+```go
+// Middleware that implements both IPC and Spawn interfaces
+type MetricsMiddleware struct {
+    MessageCount map[gostage.MessageType]int
+    TotalBytes   int
+}
+
+func (m *MetricsMiddleware) ProcessOutbound(msgType gostage.MessageType, payload interface{}) (gostage.MessageType, interface{}, error) {
+    m.MessageCount[msgType]++
+    if data, err := json.Marshal(payload); err == nil {
+        m.TotalBytes += len(data)
+    }
+    return msgType, payload, nil
+}
+
+func (m *MetricsMiddleware) AfterSpawn(ctx context.Context, def gostage.SubWorkflowDef, err error) error {
+    fmt.Println("📊 Communication Statistics:")
+    for msgType, count := range m.MessageCount {
+        fmt.Printf("  %s: %d messages\n", msgType, count)
+    }
+    fmt.Printf("  Total bytes: %d\n", m.TotalBytes)
+    return nil
+}
+
+// Add to runner (implements both interfaces)
+metrics := NewMetricsMiddleware()
+runner.AddIPCMiddleware(metrics)
+runner.UseSpawnMiddleware(metrics)
+```
+
+### IPC Communication Protocol
+
+The IPC system uses structured JSON messages for communication between parent and child processes:
+
+#### Message Types
+
+- **`MessageTypeLog`** - Log messages from child to parent
+- **`MessageTypeStorePut`** - Store updates from child to parent  
+- **`MessageTypeStoreDelete`** - Store deletions from child to parent
+- **`MessageTypeWorkflowStart`** - Initial message from parent to child to start execution
+- **`MessageTypeWorkflowResult`** - Final message from child to parent with outcome
+
+#### Communication Flow
+
+```
+Parent Process                     Child Process
+┌─────────────────┐               ┌─────────────────┐
+│                 │    stdin      │                 │
+│   Runner with   │─────────────→ │   Child Runner  │
+│   Message       │ WorkflowStart │   with Actions  │
+│   Handlers      │               │                 │
+│                 │    stdout     │                 │
+│                 │←───────────── │                 │
+│                 │ Log/Store Msgs│                 │
+└─────────────────┘               └─────────────────┘
+```
+
+#### Custom Message Handling
+
+```go
+// Register custom message handlers
+runner.Broker.RegisterHandler("custom-message-type", func(msgType gostage.MessageType, payload json.RawMessage) error {
+    var customData MyCustomData
+    if err := json.Unmarshal(payload, &customData); err != nil {
+        return err
+    }
+    
+    // Process custom message
+    fmt.Printf("Received custom data: %+v\n", customData)
+    return nil
+})
+
+// Send custom messages from child process
+ctx.Send("custom-message-type", MyCustomData{
+    Field1: "value1",
+    Field2: 42,
+})
+```
+
+## Middleware System
+
+GoStage provides a powerful hierarchical middleware system that allows you to customize behavior at different levels of execution:
+
+1. **Runner Middleware**: Wraps the entire workflow execution
+2. **Workflow Middleware**: Wraps individual stage executions
+3. **Stage Middleware**: Wraps all actions within a stage
+
+### Middleware Execution Flow
+
+The execution flow with middleware follows a nested pattern:
+
+```
+Runner Middleware (start)
+  Workflow (start)
+    Workflow Middleware for Stage 1 (start)
+      Stage 1 Middleware (start)
+        Actions in Stage 1
+      Stage 1 Middleware (end)
+    Workflow Middleware for Stage 1 (end)
+    
+    Workflow Middleware for Stage 2 (start)
+      Stage 2 Middleware (start)
+        Actions in Stage 2
+      Stage 2 Middleware (end)
+    Workflow Middleware for Stage 2 (end)
+  Workflow (end)
+Runner Middleware (end)
+```
+
+### Using Runner Middleware
+
+Runner middleware wraps the execution of an entire workflow:
+
+```go
+runner := gostage.NewRunner()
+
+// Add logging middleware
+runner.Use(func(next gostage.RunnerFunc) gostage.RunnerFunc {
+    return func(ctx context.Context, w *gostage.Workflow, logger gostage.Logger) error {
+        logger.Info("Starting workflow: %s", w.Name)
+        
+        err := next(ctx, w, logger)
+        
+        logger.Info("Completed workflow: %s", w.Name)
+        return err
+    }
+})
+
+// Execute the workflow
+runner.Execute(context.Background(), workflow, logger)
+```
+
+### Using Workflow Middleware
+
+Workflow middleware wraps the execution of each stage within a workflow:
+
+```go
+workflow := gostage.NewWorkflow("example", "Example Workflow", "A workflow with middleware")
+
+// Add stage notification middleware
+workflow.Use(func(next gostage.WorkflowStageRunnerFunc) gostage.WorkflowStageRunnerFunc {
+    return func(ctx context.Context, s *gostage.Stage, w *gostage.Workflow, logger gostage.Logger) error {
+        logger.Info("Starting stage: %s", s.Name)
+        
+        err := next(ctx, s, w, logger)
+        
+        logger.Info("Completed stage: %s", s.Name)
+        return err
+    }
+})
+
+// Add stages and actions...
+```
+
+### Using Stage Middleware
+
+Stage middleware wraps the execution of all actions within a stage:
+
+```go
+stage := gostage.NewStage("container-stage", "Container Stage", "A stage that runs in a container")
+
+// Add container middleware
+stage.Use(func(next gostage.StageRunnerFunc) gostage.StageRunnerFunc {
+    return func(ctx context.Context, s *gostage.Stage, w *gostage.Workflow, logger gostage.Logger) error {
+        // Start container
+        logger.Info("Starting container for stage: %s", s.Name)
+        
+        // Execute all actions in the container
+        err := next(ctx, s, w, logger)
+        
+        // Always stop container
+        logger.Info("Stopping container for stage: %s", s.Name)
+        
+        return err
+    }
+})
+
+// Add actions that will run in the container...
+```
+
+### Built-in Middleware Functions
+
+The middleware system allows you to create various utility middleware functions. Here are examples of middleware you could build with the system:
+
+#### Example Runner Middleware
+
+```go
+// Example logging middleware for runners
+func LoggingMiddleware() gostage.Middleware {
+    return func(next gostage.RunnerFunc) gostage.RunnerFunc {
+        return func(ctx context.Context, w *gostage.Workflow, logger gostage.Logger) error {
+            start := time.Now()
+            logger.Info("Starting workflow: %s", w.Name)
+            
+            err := next(ctx, w, logger)
+            
+            elapsed := time.Since(start)
+            logger.Info("Completed workflow: %s (in %v)", w.Name, elapsed)
+            return err
+        }
+    }
+}
+
+// Example time limit middleware
+func TimeLimitMiddleware(duration time.Duration) gostage.Middleware {
+    return func(next gostage.RunnerFunc) gostage.RunnerFunc {
+        return func(ctx context.Context, w *gostage.Workflow, logger gostage.Logger) error {
+            ctx, cancel := context.WithTimeout(ctx, duration)
+            defer cancel()
+            
+            return next(ctx, w, logger)
+        }
+    }
+}
+```
+
+#### Example Workflow Middleware
+
+```go
+// Example stage notification middleware
+func StageNotificationMiddleware(beforeFn, afterFn func(stageName string)) gostage.WorkflowMiddleware {
+    return func(next gostage.WorkflowStageRunnerFunc) gostage.WorkflowStageRunnerFunc {
+        return func(ctx context.Context, s *gostage.Stage, w *gostage.Workflow, logger gostage.Logger) error {
+            if beforeFn != nil {
+                beforeFn(s.Name)
+            }
+            
+            err := next(ctx, s, w, logger)
+            
+            if afterFn != nil {
+                afterFn(s.Name)
+            }
+            
+            return err
+        }
+    }
+}
+```
+
+#### Example Stage Middleware
+
+```go
+// Example container middleware for stages
+func ContainerStageMiddleware(image, name string) gostage.StageMiddleware {
+    return func(next gostage.StageRunnerFunc) gostage.StageRunnerFunc {
+        return func(ctx context.Context, s *gostage.Stage, w *gostage.Workflow, logger gostage.Logger) error {
+            // Start container (pseudocode)
+            logger.Info("Starting container %s with image %s", name, image)
+            
+            // Run all actions in the container
+            err := next(ctx, s, w, logger)
+            
+            // Always stop container
+            logger.Info("Stopping container %s", name)
+            
+            return err
+        }
+    }
+}
+```
+
 ## Advanced Features
 
 ### Dynamic Action Generation
@@ -404,88 +926,6 @@ The `examples/extended_runner` directory shows a complete example of this patter
 - How to provide helper functions for accessing typed resources
 - How to create a fluent configuration API for your extended runner
 
-## Use Cases
-
-gostage is well-suited for various workflow scenarios:
-
-- **ETL Processes** - Define data extraction, transformation and loading pipelines
-- **Deployment Pipelines** - Create sequential deployment steps with conditional execution
-- **Business Workflows** - Model complex business processes with state tracking
-- **Resource Provisioning** - Set up resource discovery and provisioning sequences
-- **Data Processing** - Orchestrate complex data operations with state management
-- **Error-Tolerant Flows** - Build resilient workflows with retry logic and error recovery
-- **Audited Processes** - Implement compliance requirements with audit trails and validation checks
-
-## Examples
-
-The repository includes several examples demonstrating different features:
-
-- Basic workflow creation and execution
-- Dynamic stage generation
-- File operations workflow
-- Action wrapping patterns
-- Conditional execution with enable/disable
-- Extended Runner pattern for domain-specific workflows
-- Middleware patterns for cross-cutting concerns
-- Error handling and recovery strategies
-
-Check the `examples/` directory for complete examples.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## API Changes
-
-### Store Access in ActionContext
-
-The `ActionContext` no longer has a direct `Store` field. Instead, it provides a
-`Store()` method that returns the workflow's store. This ensures that all actions operate on the same
-store instance and clarifies the ownership relationship.
-
-Before:
-```go
-func (a *MyAction) Execute(ctx *ActionContext) error {
-    // Direct field access
-    ctx.Store.Put("key", value)
-    
-    data, err := store.Get[MyType](ctx.Store, "other-key")
-    // ...
-}
-```
-
-After:
-```go
-func (a *MyAction) Execute(ctx *ActionContext) error {
-    // Method call to get the store
-    ctx.Store().Put("key", value)
-    
-    data, err := store.Get[MyType](ctx.Store(), "other-key")
-    // ...
-}
-```
-
-### Stage Initial Store
-
-The `Stage` no longer exposes the `InitialStore` field directly. Instead, it provides
-methods for interacting with the initial store data.
-
-Before:
-```go
-stage := NewStage("my-stage", "My Stage", "Description")
-stage.InitialStore.Put("key", value)
-```
-
-After:
-```go
-stage := NewStage("my-stage", "My Stage", "Description")
-stage.SetInitialData("key", value)
-```
-
 ## Core Components
 
 1. **Workflows** - The top-level container representing an entire process
@@ -505,191 +945,77 @@ stage.SetInitialData("key", value)
 - Serializable workflow state for persistence
 - Hierarchical middleware system
 
-## Middleware System
+## Use Cases
 
-GoStage provides a powerful hierarchical middleware system that allows you to customize behavior at different levels of execution:
+gostage is well-suited for various workflow scenarios:
 
-1. **Runner Middleware**: Wraps the entire workflow execution
-2. **Workflow Middleware**: Wraps individual stage executions
-3. **Stage Middleware**: Wraps all actions within a stage
+- **ETL Processes** - Define data extraction, transformation and loading pipelines
+- **Deployment Pipelines** - Create sequential deployment steps with conditional execution
+- **Business Workflows** - Model complex business processes with state tracking
+- **Resource Provisioning** - Set up resource discovery and provisioning sequences
+- **Data Processing** - Orchestrate complex data operations with state management
+- **Error-Tolerant Flows** - Build resilient workflows with retry logic and error recovery
+- **Audited Processes** - Implement compliance requirements with audit trails and validation checks
+- **Distributed Processing** - Execute workflows across multiple processes for isolation and scalability
+- **Sandboxed Execution** - Run untrusted or risky operations in separate processes
+- **Microservice Orchestration** - Coordinate complex distributed systems with IPC
+- **CI/CD Pipelines** - Build robust continuous integration workflows with process isolation
+- **Data Pipeline Processing** - Handle large-scale data processing with fault isolation
 
-### Middleware Execution Flow
+## Examples
 
-The execution flow with middleware follows a nested pattern:
+The repository includes several examples demonstrating different features:
 
-```
-Runner Middleware (start)
-  Workflow (start)
-    Workflow Middleware for Stage 1 (start)
-      Stage 1 Middleware (start)
-        Actions in Stage 1
-      Stage 1 Middleware (end)
-    Workflow Middleware for Stage 1 (end)
-    
-    Workflow Middleware for Stage 2 (start)
-      Stage 2 Middleware (start)
-        Actions in Stage 2
-      Stage 2 Middleware (end)
-    Workflow Middleware for Stage 2 (end)
-  Workflow (end)
-Runner Middleware (end)
-```
+- **Basic Usage** - Workflow creation and execution fundamentals
+- **Dynamic Generation** - Dynamic stage and action creation during runtime
+- **File Operations** - File processing workflows with state management
+- **Action Wrapping** - Advanced action composition patterns
+- **Conditional Execution** - Enable/disable components based on runtime conditions
+- **Extended Runner** - Domain-specific workflow execution environments
+- **Middleware Patterns** - Cross-cutting concerns implementation
+- **Error Handling** - Recovery strategies and fault tolerance
+- **Process Spawning** (`examples/spawn_process/`) - Basic child process execution with IPC
+- **Spawn Middleware** (`examples/spawn_middleware/`) - Advanced IPC and spawn middleware system
 
-### Using Runner Middleware
+### Process Spawning Examples
 
-Runner middleware wraps the execution of an entire workflow:
+The spawn examples demonstrate real child process execution:
 
-```go
-runner := gostage.NewRunner()
-
-// Add logging middleware
-runner.Use(func(next gostage.RunnerFunc) gostage.RunnerFunc {
-    return func(ctx context.Context, w *gostage.Workflow, logger gostage.Logger) error {
-        logger.Info("Starting workflow: %s", w.Name)
-        
-        err := next(ctx, w, logger)
-        
-        logger.Info("Completed workflow: %s", w.Name)
-        return err
-    }
-})
-
-// Execute the workflow
-runner.Execute(context.Background(), workflow, logger)
+#### Basic Spawn Example
+```bash
+cd examples/spawn_process
+go run main.go
 ```
 
-### Using Workflow Middleware
+Features demonstrated:
+- Real child processes with different PIDs
+- Inter-process communication via JSON messages
+- File operations proving process isolation
+- Store synchronization between parent and child
+- Cross-platform compatibility
 
-Workflow middleware wraps the execution of each stage within a workflow:
-
-```go
-workflow := gostage.NewWorkflow("example", "Example Workflow", "A workflow with middleware")
-
-// Add stage notification middleware
-workflow.Use(func(next gostage.WorkflowStageRunnerFunc) gostage.WorkflowStageRunnerFunc {
-    return func(ctx context.Context, s *gostage.Stage, w *gostage.Workflow, logger gostage.Logger) error {
-        logger.Info("Starting stage: %s", s.Name)
-        
-        err := next(ctx, s, w, logger)
-        
-        logger.Info("Completed stage: %s", s.Name)
-        return err
-    }
-})
-
-// Add stages and actions...
+#### Middleware Spawn Example
+```bash
+cd examples/spawn_middleware  
+go run main.go
 ```
 
-### Using Stage Middleware
+Features demonstrated:
+- IPC middleware for message transformation
+- Spawn middleware for process lifecycle management
+- Message encryption simulation
+- Communication metrics collection
+- Enhanced logging with timestamps and prefixes
 
-Stage middleware wraps the execution of all actions within a stage:
-
-```go
-stage := gostage.NewStage("container-stage", "Container Stage", "A stage that runs in a container")
-
-// Add container middleware
-stage.Use(func(next gostage.StageRunnerFunc) gostage.StageRunnerFunc {
-    return func(ctx context.Context, s *gostage.Stage, w *gostage.Workflow, logger gostage.Logger) error {
-        // Start container
-        logger.Info("Starting container for stage: %s", s.Name)
-        
-        // Execute all actions in the container
-        err := next(ctx, s, w, logger)
-        
-        // Stop container (even if there was an error)
-        logger.Info("Stopping container for stage: %s", s.Name)
-        
-        return err
-    }
-})
-
-// Add actions that will run in the container...
-```
-
-### Built-in Middleware Functions
-
-The middleware system allows you to create various utility middleware functions. Here are examples of middleware you could build with the system:
-
-#### Example Runner Middleware
-
-```go
-// Example logging middleware for runners
-func LoggingMiddleware() gostage.Middleware {
-    return func(next gostage.RunnerFunc) gostage.RunnerFunc {
-        return func(ctx context.Context, w *gostage.Workflow, logger gostage.Logger) error {
-            start := time.Now()
-            logger.Info("Starting workflow: %s", w.Name)
-            
-            err := next(ctx, w, logger)
-            
-            elapsed := time.Since(start)
-            logger.Info("Completed workflow: %s (in %v)", w.Name, elapsed)
-            return err
-        }
-    }
-}
-
-// Example time limit middleware
-func TimeLimitMiddleware(duration time.Duration) gostage.Middleware {
-    return func(next gostage.RunnerFunc) gostage.RunnerFunc {
-        return func(ctx context.Context, w *gostage.Workflow, logger gostage.Logger) error {
-            ctx, cancel := context.WithTimeout(ctx, duration)
-            defer cancel()
-            
-            return next(ctx, w, logger)
-        }
-    }
-}
-```
-
-#### Example Workflow Middleware
-
-```go
-// Example stage notification middleware
-func StageNotificationMiddleware(beforeFn, afterFn func(stageName string)) gostage.WorkflowMiddleware {
-    return func(next gostage.WorkflowStageRunnerFunc) gostage.WorkflowStageRunnerFunc {
-        return func(ctx context.Context, s *gostage.Stage, w *gostage.Workflow, logger gostage.Logger) error {
-            if beforeFn != nil {
-                beforeFn(s.Name)
-            }
-            
-            err := next(ctx, s, w, logger)
-            
-            if afterFn != nil {
-                afterFn(s.Name)
-            }
-            
-            return err
-        }
-    }
-}
-```
-
-#### Example Stage Middleware
-
-```go
-// Example container middleware for stages
-func ContainerStageMiddleware(image, name string) gostage.StageMiddleware {
-    return func(next gostage.StageRunnerFunc) gostage.StageRunnerFunc {
-        return func(ctx context.Context, s *gostage.Stage, w *gostage.Workflow, logger gostage.Logger) error {
-            // Start container (pseudocode)
-            logger.Info("Starting container %s with image %s", name, image)
-            
-            // Run all actions in the container
-            err := next(ctx, s, w, logger)
-            
-            // Always stop container
-            logger.Info("Stopping container %s", name)
-            
-            return err
-        }
-    }
-}
-```
+Check the `examples/` directory for complete examples.
 
 ## More Examples
 
 See the [examples](./examples) directory for more usage examples.
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
