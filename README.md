@@ -945,23 +945,6 @@ The `examples/extended_runner` directory shows a complete example of this patter
 - Serializable workflow state for persistence
 - Hierarchical middleware system
 
-## Use Cases
-
-gostage is well-suited for various workflow scenarios:
-
-- **ETL Processes** - Define data extraction, transformation and loading pipelines
-- **Deployment Pipelines** - Create sequential deployment steps with conditional execution
-- **Business Workflows** - Model complex business processes with state tracking
-- **Resource Provisioning** - Set up resource discovery and provisioning sequences
-- **Data Processing** - Orchestrate complex data operations with state management
-- **Error-Tolerant Flows** - Build resilient workflows with retry logic and error recovery
-- **Audited Processes** - Implement compliance requirements with audit trails and validation checks
-- **Distributed Processing** - Execute workflows across multiple processes for isolation and scalability
-- **Sandboxed Execution** - Run untrusted or risky operations in separate processes
-- **Microservice Orchestration** - Coordinate complex distributed systems with IPC
-- **CI/CD Pipelines** - Build robust continuous integration workflows with process isolation
-- **Data Pipeline Processing** - Handle large-scale data processing with fault isolation
-
 ## Examples
 
 The repository includes several examples demonstrating different features:
