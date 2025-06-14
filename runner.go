@@ -402,6 +402,8 @@ type RunResult struct {
 	Success       bool
 	Error         error
 	ExecutionTime time.Duration
+	// FinalStore contains the workflow's store state after execution
+	FinalStore map[string]interface{}
 }
 
 // RunOptions contains options for workflow execution
@@ -414,6 +416,9 @@ type RunOptions struct {
 
 	// Whether to ignore workflow errors and continue execution
 	IgnoreErrors bool
+
+	// InitialStore contains key-value pairs to populate the workflow store before execution
+	InitialStore map[string]interface{}
 }
 
 // DefaultRunOptions returns the default options for running a workflow
@@ -441,8 +446,25 @@ func (r *Runner) ExecuteWithOptions(workflow *Workflow, options RunOptions) RunR
 		ctx = context.Background()
 	}
 
+	// Populate the initial store if provided
+	if options.InitialStore != nil {
+		for key, value := range options.InitialStore {
+			if err := workflow.Store.Put(key, value); err != nil {
+				// Log the error but continue
+				logger.Warn("Failed to set initial store value %s: %v", key, err)
+			}
+		}
+	}
+
 	// Execute the workflow
 	err := r.Execute(ctx, workflow, logger)
+
+	// Capture the final store state
+	finalStore := make(map[string]interface{})
+	if workflow.Store != nil {
+		// Export all store data
+		finalStore = workflow.Store.ExportAll()
+	}
 
 	// Create result
 	result := RunResult{
@@ -450,6 +472,7 @@ func (r *Runner) ExecuteWithOptions(workflow *Workflow, options RunOptions) RunR
 		Success:       err == nil,
 		Error:         err,
 		ExecutionTime: time.Since(startTime),
+		FinalStore:    finalStore,
 	}
 
 	return result
@@ -761,6 +784,52 @@ func StageNotificationMiddleware(
 
 			return err
 		}
+	}
+}
+
+// SpawnResult contains the result of a spawned workflow execution
+type SpawnResult struct {
+	Success    bool
+	Error      error
+	FinalStore map[string]interface{}
+}
+
+// SpawnWithStore executes a sub-workflow in a new child process with an initial store.
+// It returns a SpawnResult that includes the final store state from the child process.
+func (r *Runner) SpawnWithStore(ctx context.Context, def SubWorkflowDef, initialStore map[string]interface{}) SpawnResult {
+	// Add initial store to the definition
+	if initialStore != nil {
+		if def.InitialStore == nil {
+			def.InitialStore = make(map[string]interface{})
+		}
+		// Merge initial store into the definition
+		for key, value := range initialStore {
+			def.InitialStore[key] = value
+		}
+	}
+
+	// Track the final store state
+	var finalStore map[string]interface{}
+
+	// Add a message handler to capture the final store
+	if r.Broker != nil {
+		r.Broker.RegisterHandler(MessageTypeFinalStore, func(msgType MessageType, payload json.RawMessage) error {
+			var storeData map[string]interface{}
+			if err := json.Unmarshal(payload, &storeData); err != nil {
+				return fmt.Errorf("failed to unmarshal final store: %w", err)
+			}
+			finalStore = storeData
+			return nil
+		})
+	}
+
+	// Execute the spawn
+	err := r.Spawn(ctx, def)
+
+	return SpawnResult{
+		Success:    err == nil,
+		Error:      err,
+		FinalStore: finalStore,
 	}
 }
 

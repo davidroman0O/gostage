@@ -3,6 +3,7 @@ package gostage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -597,4 +598,65 @@ func TestWithBrokerOption(t *testing.T) {
 
 	assert.Equal(t, broker, runner2.Broker, "Broker should be set correctly")
 	assert.Equal(t, testLogger, runner2.defaultLogger, "Logger should be set correctly")
+}
+
+// TestRunner_ExecuteWithStore tests the new store functionality in ExecuteWithOptions
+func TestRunner_ExecuteWithStore(t *testing.T) {
+	// Create a simple action that modifies the store
+	action := NewActionFunc("store-modifier", "Modifies store values", func(ctx *ActionContext) error {
+		// Read initial value from store
+		initialMsg, err := store.Get[string](ctx.Workflow.Store, "message")
+		if err != nil {
+			return fmt.Errorf("failed to get initial message: %w", err)
+		}
+
+		// Modify and add values
+		ctx.Workflow.Store.Put("message", initialMsg+" (modified)")
+		ctx.Workflow.Store.Put("processed", true)
+		ctx.Workflow.Store.Put("counter", 42)
+
+		return nil
+	})
+
+	stage := NewStage("test-stage", "Test Stage", "")
+	stage.AddAction(action)
+
+	workflow := NewWorkflow("test-workflow", "Test Workflow", "")
+	workflow.AddStage(stage)
+
+	// Define initial store data
+	initialStore := map[string]interface{}{
+		"message":    "Hello World",
+		"init_value": 100,
+		"config":     map[string]interface{}{"debug": true, "version": "1.0"},
+	}
+
+	// Create run options with initial store
+	options := RunOptions{
+		Logger:       NewDefaultLogger(),
+		Context:      context.Background(),
+		IgnoreErrors: false,
+		InitialStore: initialStore,
+	}
+
+	// Execute workflow with initial store
+	runner := NewRunner()
+	result := runner.ExecuteWithOptions(workflow, options)
+
+	// Verify execution was successful
+	assert.True(t, result.Success, "Execution should succeed")
+	assert.NoError(t, result.Error, "Should have no error")
+	assert.NotNil(t, result.FinalStore, "Should have final store")
+
+	// Verify initial data was preserved and action modifications applied
+	assert.Equal(t, "Hello World (modified)", result.FinalStore["message"])
+	assert.Equal(t, true, result.FinalStore["processed"])
+	assert.Equal(t, 42, result.FinalStore["counter"])
+	assert.Equal(t, 100, result.FinalStore["init_value"])
+
+	// Verify nested data is preserved
+	config, ok := result.FinalStore["config"].(map[string]interface{})
+	assert.True(t, ok, "Config should be preserved as map")
+	assert.Equal(t, true, config["debug"])
+	assert.Equal(t, "1.0", config["version"])
 }

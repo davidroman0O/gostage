@@ -97,6 +97,15 @@ func childMain() {
 		os.Exit(1)
 	}
 
+	// Send the final store state back to the parent
+	if wf.Store != nil {
+		finalStore := wf.Store.ExportAll()
+		if err := broker.Send(MessageTypeFinalStore, finalStore); err != nil {
+			fmt.Fprintf(os.Stderr, "child process failed to send final store: %v\n", err)
+			// Don't exit on this error as the workflow execution was successful
+		}
+	}
+
 	// Exit successfully.
 	os.Exit(0)
 }
@@ -104,8 +113,9 @@ func childMain() {
 // --- Action Definitions for Testing ---
 
 const (
-	spawnTestActionID = "spawn-test-action"
-	errorTestActionID = "error-test-action"
+	spawnTestActionID     = "spawn-test-action"
+	errorTestActionID     = "error-test-action"
+	storeModifierActionID = "store-modifier-action"
 )
 
 // SpawnTestAction is a simple action that sends messages back to the parent.
@@ -117,6 +127,24 @@ func (a *SpawnTestAction) Execute(ctx *ActionContext) error {
 	ctx.Send(MessageTypeStorePut, map[string]interface{}{"key": "item1", "value": "value1"})
 	ctx.Send(MessageTypeStorePut, map[string]interface{}{"key": "item2", "value": 42})
 	ctx.Logger.Info("SpawnTestAction has finished.")
+	return nil
+}
+
+// StoreModifierAction modifies the workflow store directly and also sends IPC messages
+type StoreModifierAction struct{ BaseAction }
+
+func (a *StoreModifierAction) Execute(ctx *ActionContext) error {
+	ctx.Logger.Info("StoreModifierAction is executing.")
+
+	// Put data directly into the workflow store (this will be in the final store)
+	ctx.Workflow.Store.Put("item1", "value1")
+	ctx.Workflow.Store.Put("item2", 42)
+
+	// Also send IPC messages like the original action
+	ctx.Send(MessageTypeStorePut, map[string]interface{}{"key": "item1", "value": "value1"})
+	ctx.Send(MessageTypeStorePut, map[string]interface{}{"key": "item2", "value": 42})
+
+	ctx.Logger.Info("StoreModifierAction has finished.")
 	return nil
 }
 
@@ -138,6 +166,9 @@ func registerSpawnTestActions() {
 		})
 		RegisterAction(errorTestActionID, func() Action {
 			return &ErrorTestAction{BaseAction: NewBaseAction(errorTestActionID, "An action that fails.")}
+		})
+		RegisterAction(storeModifierActionID, func() Action {
+			return &StoreModifierAction{BaseAction: NewBaseAction(storeModifierActionID, "An action that modifies the store.")}
 		})
 	})
 }
@@ -247,6 +278,66 @@ func TestSpawnWorkflow_WithError(t *testing.T) {
 	// Verify we still received the log message that occurred before the error.
 	assert.Len(t, errorActionLogs, 1, "Should have received one log message from the failing action")
 	assert.Contains(t, errorActionLogs[0], "This action is designed to fail.")
+}
+
+// TestSpawnWorkflow_WithStoreHandling tests passing initial store and receiving final store
+func TestSpawnWorkflow_WithStoreHandling(t *testing.T) {
+	registerSpawnTestActions()
+
+	parentRunner := NewRunner()
+	var finalStoreFromChild map[string]interface{}
+
+	// Handler to capture the final store from child
+	parentRunner.Broker.RegisterHandler(MessageTypeFinalStore, func(msgType MessageType, payload json.RawMessage) error {
+		var storeData map[string]interface{}
+		if err := json.Unmarshal(payload, &storeData); err != nil {
+			return fmt.Errorf("failed to unmarshal final store: %w", err)
+		}
+		finalStoreFromChild = storeData
+		return nil
+	})
+
+	// Define initial store data to pass to child
+	initialStore := map[string]interface{}{
+		"parent_message": "Hello from parent",
+		"initial_count":  100,
+		"shared_data":    map[string]interface{}{"x": 1, "y": 2},
+	}
+
+	// Define sub-workflow that will use and modify the store
+	subWorkflowDef := SubWorkflowDef{
+		ID:           "store-test-workflow",
+		InitialStore: initialStore, // Pass the initial store directly in the definition
+		Stages: []StageDef{{
+			ID: "store-stage",
+			Actions: []ActionDef{{
+				ID: storeModifierActionID, // Use the action that actually modifies the store
+			}},
+		}},
+	}
+
+	// Use the same spawnTestProcess function as other tests
+	err := spawnTestProcess(context.Background(), parentRunner, subWorkflowDef)
+
+	// Verify spawn was successful
+	assert.NoError(t, err, "Spawn should succeed")
+
+	// Verify we received the final store via the handler
+	assert.NotNil(t, finalStoreFromChild, "Should capture final store via handler")
+
+	// Verify initial data was passed through
+	assert.Equal(t, "Hello from parent", finalStoreFromChild["parent_message"])
+	assert.Equal(t, 100.0, finalStoreFromChild["initial_count"]) // JSON unmarshals numbers as float64
+
+	// Verify the action added new data to the store
+	assert.Equal(t, "value1", finalStoreFromChild["item1"])
+	assert.Equal(t, 42.0, finalStoreFromChild["item2"])
+
+	// The shared_data should still be there
+	sharedData, ok := finalStoreFromChild["shared_data"].(map[string]interface{})
+	assert.True(t, ok, "shared_data should be preserved")
+	assert.Equal(t, 1.0, sharedData["x"])
+	assert.Equal(t, 2.0, sharedData["y"])
 }
 
 // spawnTestProcess is a helper that mimics runner.Spawn but sets the

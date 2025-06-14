@@ -1268,3 +1268,20 @@ func deepCopy(value interface{}) interface{} {
 		return value
 	}
 }
+
+// ExportAll returns all non-expired entries as a map[string]interface{} for serialization.
+// This is useful for extracting store data to send across process boundaries.
+func (s *KVStore) ExportAll() map[string]interface{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	result := make(map[string]interface{})
+	for key, e := range s.data {
+		// Skip expired entries
+		if e.expiresAt != nil && time.Now().After(*e.expiresAt) {
+			continue
+		}
+		result[key] = e.value
+	}
+	return result
+}

@@ -23,6 +23,8 @@ const (
 	MessageTypeWorkflowStart MessageType = "workflow_start"
 	// MessageTypeWorkflowResult is the final message from child to parent with the outcome.
 	MessageTypeWorkflowResult MessageType = "workflow_result"
+	// MessageTypeFinalStore is sent from child to parent with the complete final store state.
+	MessageTypeFinalStore MessageType = "final_store"
 )
 
 // Message is the standard unit of communication between a parent and child process.

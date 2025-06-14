@@ -12,88 +12,187 @@ import (
 	"github.com/davidroman0O/gostage/store"
 )
 
-// SimpleTestAction just logs a message with process ID
-type SimpleTestAction struct {
+// DataProcessorAction demonstrates comprehensive store manipulation
+type DataProcessorAction struct {
 	gostage.BaseAction
 }
 
-func (a *SimpleTestAction) Execute(ctx *gostage.ActionContext) error {
+func (a *DataProcessorAction) Execute(ctx *gostage.ActionContext) error {
 	processID := os.Getpid()
+	ctx.Logger.Info("DataProcessor running in process %d", processID)
 
-	ctx.Logger.Info("Hello from child process %d", processID)
-
-	// Send just one simple store update
+	// Send real-time process info via IPC
 	ctx.Send(gostage.MessageTypeStorePut, map[string]interface{}{
-		"key":   "child_pid",
+		"key":   "realtime_child_pid",
 		"value": processID,
 	})
 
-	return nil
-}
+	// Read initial configuration from store
+	if config, err := store.Get[map[string]interface{}](ctx.Workflow.Store, "config"); err == nil {
+		ctx.Logger.Info("Processing with config: %+v", config)
 
-// ProcessInfoAction shows comprehensive process information
-type ProcessInfoAction struct {
-	gostage.BaseAction
-}
+		// Send config confirmation via IPC
+		ctx.Send(gostage.MessageTypeStorePut, map[string]interface{}{
+			"key":   "config_received",
+			"value": true,
+		})
 
-func (a *ProcessInfoAction) Execute(ctx *gostage.ActionContext) error {
-	processID := os.Getpid()
-	parentPID := os.Getppid()
-	hostname, _ := os.Hostname()
-	workingDir, _ := os.Getwd()
-
-	ctx.Logger.Info("=== CHILD PROCESS INFORMATION ===")
-	ctx.Logger.Info("Process ID: %d", processID)
-	ctx.Logger.Info("Parent Process ID: %d", parentPID)
-	ctx.Logger.Info("Hostname: %s", hostname)
-	ctx.Logger.Info("Working Directory: %s", workingDir)
-	ctx.Logger.Info("Timestamp: %s", time.Now().Format("2006-01-02 15:04:05.000"))
-
-	// Send process info back to parent via store updates
-	ctx.Send(gostage.MessageTypeStorePut, map[string]interface{}{
-		"key":   "child_process_id",
-		"value": processID,
-	})
-	ctx.Send(gostage.MessageTypeStorePut, map[string]interface{}{
-		"key":   "child_parent_id",
-		"value": parentPID,
-	})
-	ctx.Send(gostage.MessageTypeStorePut, map[string]interface{}{
-		"key":   "child_hostname",
-		"value": hostname,
-	})
-
-	return nil
-}
-
-// FileOperationAction demonstrates file operations in child process
-type FileOperationAction struct {
-	gostage.BaseAction
-}
-
-func (a *FileOperationAction) Execute(ctx *gostage.ActionContext) error {
-	processID := os.Getpid()
-	filename := fmt.Sprintf("/tmp/child_process_%d.txt", processID)
-
-	ctx.Logger.Info("Child process %d creating file: %s", processID, filename)
-
-	content := fmt.Sprintf("This file was created by child process %d at %s\nParent PID: %d\n",
-		processID, time.Now().Format("2006-01-02 15:04:05"), os.Getppid())
-
-	err := os.WriteFile(filename, []byte(content), 0644)
-	if err != nil {
-		ctx.Logger.Error("Failed to create file: %v", err)
-		return err
+		// Process based on config
+		if mode, ok := config["mode"].(string); ok {
+			switch mode {
+			case "development":
+				ctx.Workflow.Store.Put("debug_enabled", true)
+				ctx.Workflow.Store.Put("log_level", "debug")
+			case "production":
+				ctx.Workflow.Store.Put("debug_enabled", false)
+				ctx.Workflow.Store.Put("log_level", "info")
+			}
+		}
 	}
 
-	ctx.Logger.Info("File created successfully by process %d", processID)
+	// Read and process input data
+	if inputData, err := store.Get[[]interface{}](ctx.Workflow.Store, "input_data"); err == nil {
+		ctx.Logger.Info("Processing %d items", len(inputData))
 
-	ctx.Send(gostage.MessageTypeStorePut, map[string]interface{}{
-		"key":   "created_file",
-		"value": filename,
+		// Send progress updates via IPC as we process
+		ctx.Send(gostage.MessageTypeStorePut, map[string]interface{}{
+			"key":   "processing_started",
+			"value": time.Now().Format("2006-01-02 15:04:05"),
+		})
+
+		results := make([]map[string]interface{}, 0, len(inputData))
+		var totalValue float64
+
+		for i, item := range inputData {
+			if itemMap, ok := item.(map[string]interface{}); ok {
+				// Process each item
+				processedItem := map[string]interface{}{
+					"id":           i + 1,
+					"original":     itemMap,
+					"processed_by": processID,
+					"processed_at": time.Now().Format("2006-01-02 15:04:05"),
+				}
+
+				// Extract and sum numeric values
+				if value, ok := itemMap["value"].(float64); ok {
+					processedItem["doubled_value"] = value * 2
+					totalValue += value
+				}
+
+				results = append(results, processedItem)
+
+				// Send real-time progress via IPC
+				ctx.Send(gostage.MessageTypeStorePut, map[string]interface{}{
+					"key":   fmt.Sprintf("item_%d_processed", i+1),
+					"value": true,
+				})
+			}
+		}
+
+		// Store processing results (in final store)
+		ctx.Workflow.Store.Put("processed_items", results)
+		ctx.Workflow.Store.Put("total_value", totalValue)
+		ctx.Workflow.Store.Put("processing_stats", map[string]interface{}{
+			"items_processed": len(results),
+			"total_value":     totalValue,
+			"processor_pid":   processID,
+			"processed_at":    time.Now().Format("2006-01-02 15:04:05"),
+		})
+
+		// Send completion notification via IPC
+		ctx.Send(gostage.MessageTypeStorePut, map[string]interface{}{
+			"key":   "processing_completed",
+			"value": fmt.Sprintf("Processed %d items, total: %.2f", len(results), totalValue),
+		})
+
+		ctx.Logger.Info("Processed %d items, total value: %.2f", len(results), totalValue)
+	}
+
+	// Add process information (in final store)
+	ctx.Workflow.Store.Put("child_process_info", map[string]interface{}{
+		"pid":        processID,
+		"parent_pid": os.Getppid(),
+		"hostname":   getHostname(),
 	})
 
 	return nil
+}
+
+// ValidatorAction validates the processed data
+type ValidatorAction struct {
+	gostage.BaseAction
+}
+
+func (a *ValidatorAction) Execute(ctx *gostage.ActionContext) error {
+	ctx.Logger.Info("Validator running in process %d", os.Getpid())
+
+	// Send validation start notification via IPC
+	ctx.Send(gostage.MessageTypeStorePut, map[string]interface{}{
+		"key":   "validation_started",
+		"value": time.Now().Format("2006-01-02 15:04:05"),
+	})
+
+	// Debug: List all keys in the store
+	ctx.Logger.Debug("Store contains %d keys: %v", ctx.Workflow.Store.Count(), ctx.Workflow.Store.ListKeys())
+
+	// Validate processed items exist
+	if processedItems, err := store.Get[[]map[string]interface{}](ctx.Workflow.Store, "processed_items"); err == nil {
+		ctx.Logger.Info("Found processed_items with %d items", len(processedItems))
+
+		// Send found items notification via IPC
+		ctx.Send(gostage.MessageTypeStorePut, map[string]interface{}{
+			"key":   "validation_items_found",
+			"value": len(processedItems),
+		})
+
+		validCount := 0
+		for _, itemMap := range processedItems {
+			if _, hasID := itemMap["id"]; hasID {
+				if _, hasProcessedBy := itemMap["processed_by"]; hasProcessedBy {
+					validCount++
+				}
+			}
+		}
+
+		// Store validation results (in final store)
+		ctx.Workflow.Store.Put("validation_results", map[string]interface{}{
+			"total_items":        len(processedItems),
+			"valid_items":        validCount,
+			"validation_success": validCount == len(processedItems),
+			"validated_by":       os.Getpid(),
+			"validated_at":       time.Now().Format("2006-01-02 15:04:05"),
+		})
+
+		// Send validation completion via IPC
+		ctx.Send(gostage.MessageTypeStorePut, map[string]interface{}{
+			"key":   "validation_completed",
+			"value": fmt.Sprintf("Validated %d/%d items successfully", validCount, len(processedItems)),
+		})
+
+		ctx.Logger.Info("Validation complete: %d/%d items valid", validCount, len(processedItems))
+	} else {
+		ctx.Logger.Error("No processed items found for validation: %v", err)
+
+		// Send validation error via IPC
+		ctx.Send(gostage.MessageTypeStorePut, map[string]interface{}{
+			"key":   "validation_error",
+			"value": "No processed items found",
+		})
+
+		// Store error in final store
+		ctx.Workflow.Store.Put("validation_results", map[string]interface{}{
+			"error": "No processed items found",
+		})
+	}
+
+	return nil
+}
+
+func getHostname() string {
+	if hostname, err := os.Hostname(); err == nil {
+		return hostname
+	}
+	return "unknown"
 }
 
 // childMain handles execution when running as a child process
@@ -106,25 +205,19 @@ func childMain() {
 	// Create logger that sends all messages to parent
 	logger := &ChildLogger{broker: broker}
 
-	// Create runner with broker using the convenience constructor
+	// Create runner with broker
 	runner := gostage.NewRunnerWithBroker(broker)
 
-	// Register the simple action
-	gostage.RegisterAction("simple-test", func() gostage.Action {
-		return &SimpleTestAction{
-			BaseAction: gostage.NewBaseAction("simple-test", "Simple test action"),
+	// Register actions
+	gostage.RegisterAction("data-processor", func() gostage.Action {
+		return &DataProcessorAction{
+			BaseAction: gostage.NewBaseAction("data-processor", "Processes data from store"),
 		}
 	})
 
-	gostage.RegisterAction("process-info", func() gostage.Action {
-		return &ProcessInfoAction{
-			BaseAction: gostage.NewBaseAction("process-info", "Shows process information"),
-		}
-	})
-
-	gostage.RegisterAction("file-operation", func() gostage.Action {
-		return &FileOperationAction{
-			BaseAction: gostage.NewBaseAction("file-operation", "Creates a file with process info"),
+	gostage.RegisterAction("validator", func() gostage.Action {
+		return &ValidatorAction{
+			BaseAction: gostage.NewBaseAction("validator", "Validates processed data"),
 		}
 	})
 
@@ -156,6 +249,16 @@ func childMain() {
 		os.Exit(1)
 	}
 
+	// Send final store state to parent
+	if workflow.Store != nil {
+		finalStore := workflow.Store.ExportAll()
+		if err := broker.Send(gostage.MessageTypeFinalStore, finalStore); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  Child process failed to send final store: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "📦 Child process sent final store with %d keys\n", len(finalStore))
+		}
+	}
+
 	fmt.Fprintf(os.Stderr, "✅ Child process %d completed successfully\n", os.Getpid())
 	os.Exit(0)
 }
@@ -179,7 +282,7 @@ func (l *ChildLogger) send(level, format string, args ...interface{}) {
 }
 
 func main() {
-	// Check if this is a child process by looking for the --gostage-child argument
+	// Check if this is a child process
 	for _, arg := range os.Args[1:] {
 		if arg == "--gostage-child" {
 			childMain()
@@ -190,40 +293,32 @@ func main() {
 	// Parent process execution
 	fmt.Printf("🚀 PARENT PROCESS STARTED - PID: %d\n", os.Getpid())
 
-	// Register the simple action
-	gostage.RegisterAction("simple-test", func() gostage.Action {
-		return &SimpleTestAction{
-			BaseAction: gostage.NewBaseAction("simple-test", "Simple test action"),
+	// Register actions in parent too (needed for spawn functionality)
+	gostage.RegisterAction("data-processor", func() gostage.Action {
+		return &DataProcessorAction{
+			BaseAction: gostage.NewBaseAction("data-processor", "Processes data from store"),
 		}
 	})
 
-	gostage.RegisterAction("process-info", func() gostage.Action {
-		return &ProcessInfoAction{
-			BaseAction: gostage.NewBaseAction("process-info", "Shows process information"),
-		}
-	})
-
-	gostage.RegisterAction("file-operation", func() gostage.Action {
-		return &FileOperationAction{
-			BaseAction: gostage.NewBaseAction("file-operation", "Creates a file with process info"),
+	gostage.RegisterAction("validator", func() gostage.Action {
+		return &ValidatorAction{
+			BaseAction: gostage.NewBaseAction("validator", "Validates processed data"),
 		}
 	})
 
 	// Create parent runner
 	parentRunner := gostage.NewRunner()
-	parentStore := store.NewKVStore()
-
 	var childLogs []string
+	var finalStoreFromChild map[string]interface{}
+	realtimeStore := store.NewKVStore() // Store for real-time IPC messages
 
-	// Set up basic message handlers
+	// Set up message handlers
 	parentRunner.Broker.RegisterHandler(gostage.MessageTypeLog, func(msgType gostage.MessageType, payload json.RawMessage) error {
 		var logData struct {
 			Level   string `json:"level"`
 			Message string `json:"message"`
 		}
 		if err := json.Unmarshal(payload, &logData); err != nil {
-			fmt.Printf("❌ Failed to parse log message: %v\n", err)
-			fmt.Printf("Raw payload: %s\n", string(payload))
 			return err
 		}
 
@@ -233,72 +328,96 @@ func main() {
 		return nil
 	})
 
+	// Handler for real-time IPC messages from .Send() calls
 	parentRunner.Broker.RegisterHandler(gostage.MessageTypeStorePut, func(msgType gostage.MessageType, payload json.RawMessage) error {
 		var data struct {
 			Key   string      `json:"key"`
 			Value interface{} `json:"value"`
 		}
 		if err := json.Unmarshal(payload, &data); err != nil {
-			fmt.Printf("❌ Failed to parse store message: %v\n", err)
-			fmt.Printf("Raw payload: %s\n", string(payload))
 			return err
 		}
 
-		err := parentStore.Put(data.Key, data.Value)
+		err := realtimeStore.Put(data.Key, data.Value)
 		if err == nil {
-			fmt.Printf("📦 Store update: %s = %v\n", data.Key, data.Value)
+			fmt.Printf("🔄 Real-time update: %s = %v\n", data.Key, data.Value)
 		}
 		return err
 	})
 
-	// Define a comprehensive workflow that proves child process execution
+	// Handler to capture the final store from child
+	parentRunner.Broker.RegisterHandler(gostage.MessageTypeFinalStore, func(msgType gostage.MessageType, payload json.RawMessage) error {
+		var storeData map[string]interface{}
+		if err := json.Unmarshal(payload, &storeData); err != nil {
+			return fmt.Errorf("failed to unmarshal final store: %w", err)
+		}
+		finalStoreFromChild = storeData
+		fmt.Printf("📦 Parent received final store with %d keys\n", len(storeData))
+		return nil
+	})
+
+	// Prepare initial store data for the child process
+	fmt.Println("📦 Setting up initial store data for child process...")
+
+	initialStore := map[string]interface{}{
+		"config": map[string]interface{}{
+			"mode":        "development",
+			"debug":       true,
+			"max_workers": 4,
+		},
+		"input_data": []interface{}{
+			map[string]interface{}{"name": "item1", "value": 10.5, "category": "A"},
+			map[string]interface{}{"name": "item2", "value": 25.0, "category": "B"},
+			map[string]interface{}{"name": "item3", "value": 15.75, "category": "A"},
+			map[string]interface{}{"name": "item4", "value": 30.25, "category": "C"},
+		},
+		"metadata": map[string]interface{}{
+			"created_by": "parent_process",
+			"created_at": time.Now().Format("2006-01-02 15:04:05"),
+			"parent_pid": os.Getpid(),
+			"version":    "1.0.0",
+		},
+	}
+
+	// Define workflow that will process the store data
 	workflowDef := gostage.SubWorkflowDef{
-		ID:          "spawn-demo-workflow",
-		Name:        "Process Spawn Demonstration",
-		Description: "Demonstrates real child process execution with IPC",
+		ID:           "data-processing-workflow",
+		Name:         "Data Processing Workflow",
+		Description:  "Demonstrates store data processing in child process",
+		InitialStore: initialStore, // Pass initial store data
 		Stages: []gostage.StageDef{
 			{
-				ID:   "process-info-stage",
-				Name: "Process Information",
+				ID:   "processing-stage",
+				Name: "Data Processing",
 				Actions: []gostage.ActionDef{
-					{ID: "process-info"},
+					{ID: "data-processor"},
 				},
 			},
 			{
-				ID:   "simple-test-stage",
-				Name: "Simple Test",
+				ID:   "validation-stage",
+				Name: "Data Validation",
 				Actions: []gostage.ActionDef{
-					{ID: "simple-test"},
-				},
-			},
-			{
-				ID:   "file-ops-stage",
-				Name: "File Operations",
-				Actions: []gostage.ActionDef{
-					{ID: "file-operation"},
+					{ID: "validator"},
 				},
 			},
 		},
 	}
 
-	fmt.Printf("📋 Parent process %d spawning child to execute comprehensive workflow\n", os.Getpid())
+	fmt.Printf("📋 Parent process %d spawning child to process %d data items\n",
+		os.Getpid(), len(initialStore["input_data"].([]interface{})))
 
-	// Spawn the child process
+	// Use regular Spawn method with our message handlers
 	ctx := context.Background()
 	startTime := time.Now()
 
 	err := parentRunner.Spawn(ctx, workflowDef)
 
 	duration := time.Since(startTime)
-
 	fmt.Printf("⏱️  Child process execution completed in %v\n", duration)
 
 	if err != nil {
 		fmt.Printf("❌ Child process execution failed: %v\n", err)
 		fmt.Printf("Total child log messages received: %d\n", len(childLogs))
-		for i, log := range childLogs {
-			fmt.Printf("  %d: %s\n", i+1, log)
-		}
 		return
 	}
 
@@ -309,54 +428,107 @@ func main() {
 	fmt.Println("📊 === EXECUTION SUMMARY ===")
 	fmt.Printf("Parent Process ID: %d\n", os.Getpid())
 	fmt.Printf("Total child log messages: %d\n", len(childLogs))
-	fmt.Println()
-
-	// Show data received from child
-	fmt.Println("📦 === DATA RECEIVED FROM CHILD ===")
-	for _, key := range parentStore.ListKeys() {
-		if value, err := store.Get[interface{}](parentStore, key); err == nil {
-			fmt.Printf("  %s: %v\n", key, value)
-		}
+	fmt.Printf("Real-time IPC messages received: %d\n", realtimeStore.Count())
+	if finalStoreFromChild != nil {
+		fmt.Printf("Final store contains %d keys\n", len(finalStoreFromChild))
+	} else {
+		fmt.Println("No final store received from child")
 	}
 	fmt.Println()
 
-	// Verify we got the child process info
-	if childPID, err := store.Get[float64](parentStore, "child_process_id"); err == nil {
-		fmt.Printf("🔍 Child Process Verification:\n")
-		fmt.Printf("  ✅ Child had different PID: %.0f (Parent: %d)\n", childPID, os.Getpid())
+	// Show the difference between real-time IPC and final store
+	fmt.Println("📦 === COMMUNICATION PATTERNS ===")
 
-		if parentPID, err := store.Get[float64](parentStore, "child_parent_id"); err == nil {
-			fmt.Printf("  ✅ Child's parent PID matches: %.0f\n", parentPID)
+	fmt.Println("🔄 Real-time IPC Messages (via .Send()):")
+	fmt.Println("   Purpose: Progress updates, notifications, live monitoring")
+	for _, key := range realtimeStore.ListKeys() {
+		if value, err := store.GetOrDefault[interface{}](realtimeStore, key, nil); err == nil {
+			fmt.Printf("  📤 %s: %v\n", key, value)
+		}
+	}
+
+	fmt.Println("\n📦 Final Store Data (workflow store export):")
+	fmt.Println("   Purpose: Structured data, processing results, persistent state")
+
+	fmt.Println("Initial Store (sent to child):")
+	for key, value := range initialStore {
+		fmt.Printf("  📤 %s: %v\n", key, summarizeValue(value))
+	}
+
+	if finalStoreFromChild != nil {
+		fmt.Println("\nFinal Store (received from child):")
+		for key, value := range finalStoreFromChild {
+			fmt.Printf("  📥 %s: %v\n", key, summarizeValue(value))
+		}
+	} else {
+		fmt.Println("\nNo final store data received from child")
+	}
+	fmt.Println()
+
+	// Analyze processing results (only if we have final store data)
+	if finalStoreFromChild != nil {
+		fmt.Println("🔍 === PROCESSING ANALYSIS ===")
+
+		if processInfo, ok := finalStoreFromChild["child_process_info"].(map[string]interface{}); ok {
+			fmt.Printf("✅ Child Process Info:\n")
+			fmt.Printf("  PID: %.0f (different from parent: %d)\n", processInfo["pid"], os.Getpid())
+			fmt.Printf("  Parent PID: %.0f\n", processInfo["parent_pid"])
+			fmt.Printf("  Hostname: %s\n", processInfo["hostname"])
 		}
 
-		if hostname, err := store.Get[string](parentStore, "child_hostname"); err == nil {
-			fmt.Printf("  ✅ Child hostname: %s\n", hostname)
+		if stats, ok := finalStoreFromChild["processing_stats"].(map[string]interface{}); ok {
+			fmt.Printf("✅ Processing Statistics:\n")
+			fmt.Printf("  Items processed: %.0f\n", stats["items_processed"])
+			fmt.Printf("  Total value: %.2f\n", stats["total_value"])
+			fmt.Printf("  Processed at: %s\n", stats["processed_at"])
+			fmt.Printf("  Processor PID: %.0f\n", stats["processor_pid"])
 		}
 
-		if filename, err := store.Get[string](parentStore, "created_file"); err == nil {
-			fmt.Printf("  ✅ Child created file: %s\n", filename)
+		if validation, ok := finalStoreFromChild["validation_results"].(map[string]interface{}); ok {
+			fmt.Printf("✅ Validation Results:\n")
 
-			// Verify the file exists
-			if _, err := os.Stat(filename); err == nil {
-				fmt.Printf("  ✅ File exists and is accessible from parent!\n")
-
-				// Read and display file content
-				if content, err := os.ReadFile(filename); err == nil {
-					fmt.Printf("  📄 File content:\n%s", string(content))
+			// Check if validation had an error
+			if errorMsg, hasError := validation["error"]; hasError {
+				fmt.Printf("  ❌ Validation Error: %v\n", errorMsg)
+			} else {
+				// Normal validation results
+				if totalItems, ok := validation["total_items"]; ok {
+					fmt.Printf("  Total items: %.0f\n", totalItems)
+				}
+				if validItems, ok := validation["valid_items"]; ok {
+					fmt.Printf("  Valid items: %.0f\n", validItems)
+				}
+				if success, ok := validation["validation_success"]; ok {
+					fmt.Printf("  Success: %v\n", success)
+				}
+				if validatedAt, ok := validation["validated_at"]; ok {
+					fmt.Printf("  Validated at: %s\n", validatedAt)
 				}
 			}
 		}
-
-		// Also verify the simple test data
-		if simplePID, err := store.Get[float64](parentStore, "child_pid"); err == nil {
-			fmt.Printf("  ✅ Simple test confirmed child PID: %.0f\n", simplePID)
-		}
-	} else {
-		fmt.Println("❌ No child process data received - something went wrong!")
 	}
 
 	fmt.Println()
-	fmt.Println("🎉 Example completed successfully!")
-	fmt.Printf("   This proves that gostage.Runner.Spawn() creates real child processes\n")
-	fmt.Printf("   with separate PIDs that can communicate back to the parent!\n")
+	fmt.Println("🎉 Enhanced Spawn Example completed successfully!")
+	fmt.Println("   ✅ Demonstrated passing initial store data to child process")
+	fmt.Println("   ✅ Showed comprehensive data processing in child")
+	fmt.Println("   ✅ Retrieved complete final store state from child")
+	fmt.Println("   ✅ Used real-time IPC messaging for progress updates")
+	fmt.Println("   ✅ Demonstrated both communication patterns working together")
+}
+
+func summarizeValue(value interface{}) string {
+	switch v := value.(type) {
+	case map[string]interface{}:
+		return fmt.Sprintf("map[%d keys]", len(v))
+	case []interface{}:
+		return fmt.Sprintf("array[%d items]", len(v))
+	case string:
+		if len(v) > 50 {
+			return fmt.Sprintf("'%s...' (%d chars)", v[:47], len(v))
+		}
+		return fmt.Sprintf("'%s'", v)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
