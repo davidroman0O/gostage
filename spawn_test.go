@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/davidroman0O/gostage/store"
 	"github.com/stretchr/testify/assert"
@@ -116,6 +117,8 @@ const (
 	spawnTestActionID     = "spawn-test-action"
 	errorTestActionID     = "error-test-action"
 	storeModifierActionID = "store-modifier-action"
+	panicTestActionID     = "panic-test-action"
+	slowTestActionID      = "slow-test-action"
 )
 
 // SpawnTestAction is a simple action that sends messages back to the parent.
@@ -156,6 +159,30 @@ func (a *ErrorTestAction) Execute(ctx *ActionContext) error {
 	return fmt.Errorf("intentional action failure")
 }
 
+// PanicTestAction is an action that panics to test panic recovery.
+type PanicTestAction struct{ BaseAction }
+
+func (a *PanicTestAction) Execute(ctx *ActionContext) error {
+	ctx.Logger.Info("PanicTestAction is about to panic.")
+	panic("intentional panic for testing")
+}
+
+// SlowTestAction is an action that takes a long time to test timeout scenarios.
+type SlowTestAction struct{ BaseAction }
+
+func (a *SlowTestAction) Execute(ctx *ActionContext) error {
+	ctx.Logger.Info("SlowTestAction is starting long operation.")
+	// Sleep for a long time to test timeout handling
+	select {
+	case <-ctx.GoContext.Done():
+		ctx.Logger.Info("SlowTestAction was cancelled.")
+		return ctx.GoContext.Err()
+	case <-time.After(10 * time.Second):
+		ctx.Logger.Info("SlowTestAction completed.")
+		return nil
+	}
+}
+
 var registerOnce sync.Once
 
 // registerSpawnTestActions registers the actions used in the test.
@@ -169,6 +196,12 @@ func registerSpawnTestActions() {
 		})
 		RegisterAction(storeModifierActionID, func() Action {
 			return &StoreModifierAction{BaseAction: NewBaseAction(storeModifierActionID, "An action that modifies the store.")}
+		})
+		RegisterAction(panicTestActionID, func() Action {
+			return &PanicTestAction{BaseAction: NewBaseAction(panicTestActionID, "An action that panics.")}
+		})
+		RegisterAction(slowTestActionID, func() Action {
+			return &SlowTestAction{BaseAction: NewBaseAction(slowTestActionID, "An action that takes a long time.")}
 		})
 	})
 }
@@ -400,4 +433,181 @@ func spawnTestProcess(ctx context.Context, r *Runner, def SubWorkflowDef) error 
 	}
 
 	return nil
+}
+
+// TestSpawnWorkflow_WithPanic tests that panics in child processes are handled gracefully
+func TestSpawnWorkflow_WithPanic(t *testing.T) {
+	registerSpawnTestActions()
+
+	parentRunner := NewRunner()
+	var panicLogs []string
+
+	// Capture logs to verify the panic was logged
+	parentRunner.Broker.RegisterHandler(MessageTypeLog, func(msgType MessageType, payload json.RawMessage) error {
+		var logData struct{ Message string }
+		json.Unmarshal(payload, &logData)
+
+		if strings.Contains(logData.Message, "PanicTestAction") {
+			panicLogs = append(panicLogs, logData.Message)
+		}
+		return nil
+	})
+
+	subWorkflowDef := SubWorkflowDef{
+		ID: "panicking-child-workflow",
+		Stages: []StageDef{{
+			ID: "panic-stage",
+			Actions: []ActionDef{{
+				ID: panicTestActionID,
+			}},
+		}},
+	}
+
+	// Spawn the child process and expect an error due to panic
+	err := spawnTestProcess(context.Background(), parentRunner, subWorkflowDef)
+	assert.Error(t, err, "Spawning a panicking workflow should return an error")
+	assert.Contains(t, err.Error(), "child process exited with error", "Error message should indicate child process failure")
+
+	// Verify we received the log message before the panic
+	assert.GreaterOrEqual(t, len(panicLogs), 1, "Should have received at least one log message from the panicking action")
+	assert.Contains(t, panicLogs[0], "PanicTestAction is about to panic.")
+}
+
+// TestSpawnWorkflow_WithTimeout tests timeout handling for slow child processes
+func TestSpawnWorkflow_WithTimeout(t *testing.T) {
+	registerSpawnTestActions()
+
+	parentRunner := NewRunner()
+	var slowLogs []string
+
+	// Capture logs to verify the action started
+	parentRunner.Broker.RegisterHandler(MessageTypeLog, func(msgType MessageType, payload json.RawMessage) error {
+		var logData struct{ Message string }
+		json.Unmarshal(payload, &logData)
+
+		if strings.Contains(logData.Message, "SlowTestAction") {
+			slowLogs = append(slowLogs, logData.Message)
+		}
+		return nil
+	})
+
+	subWorkflowDef := SubWorkflowDef{
+		ID: "slow-child-workflow",
+		Stages: []StageDef{{
+			ID: "slow-stage",
+			Actions: []ActionDef{{
+				ID: slowTestActionID,
+			}},
+		}},
+	}
+
+	// Create a context with a short timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Spawn the child process with timeout
+	err := spawnTestProcess(ctx, parentRunner, subWorkflowDef)
+	assert.Error(t, err, "Spawning a slow workflow with timeout should return an error")
+
+	// The error could be either a timeout or the child process being killed
+	// Both are acceptable outcomes for this test
+	assert.True(t,
+		strings.Contains(err.Error(), "context deadline exceeded") ||
+			strings.Contains(err.Error(), "child process exited with error") ||
+			strings.Contains(err.Error(), "signal: killed"),
+		"Error should indicate timeout or process termination")
+
+	// Verify the action at least started
+	assert.GreaterOrEqual(t, len(slowLogs), 1, "Should have received at least one log message from the slow action")
+	assert.Contains(t, slowLogs[0], "SlowTestAction is starting long operation.")
+}
+
+// TestSpawnWorkflow_WithMalformedDefinition tests handling of invalid workflow definitions
+func TestSpawnWorkflow_WithMalformedDefinition(t *testing.T) {
+	registerSpawnTestActions()
+
+	parentRunner := NewRunner()
+
+	// Create a workflow definition with a non-existent action
+	subWorkflowDef := SubWorkflowDef{
+		ID: "malformed-workflow",
+		Stages: []StageDef{{
+			ID: "malformed-stage",
+			Actions: []ActionDef{{
+				ID: "non-existent-action-id", // This action doesn't exist
+			}},
+		}},
+	}
+
+	// Spawn the child process and expect an error
+	err := spawnTestProcess(context.Background(), parentRunner, subWorkflowDef)
+	assert.Error(t, err, "Spawning with malformed definition should return an error")
+	assert.Contains(t, err.Error(), "child process exited with error", "Error should indicate child process failure")
+}
+
+// TestSpawnWorkflow_WithEmptyWorkflow tests handling of empty workflow definitions
+func TestSpawnWorkflow_WithEmptyWorkflow(t *testing.T) {
+	registerSpawnTestActions()
+
+	parentRunner := NewRunner()
+
+	// Create an empty workflow definition
+	subWorkflowDef := SubWorkflowDef{
+		ID:     "empty-workflow",
+		Stages: []StageDef{}, // No stages
+	}
+
+	// Spawn the child process - this should fail since workflows need at least one stage
+	err := spawnTestProcess(context.Background(), parentRunner, subWorkflowDef)
+	assert.Error(t, err, "Spawning an empty workflow should return an error")
+	assert.Contains(t, err.Error(), "child process exited with error", "Error should indicate child process failure")
+}
+
+// TestSpawnWorkflow_WithMultipleFailures tests a workflow with multiple failing actions
+func TestSpawnWorkflow_WithMultipleFailures(t *testing.T) {
+	registerSpawnTestActions()
+
+	parentRunner := NewRunner()
+	var errorLogs []string
+
+	// Capture error logs
+	parentRunner.Broker.RegisterHandler(MessageTypeLog, func(msgType MessageType, payload json.RawMessage) error {
+		var logData struct{ Message string }
+		json.Unmarshal(payload, &logData)
+
+		if strings.Contains(logData.Message, "designed to fail") || strings.Contains(logData.Message, "about to panic") {
+			errorLogs = append(errorLogs, logData.Message)
+		}
+		return nil
+	})
+
+	subWorkflowDef := SubWorkflowDef{
+		ID: "multi-failure-workflow",
+		Stages: []StageDef{{
+			ID: "failure-stage",
+			Actions: []ActionDef{
+				{ID: errorTestActionID}, // This will fail first
+				{ID: panicTestActionID}, // This won't be reached due to first failure
+			},
+		}},
+	}
+
+	// Spawn the child process and expect an error from the first failing action
+	err := spawnTestProcess(context.Background(), parentRunner, subWorkflowDef)
+	assert.Error(t, err, "Spawning a workflow with multiple failures should return an error")
+	assert.Contains(t, err.Error(), "child process exited with error", "Error should indicate child process failure")
+
+	// Should only see the first error, not the panic (since execution stops at first failure)
+	assert.GreaterOrEqual(t, len(errorLogs), 1, "Should have received at least one error log")
+	assert.Contains(t, errorLogs[0], "designed to fail")
+
+	// Should NOT see the panic message since execution should stop at first failure
+	panicFound := false
+	for _, log := range errorLogs {
+		if strings.Contains(log, "about to panic") {
+			panicFound = true
+			break
+		}
+	}
+	assert.False(t, panicFound, "Should not reach the panic action due to earlier failure")
 }
