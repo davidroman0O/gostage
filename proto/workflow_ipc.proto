@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package gostage;
+
+option go_package = "github.com/davidroman0O/gostage/proto";
+
+// WorkflowIPC service defines the communication between parent and child processes
+service WorkflowIPC {
+  // Send a single message from child to parent
+  rpc SendMessage(IPCMessage) returns (MessageAck);
+  
+  // Stream messages for high-frequency communication
+  rpc StreamMessages(stream IPCMessage) returns (stream MessageAck);
+  
+  // Bidirectional streaming for real-time communication
+  rpc BidirectionalStream(stream IPCMessage) returns (stream IPCMessage);
+}
+
+// Main message wrapper - replaces your current Message struct
+message IPCMessage {
+  MessageType type = 1;
+  oneof payload {
+    LogPayload log = 10;
+    StorePutPayload store_put = 11;
+    StoreDeletePayload store_delete = 12;
+    WorkflowStartPayload workflow_start = 13;
+    WorkflowResultPayload workflow_result = 14;
+    FinalStorePayload final_store = 15;
+  }
+  
+  // Metadata for tracking
+  string message_id = 20;
+  int64 timestamp = 21;
+}
+
+// Message types - matches your existing MessageType
+enum MessageType {
+  MESSAGE_TYPE_UNSPECIFIED = 0;
+  MESSAGE_TYPE_LOG = 1;
+  MESSAGE_TYPE_STORE_PUT = 2;
+  MESSAGE_TYPE_STORE_DELETE = 3;
+  MESSAGE_TYPE_WORKFLOW_START = 4;
+  MESSAGE_TYPE_WORKFLOW_RESULT = 5;
+  MESSAGE_TYPE_FINAL_STORE = 6;
+}
+
+// Type-safe payload definitions
+message LogPayload {
+  string level = 1;
+  string message = 2;
+  int64 timestamp = 3;
+  map<string, string> metadata = 4;
+}
+
+message StorePutPayload {
+  string key = 1;
+  bytes value = 2;  // JSON-encoded value for flexibility
+  string value_type = 3;  // Type information for deserialization
+}
+
+message StoreDeletePayload {
+  string key = 1;
+}
+
+message WorkflowStartPayload {
+  string workflow_id = 1;
+  bytes workflow_definition = 2;  // Serialized SubWorkflowDef
+}
+
+message WorkflowResultPayload {
+  string workflow_id = 1;
+  bool success = 2;
+  string error_message = 3;
+  int64 execution_time_ms = 4;
+}
+
+message FinalStorePayload {
+  map<string, bytes> store_data = 1;  // Key -> JSON-encoded value
+  map<string, string> type_info = 2;  // Key -> type information
+}
+
+// Acknowledgment message
+message MessageAck {
+  bool success = 1;
+  string error_message = 2;
+  string message_id = 3;  // Echo back the message ID
+}
+
+// Connection info for establishing gRPC connection
+message ConnectionInfo {
+  string address = 1;  // "localhost:50051"
+  int32 port = 2;
+  string transport = 3;  // "grpc" or "json"
+} 
