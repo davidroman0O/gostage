@@ -3,10 +3,8 @@ package gostage
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
-	"sync"
 )
 
 // MessageType is a string that defines the purpose of a message.
@@ -28,6 +26,7 @@ const (
 )
 
 // Message is the standard unit of communication between a parent and child process.
+// This is kept for backwards compatibility with existing JSON-based communication.
 type Message struct {
 	Type    MessageType     `json:"type"`
 	Payload json.RawMessage `json:"payload"`
@@ -37,151 +36,91 @@ type Message struct {
 type MessageHandler func(msgType MessageType, payload json.RawMessage) error
 
 // RunnerBroker handles message sending, receiving, and routing between processes
+// It now wraps an IPCTransport to support different communication protocols
 type RunnerBroker struct {
-	mu               sync.RWMutex
-	output           io.Writer
-	handlers         map[MessageType]MessageHandler
-	defaultHandler   MessageHandler
-	middleware       []IPCMiddleware                            // IPC middleware chain
-	messageCallbacks []func(MessageType, json.RawMessage) error // Callbacks for middleware hooks
+	transport IPCTransport
 }
 
-// NewRunnerBroker creates a new broker for IPC communication
+// NewRunnerBroker creates a new broker for IPC communication using JSON transport by default
 func NewRunnerBroker(output io.Writer) *RunnerBroker {
 	return &RunnerBroker{
-		output:           output,
-		handlers:         make(map[MessageType]MessageHandler),
-		middleware:       make([]IPCMiddleware, 0),
-		messageCallbacks: make([]func(MessageType, json.RawMessage) error, 0),
+		transport: NewJSONTransport(output),
 	}
+}
+
+// NewRunnerBrokerWithTransport creates a new broker with a custom transport
+func NewRunnerBrokerWithTransport(transport IPCTransport) *RunnerBroker {
+	return &RunnerBroker{
+		transport: transport,
+	}
+}
+
+// NewRunnerBrokerFromConfig creates a broker based on environment configuration
+func NewRunnerBrokerFromConfig() (*RunnerBroker, error) {
+	transportType := GetTransportTypeFromEnv()
+
+	var config TransportConfig
+	switch transportType {
+	case TransportGRPC:
+		address, port := GetGRPCAddressFromEnv()
+		config = TransportConfig{
+			Type:        TransportGRPC,
+			GRPCAddress: address,
+			GRPCPort:    port,
+		}
+	default:
+		config = TransportConfig{
+			Type:   TransportJSON,
+			Output: os.Stdout,
+		}
+	}
+
+	transport, err := NewIPCTransport(config)
+	if err != nil {
+		return nil, err
+	}
+
+	return NewRunnerBrokerWithTransport(transport), nil
 }
 
 // RegisterHandler registers a handler for a specific message type.
 func (b *RunnerBroker) RegisterHandler(msgType MessageType, handler MessageHandler) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.handlers[msgType] = handler
+	b.transport.SetHandler(msgType, handler)
 }
 
 // SetDefaultHandler sets a handler for any message types that are not explicitly registered.
 func (b *RunnerBroker) SetDefaultHandler(handler MessageHandler) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.defaultHandler = handler
+	b.transport.SetDefaultHandler(handler)
 }
 
 // AddIPCMiddleware adds IPC middleware to the broker
 func (b *RunnerBroker) AddIPCMiddleware(middleware ...IPCMiddleware) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.middleware = append(b.middleware, middleware...)
+	b.transport.AddMiddleware(middleware...)
 }
 
 // AddMessageCallback adds a callback that will be called for every received message
 func (b *RunnerBroker) AddMessageCallback(callback func(MessageType, json.RawMessage) error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.messageCallbacks = append(b.messageCallbacks, callback)
+	b.transport.AddMessageCallback(callback)
 }
 
-// Send sends a message through the IPC middleware chain
+// Send sends a message through the underlying transport
 func (b *RunnerBroker) Send(msgType MessageType, payload interface{}) error {
-	b.mu.RLock()
-	middleware := make([]IPCMiddleware, len(b.middleware))
-	copy(middleware, b.middleware)
-	b.mu.RUnlock()
-
-	// Process through outbound middleware chain
-	currentType := msgType
-	currentPayload := payload
-	var err error
-
-	for _, mw := range middleware {
-		currentType, currentPayload, err = mw.ProcessOutbound(currentType, currentPayload)
-		if err != nil {
-			return fmt.Errorf("IPC middleware error: %w", err)
-		}
-	}
-
-	// Create the message
-	payloadBytes, err := json.Marshal(currentPayload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal payload: %w", err)
-	}
-
-	msg := Message{
-		Type:    currentType,
-		Payload: json.RawMessage(payloadBytes),
-	}
-
-	// Marshal and send
-	data, err := json.Marshal(msg)
-	if err != nil {
-		return fmt.Errorf("failed to marshal message: %w", err)
-	}
-
-	data = append(data, '\n')
-
-	_, err = b.output.Write(data)
-	if err != nil {
-		return fmt.Errorf("failed to write message: %w", err)
-	}
-
-	return nil
+	return b.transport.Send(msgType, payload)
 }
 
-// Listen reads and processes messages from the given reader through middleware
+// Listen reads and processes messages from the given reader
 func (b *RunnerBroker) Listen(reader io.Reader) error {
-	decoder := json.NewDecoder(reader)
+	return b.transport.Listen(reader)
+}
 
-	for {
-		var msg Message
-		if err := decoder.Decode(&msg); err != nil {
-			if err == io.EOF {
-				return nil // Normal end of stream
-			}
-			return fmt.Errorf("failed to decode message: %w", err)
-		}
+// Close closes the underlying transport
+func (b *RunnerBroker) Close() error {
+	return b.transport.Close()
+}
 
-		// Process through inbound middleware chain
-		b.mu.RLock()
-		middleware := make([]IPCMiddleware, len(b.middleware))
-		copy(middleware, b.middleware)
-		b.mu.RUnlock()
-
-		currentType := msg.Type
-		currentPayload := msg.Payload
-		var err error
-
-		for _, mw := range middleware {
-			currentType, currentPayload, err = mw.ProcessInbound(currentType, currentPayload)
-			if err != nil {
-				return fmt.Errorf("IPC middleware inbound error: %w", err)
-			}
-		}
-
-		// Find and execute handler
-		b.mu.RLock()
-		handler, exists := b.handlers[currentType]
-		if !exists {
-			handler = b.defaultHandler
-		}
-		b.mu.RUnlock()
-
-		if handler != nil {
-			if err := handler(currentType, currentPayload); err != nil {
-				// Log the error but continue processing other messages
-				fmt.Fprintf(os.Stderr, "Handler error for message type %s: %v\n", currentType, err)
-			}
-		}
-
-		// Call message callbacks
-		for _, callback := range b.messageCallbacks {
-			if err := callback(currentType, currentPayload); err != nil {
-				fmt.Fprintf(os.Stderr, "Message callback error for message type %s: %v\n", currentType, err)
-			}
-		}
-	}
+// GetTransport returns the underlying transport (useful for gRPC-specific operations)
+func (b *RunnerBroker) GetTransport() IPCTransport {
+	return b.transport
 }
 
 // IPCMiddleware allows customization of inter-process communication
