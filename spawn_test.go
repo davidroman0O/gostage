@@ -58,32 +58,29 @@ func TestMain(m *testing.M) {
 // It sets up a runner, reads a workflow definition from stdin, executes it,
 // and communicates results back to the parent via stdout.
 func childMain() {
-	// 1. Create a broker that writes to standard output.
-	broker := NewRunnerBroker(os.Stdout)
-	// 2. Create a logger that sends all logs through this broker.
-	brokerLogger := NewBrokerLogger(broker)
-	// 3. Create a runner with the broker using the convenience constructor.
-	childRunner := NewRunnerWithBroker(broker)
+	// Read workflow definition from stdin
+	workflowDef, err := ReadWorkflowDefinitionFromStdin()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "child process failed to read workflow definition: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 🎉 NEW TRANSPARENT API - just give the data to the child runner!
+	childRunner, err := NewChildRunner(*workflowDef)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "child process failed to initialize: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Create a logger that sends all logs through this broker.
+	brokerLogger := NewBrokerLogger(childRunner.Broker)
 
 	// The child process must have the same actions registered as the parent
 	// so it can instantiate them from the definition.
 	registerSpawnTestActions()
 
-	// Read the serialized workflow definition from stdin.
-	defBytes, err := io.ReadAll(os.Stdin)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "child process failed to read from stdin: %v\n", err)
-		os.Exit(1)
-	}
-
-	var def SubWorkflowDef
-	if err := json.Unmarshal(defBytes, &def); err != nil {
-		fmt.Fprintf(os.Stderr, "child process failed to unmarshal workflow def: %v\n", err)
-		os.Exit(1)
-	}
-
 	// Reconstruct the workflow from the definition.
-	wf, err := NewWorkflowFromDef(&def)
+	wf, err := NewWorkflowFromDef(workflowDef)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "child process failed to create workflow from def: %v\n", err)
 		os.Exit(1)
@@ -101,11 +98,14 @@ func childMain() {
 	// Send the final store state back to the parent
 	if wf.Store != nil {
 		finalStore := wf.Store.ExportAll()
-		if err := broker.Send(MessageTypeFinalStore, finalStore); err != nil {
+		if err := childRunner.Broker.Send(MessageTypeFinalStore, finalStore); err != nil {
 			fmt.Fprintf(os.Stderr, "child process failed to send final store: %v\n", err)
 			// Don't exit on this error as the workflow execution was successful
 		}
 	}
+
+	// Close the broker to clean up connections
+	childRunner.Broker.Close()
 
 	// Exit successfully.
 	os.Exit(0)
@@ -376,6 +376,39 @@ func TestSpawnWorkflow_WithStoreHandling(t *testing.T) {
 // spawnTestProcess is a helper that mimics runner.Spawn but sets the
 // environment variable needed to trigger the child logic in TestMain.
 func spawnTestProcess(ctx context.Context, r *Runner, def SubWorkflowDef) error {
+	return spawnWorkflowWithTransport(ctx, r, def, nil) // Use JSON transport by default
+}
+
+// spawnWorkflowWithTransport spawns a child process with the specified transport
+// If grpcTransport is nil, it uses JSON transport over stdin/stdout
+func spawnWorkflowWithTransport(ctx context.Context, r *Runner, def SubWorkflowDef, grpcTransport *GRPCTransport) error {
+	// Always ensure the workflow definition has transport configuration
+	if grpcTransport != nil {
+		// gRPC mode: start server and pass connection info via stdin
+		if err := grpcTransport.StartServer(); err != nil {
+			return fmt.Errorf("failed to start gRPC server: %w", err)
+		}
+
+		// Wait for server to be ready
+		serverCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if err := grpcTransport.WaitForServerReady(serverCtx); err != nil {
+			return fmt.Errorf("server not ready: %w", err)
+		}
+
+		// Pass gRPC connection info in the workflow definition
+		def.Transport = &TransportConfig{
+			Type:        TransportGRPC,
+			GRPCAddress: grpcTransport.address,
+			GRPCPort:    grpcTransport.port,
+		}
+	} else {
+		// JSON mode: configure JSON transport (no Output field needed in child)
+		def.Transport = &TransportConfig{
+			Type: TransportJSON,
+		}
+	}
+
 	defBytes, err := json.Marshal(def)
 	if err != nil {
 		return fmt.Errorf("failed to serialize sub-workflow definition: %w", err)
@@ -389,43 +422,53 @@ func spawnTestProcess(ctx context.Context, r *Runner, def SubWorkflowDef) error 
 
 	// Create the command to re-run the test binary.
 	cmd := exec.CommandContext(ctx, exePath)
-	// Set the special environment variable to trigger the child code path in TestMain.
-	cmd.Env = append(os.Environ(), "GOSTAGE_EXEC_CHILD=1")
 
-	// The rest of this function is identical to runner.Spawn.
+	// Set the environment to trigger child mode
+	env := append(os.Environ(), "GOSTAGE_EXEC_CHILD=1")
+
+	var childStdout io.Reader
+
+	if grpcTransport == nil {
+		// JSON mode: use stdout pipe
+		childStdout, _ = cmd.StdoutPipe()
+	}
+
+	cmd.Env = env
 	childStdin, _ := cmd.StdinPipe()
-	childStdout, _ := cmd.StdoutPipe()
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start child test process: %w", err)
 	}
 
-	// Listen for messages from the child's stdout.
+	// Handle message listening
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := r.Broker.Listen(childStdout); err != nil {
-			// In tests, it's okay if this errors when the pipe closes, so we don't log it.
+		if childStdout != nil {
+			// JSON transport: listen on stdout
+			if err := r.Broker.Listen(childStdout); err != nil {
+				// It's okay if this errors when the pipe closes
+			}
 		}
+		// For gRPC transport, the server handles incoming connections automatically
 	}()
 
-	// Write the definition to the child's stdin.
+	// Write the definition to the child's stdin
 	_, err = childStdin.Write(defBytes)
 	if err != nil {
-		// If writing fails, the child process may already be dead, so we check for an early exit.
 		if cmd.ProcessState != nil {
 			return fmt.Errorf("child process exited early: %s", cmd.ProcessState.String())
 		}
 		return fmt.Errorf("failed to write workflow definition to child: %w", err)
 	}
-	childStdin.Close() // Close stdin to signal EOF to the child's reader.
+	childStdin.Close()
 
-	// Wait for the child process to finish.
+	// Wait for the child process to finish
 	err = cmd.Wait()
 
-	// Wait for the listening goroutine to finish processing all messages.
+	// Wait for message processing to complete
 	wg.Wait()
 
 	if err != nil {
@@ -610,4 +653,220 @@ func TestSpawnWorkflow_WithMultipleFailures(t *testing.T) {
 		}
 	}
 	assert.False(t, panicFound, "Should not reach the panic action due to earlier failure")
+}
+
+// --- Clean gRPC Transport Tests ---
+
+// TestSpawnWorkflow_Success_GRPC tests the same workflow but with gRPC transport
+func TestSpawnWorkflow_Success_GRPC(t *testing.T) {
+	registerSpawnTestActions()
+
+	// Create a gRPC transport for the parent
+	grpcTransport, err := NewGRPCTransport("localhost", 50070)
+	if err != nil {
+		t.Fatalf("Failed to create gRPC transport: %v", err)
+	}
+	defer grpcTransport.Close()
+
+	// Create parent runner with gRPC transport
+	parentRunner := NewRunnerWithBroker(NewRunnerBrokerWithTransport(grpcTransport))
+	parentStore := store.NewKVStore()
+	var actionLogs []string
+	var allLogs []string
+
+	// Register the same handlers as the JSON test
+	parentRunner.Broker.RegisterHandler(MessageTypeStorePut, func(msgType MessageType, payload json.RawMessage) error {
+		var data struct {
+			Key   string      `json:"key"`
+			Value interface{} `json:"value"`
+		}
+		if err := json.Unmarshal(payload, &data); err != nil {
+			return err
+		}
+		return parentStore.Put(data.Key, data.Value)
+	})
+	parentRunner.Broker.RegisterHandler(MessageTypeLog, func(msgType MessageType, payload json.RawMessage) error {
+		var logData struct{ Message string }
+		json.Unmarshal(payload, &logData)
+		allLogs = append(allLogs, logData.Message)
+
+		if strings.Contains(logData.Message, "SpawnTestAction") {
+			actionLogs = append(actionLogs, logData.Message)
+		}
+		return nil
+	})
+
+	// Use the same workflow definition as the JSON test
+	subWorkflowDef := SubWorkflowDef{
+		ID: "grpc-child-workflow",
+		Stages: []StageDef{{
+			ID: "grpc-child-stage-1",
+			Actions: []ActionDef{{
+				ID: spawnTestActionID,
+			}},
+		}},
+	}
+
+	// Spawn child process with gRPC transport (clean, no env vars!)
+	err = spawnWorkflowWithTransport(context.Background(), parentRunner, subWorkflowDef, grpcTransport)
+	assert.NoError(t, err, "Spawning child process with gRPC should succeed")
+
+	// Verify the parent's store was updated exactly like JSON transport
+	val1, _ := store.Get[string](parentStore, "item1")
+	assert.Equal(t, "value1", val1, "Should receive first store update via gRPC")
+
+	val2, _ := store.Get[float64](parentStore, "item2")
+	assert.Equal(t, 42.0, val2, "Should receive second store update via gRPC")
+
+	// Verify logs work the same as JSON transport
+	assert.GreaterOrEqual(t, len(allLogs), 10, "Should have received multiple log messages via gRPC")
+	assert.Len(t, actionLogs, 2, "Should have received exactly 2 log messages from SpawnTestAction via gRPC")
+	assert.Contains(t, actionLogs[0], "SpawnTestAction is executing.")
+	assert.Contains(t, actionLogs[1], "SpawnTestAction has finished.")
+
+	t.Logf("✅ gRPC spawn test completed successfully")
+	t.Logf("📤 Total logs received: %d", len(allLogs))
+	t.Logf("📤 Action logs received: %d", len(actionLogs))
+}
+
+// TestSpawnWorkflow_WithStoreHandling_GRPC tests store handling with gRPC
+func TestSpawnWorkflow_WithStoreHandling_GRPC(t *testing.T) {
+	registerSpawnTestActions()
+
+	grpcTransport, err := NewGRPCTransport("localhost", 50071)
+	if err != nil {
+		t.Fatalf("Failed to create gRPC transport: %v", err)
+	}
+	defer grpcTransport.Close()
+
+	parentRunner := NewRunnerWithBroker(NewRunnerBrokerWithTransport(grpcTransport))
+	var finalStoreFromChild map[string]interface{}
+
+	// Handler to capture the final store from child
+	parentRunner.Broker.RegisterHandler(MessageTypeFinalStore, func(msgType MessageType, payload json.RawMessage) error {
+		var storeData map[string]interface{}
+		if err := json.Unmarshal(payload, &storeData); err != nil {
+			return fmt.Errorf("failed to unmarshal final store: %w", err)
+		}
+		finalStoreFromChild = storeData
+		return nil
+	})
+
+	// Define initial store data - same as JSON test
+	initialStore := map[string]interface{}{
+		"parent_message": "Hello from parent via gRPC",
+		"initial_count":  200,
+		"grpc_data":      map[string]interface{}{"x": 10, "y": 20},
+	}
+
+	subWorkflowDef := SubWorkflowDef{
+		ID:           "grpc-store-test-workflow",
+		InitialStore: initialStore,
+		Stages: []StageDef{{
+			ID: "grpc-store-stage",
+			Actions: []ActionDef{{
+				ID: storeModifierActionID,
+			}},
+		}},
+	}
+
+	// Spawn with gRPC transport - clean and idiomatic
+	err = spawnWorkflowWithTransport(context.Background(), parentRunner, subWorkflowDef, grpcTransport)
+	assert.NoError(t, err, "gRPC spawn should succeed")
+
+	// Verify exact same behavior as JSON transport
+	assert.NotNil(t, finalStoreFromChild, "Should capture final store via gRPC handler")
+	assert.Equal(t, "Hello from parent via gRPC", finalStoreFromChild["parent_message"])
+	assert.Equal(t, 200.0, finalStoreFromChild["initial_count"])
+	assert.Equal(t, "value1", finalStoreFromChild["item1"])
+	assert.Equal(t, 42.0, finalStoreFromChild["item2"])
+
+	grpcData, ok := finalStoreFromChild["grpc_data"].(map[string]interface{})
+	assert.True(t, ok, "grpc_data should be preserved")
+	assert.Equal(t, 10.0, grpcData["x"])
+	assert.Equal(t, 20.0, grpcData["y"])
+
+	t.Logf("✅ gRPC store handling test completed successfully")
+}
+
+// TestSpawnWorkflow_BothTransports_SideBySide verifies both transports work identically
+func TestSpawnWorkflow_BothTransports_SideBySide(t *testing.T) {
+	registerSpawnTestActions()
+
+	// Test both transports with the same workflow
+	subWorkflowDef := SubWorkflowDef{
+		ID: "comparison-workflow",
+		Stages: []StageDef{{
+			ID:      "comparison-stage",
+			Actions: []ActionDef{{ID: spawnTestActionID}},
+		}},
+	}
+
+	// JSON Test
+	t.Run("JSON_Transport", func(t *testing.T) {
+		parentRunner := NewRunner()
+		parentStore := store.NewKVStore()
+		var logs []string
+
+		parentRunner.Broker.RegisterHandler(MessageTypeStorePut, func(msgType MessageType, payload json.RawMessage) error {
+			var data struct {
+				Key   string      `json:"key"`
+				Value interface{} `json:"value"`
+			}
+			json.Unmarshal(payload, &data)
+			return parentStore.Put(data.Key, data.Value)
+		})
+		parentRunner.Broker.RegisterHandler(MessageTypeLog, func(msgType MessageType, payload json.RawMessage) error {
+			var logData struct{ Message string }
+			json.Unmarshal(payload, &logData)
+			if strings.Contains(logData.Message, "SpawnTestAction") {
+				logs = append(logs, logData.Message)
+			}
+			return nil
+		})
+
+		err := spawnTestProcess(context.Background(), parentRunner, subWorkflowDef)
+		assert.NoError(t, err, "JSON transport should work")
+
+		val1, _ := store.Get[string](parentStore, "item1")
+		assert.Equal(t, "value1", val1)
+		assert.Len(t, logs, 2)
+	})
+
+	// gRPC Test - should behave identically
+	t.Run("GRPC_Transport", func(t *testing.T) {
+		grpcTransport, err := NewGRPCTransport("localhost", 50072)
+		assert.NoError(t, err)
+		defer grpcTransport.Close()
+
+		parentRunner := NewRunnerWithBroker(NewRunnerBrokerWithTransport(grpcTransport))
+		parentStore := store.NewKVStore()
+		var logs []string
+
+		parentRunner.Broker.RegisterHandler(MessageTypeStorePut, func(msgType MessageType, payload json.RawMessage) error {
+			var data struct {
+				Key   string      `json:"key"`
+				Value interface{} `json:"value"`
+			}
+			json.Unmarshal(payload, &data)
+			return parentStore.Put(data.Key, data.Value)
+		})
+		parentRunner.Broker.RegisterHandler(MessageTypeLog, func(msgType MessageType, payload json.RawMessage) error {
+			var logData struct{ Message string }
+			json.Unmarshal(payload, &logData)
+			if strings.Contains(logData.Message, "SpawnTestAction") {
+				logs = append(logs, logData.Message)
+			}
+			return nil
+		})
+
+		err = spawnWorkflowWithTransport(context.Background(), parentRunner, subWorkflowDef, grpcTransport)
+		assert.NoError(t, err, "gRPC transport should work")
+
+		val1, _ := store.Get[string](parentStore, "item1")
+		assert.Equal(t, "value1", val1)
+		assert.Len(t, logs, 2)
+	})
+
+	t.Logf("✅ Both transport modes work identically!")
 }
