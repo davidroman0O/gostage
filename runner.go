@@ -979,10 +979,22 @@ func (r *Runner) Spawn(ctx context.Context, def SubWorkflowDef) error {
 // executeSpawn contains the core spawn logic, separated for middleware integration
 func (r *Runner) executeSpawn(ctx context.Context, def SubWorkflowDef) error {
 	// Ensure transport configuration is set for the child process
-	// If no transport is specified, default to JSON transport
+	// If no transport is specified, use the runner's transport configuration
 	if def.Transport == nil {
-		def.Transport = &TransportConfig{
-			Type: TransportJSON,
+		if r.transportConfig != nil {
+			// Create a clean copy of the runner's transport configuration for the child
+			// Exclude the Output field since it can't be JSON serialized and child processes use os.Stdout anyway
+			def.Transport = &TransportConfig{
+				Type:        r.transportConfig.Type,
+				GRPCAddress: r.transportConfig.GRPCAddress,
+				GRPCPort:    r.transportConfig.GRPCPort,
+				// Output is intentionally omitted - child processes will use os.Stdout
+			}
+		} else {
+			// Fallback to JSON transport if runner has no transport config
+			def.Transport = &TransportConfig{
+				Type: TransportJSON,
+			}
 		}
 	}
 
