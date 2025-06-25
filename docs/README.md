@@ -27,15 +27,16 @@ This documentation is designed to guide you from the basic concepts to advanced 
 5.  [**Middleware**](./04-middleware/README.md)
     *   Wrapping Execution at the Runner, Workflow, and Stage levels.
 
-6.  [**Spawning Sub-Workflows**](./06-spawning-subworkflows/README.md)
-    *   [The Action Registry](./05-action-registry/README.md)
-    *   IPC with JSON
-    *   IPC with gRPC
+6.  [**The Action Registry**](./05-action-registry/README.md)
+    *   Registering Actions for Spawned Workflows
 
-7.  [**Testing Workflows**](./07-testing-workflows/README.md)
+7.  [**Spawning Sub-Workflows**](./06-spawning-subworkflows/README.md)
+    *   [Pure gRPC Communication](./06-spawning-subworkflows/grpc-spawning.md)
+
+8.  [**Testing Workflows**](./07-testing-workflows/README.md)
     *   Unit and Integration Testing Strategies.
 
-8.  [**Advanced Topics**](./08-advanced-topics/README.md)
+9.  [**Advanced Topics**](./08-advanced-topics/README.md)
     *   Error Handling Strategies.
 
 ---

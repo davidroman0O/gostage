@@ -4,12 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
-	"sync"
 	"time"
 
+	"github.com/davidroman0O/gostage/proto"
 	"github.com/davidroman0O/gostage/store"
 )
 
@@ -30,12 +29,10 @@ type Runner struct {
 	defaultLogger Logger
 	// Options for workflow execution
 	options RunOptions
-	// Broker handles IPC
+	// Broker handles IPC via gRPC
 	Broker *RunnerBroker
 	// Spawn middleware for process lifecycle and communication
 	spawnMiddleware []SpawnMiddleware
-	// Transport configuration for spawning child processes
-	transportConfig *TransportConfig
 }
 
 // RunnerOption is a function that configures a Runner
@@ -62,17 +59,6 @@ func WithOptions(options RunOptions) RunnerOption {
 	}
 }
 
-// WithJSONTransport configures the runner to use JSON transport (default)
-func WithJSONTransport() RunnerOption {
-	return func(r *Runner) {
-		r.transportConfig = &TransportConfig{
-			Type:   TransportJSON,
-			Output: os.Stdout,
-		}
-		r.Broker = NewRunnerBroker(os.Stdout)
-	}
-}
-
 // WithGRPCTransport configures the runner to use gRPC transport
 // If no address/port provided, uses localhost with a random available port
 func WithGRPCTransport(addressAndPort ...interface{}) RunnerOption {
@@ -95,44 +81,34 @@ func WithGRPCTransport(addressAndPort ...interface{}) RunnerOption {
 		// Create gRPC transport - will pick random port if port is 0
 		grpcTransport, err := NewGRPCTransport(address, port)
 		if err != nil {
-			// For now, fallback to JSON on error, but log the issue
-			// In production, you might want to panic or return the error differently
-			r.defaultLogger.Error("Failed to create gRPC transport, falling back to JSON: %v", err)
-			r.transportConfig = &TransportConfig{
-				Type:   TransportJSON,
-				Output: os.Stdout,
-			}
-			r.Broker = NewRunnerBroker(os.Stdout)
-			return
+			// For now, fallback but log the issue
+			r.defaultLogger.Error("Failed to create gRPC transport: %v", err)
+			panic(fmt.Sprintf("Failed to create gRPC transport: %v", err))
 		}
 
-		// Store the actual port that was assigned
-		r.transportConfig = &TransportConfig{
-			Type:        TransportGRPC,
-			GRPCAddress: grpcTransport.address,
-			GRPCPort:    grpcTransport.GetActualPort(), // Get the actual assigned port
-		}
 		r.Broker = NewRunnerBrokerWithTransport(grpcTransport)
 	}
 }
 
 // NewRunner creates a new Runner with the given options
-// Default is JSON transport if no transport option is provided
+// Default is gRPC transport with automatic port assignment
 func NewRunner(opts ...RunnerOption) *Runner {
 	r := &Runner{
 		middleware:      make([]Middleware, 0),
 		spawnMiddleware: make([]SpawnMiddleware, 0),
 		defaultLogger:   NewDefaultLogger(),
 		options:         DefaultRunOptions(),
-		// Default JSON transport
-		transportConfig: &TransportConfig{
-			Type:   TransportJSON,
-			Output: os.Stdout,
-		},
 	}
 
-	// Set default JSON broker
-	r.Broker = NewRunnerBroker(os.Stdout)
+	// Default gRPC transport with automatic port selection
+	grpcTransport, err := NewGRPCTransport("localhost", 0) // 0 = auto-assign port
+	if err != nil {
+		// Fallback should not happen, but just in case
+		r.defaultLogger.Error("Failed to create default gRPC transport: %v", err)
+		panic(fmt.Sprintf("Failed to create default gRPC transport: %v", err))
+	}
+
+	r.Broker = NewRunnerBrokerWithTransport(grpcTransport)
 
 	// Apply options
 	for _, opt := range opts {
@@ -153,54 +129,21 @@ func NewRunnerWithBroker(broker *RunnerBroker, opts ...RunnerOption) *Runner {
 
 // DEPRECATED: WithBroker sets the broker for the runner
 // This is kept for backwards compatibility but is deprecated.
-// Use WithJSONTransport() or WithGRPCTransport() instead.
+// Use WithGRPCTransport() instead.
 func WithBroker(broker *RunnerBroker) RunnerOption {
 	return func(r *Runner) {
 		r.Broker = broker
-		// Try to infer transport config from broker
-		if transport := broker.GetTransport(); transport != nil {
-			switch transport.GetType() {
-			case TransportGRPC:
-				if grpcTransport, ok := transport.(*GRPCTransport); ok {
-					r.transportConfig = &TransportConfig{
-						Type:        TransportGRPC,
-						GRPCAddress: grpcTransport.address,
-						GRPCPort:    grpcTransport.GetActualPort(),
-					}
-				}
-			default:
-				r.transportConfig = &TransportConfig{
-					Type:   TransportJSON,
-					Output: os.Stdout,
-				}
-			}
-		}
 	}
 }
 
 // SpawnWorkflow spawns a child process to execute the given workflow definition
-// It automatically passes the correct transport configuration to the child
 func (r *Runner) SpawnWorkflow(ctx context.Context, def SubWorkflowDef) error {
-	// Automatically set the transport configuration in the workflow definition
-	if r.transportConfig != nil {
-		// Clone the transport config to avoid modifying the original
-		transportConfig := *r.transportConfig
-		def.Transport = &transportConfig
-	}
-
 	// Use the existing Spawn method which handles the rest
 	return r.Spawn(ctx, def)
 }
 
 // SpawnWorkflowWithStore spawns a child process with initial store data
-// It automatically passes the correct transport configuration to the child
 func (r *Runner) SpawnWorkflowWithStore(ctx context.Context, def SubWorkflowDef, initialStore map[string]interface{}) SpawnResult {
-	// Automatically set the transport configuration
-	if r.transportConfig != nil {
-		transportConfig := *r.transportConfig
-		def.Transport = &transportConfig
-	}
-
 	// Use the existing SpawnWithStore method
 	return r.SpawnWithStore(ctx, def, initialStore)
 }
@@ -978,91 +921,43 @@ func (r *Runner) Spawn(ctx context.Context, def SubWorkflowDef) error {
 
 // executeSpawn contains the core spawn logic, separated for middleware integration
 func (r *Runner) executeSpawn(ctx context.Context, def SubWorkflowDef) error {
-	// Ensure transport configuration is set for the child process
-	// If no transport is specified, use the runner's transport configuration
-	if def.Transport == nil {
-		if r.transportConfig != nil {
-			// Create a clean copy of the runner's transport configuration for the child
-			// Exclude the Output field since it can't be JSON serialized and child processes use os.Stdout anyway
-			def.Transport = &TransportConfig{
-				Type:        r.transportConfig.Type,
-				GRPCAddress: r.transportConfig.GRPCAddress,
-				GRPCPort:    r.transportConfig.GRPCPort,
-				// Output is intentionally omitted - child processes will use os.Stdout
-			}
-		} else {
-			// Fallback to JSON transport if runner has no transport config
-			def.Transport = &TransportConfig{
-				Type: TransportJSON,
-			}
+	// Get the gRPC transport from the broker
+	grpcTransport := r.Broker.GetTransport()
+
+	// Only start the server if it's not already started
+	if !grpcTransport.IsServerReady() {
+		if err := grpcTransport.StartServer(); err != nil {
+			return fmt.Errorf("failed to start gRPC server: %w", err)
+		}
+
+		// Wait for server to be ready
+		serverCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if err := grpcTransport.WaitForServerReady(serverCtx); err != nil {
+			return fmt.Errorf("gRPC server not ready: %w", err)
 		}
 	}
 
-	// Handle transport-specific setup first
-	if def.Transport.Type == TransportGRPC {
-		// gRPC mode: start the server and update the port
-		if grpcTransport, ok := r.Broker.GetTransport().(*GRPCTransport); ok {
-			// Only start the server if it's not already started
-			if !grpcTransport.IsServerReady() {
-				if err := grpcTransport.StartServer(); err != nil {
-					return fmt.Errorf("failed to start gRPC server: %w", err)
-				}
+	// Get the actual assigned port from the transport
+	actualPort := grpcTransport.GetActualPort()
+	grpcAddress := grpcTransport.address
 
-				// Wait for server to be ready
-				serverCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-				defer cancel()
-				if err := grpcTransport.WaitForServerReady(serverCtx); err != nil {
-					return fmt.Errorf("gRPC server not ready: %w", err)
-				}
-			}
-
-			// Update the workflow definition with the actual assigned port
-			def.Transport.GRPCPort = grpcTransport.GetActualPort()
-		} else {
-			return fmt.Errorf("gRPC transport not available for runner")
-		}
-	}
-
-	// 1. Serialize the workflow definition (after updating port for gRPC and setting default transport)
-	defBytes, err := json.Marshal(def)
-	if err != nil {
-		return fmt.Errorf("failed to serialize sub-workflow definition: %w", err)
-	}
-
-	// 2. Get the path to the current executable
+	// Get the path to the current executable
 	exePath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to find executable path: %w", err)
 	}
 
-	// 3. Create the command to run the child process
-	cmd := exec.CommandContext(ctx, exePath, "--gostage-child")
-
-	// 4. Handle transport-specific pipe setup
-	var childStdout io.ReadCloser
-
-	if def.Transport.Type == TransportGRPC {
-		// For gRPC, we don't use stdout pipes
-	} else {
-		// JSON mode: set up stdout pipe
-		childStdout, err = cmd.StdoutPipe()
-		if err != nil {
-			return fmt.Errorf("failed to create stdout pipe for child: %w", err)
-		}
-		defer childStdout.Close()
-	}
-
-	// 5. Set up stdin pipe for sending workflow definition
-	childStdin, err := cmd.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create stdin pipe for child: %w", err)
-	}
-	defer childStdin.Close()
+	// Create the command to run the child process with gRPC connection info
+	cmd := exec.CommandContext(ctx, exePath,
+		"--gostage-child",
+		fmt.Sprintf("--grpc-address=%s", grpcAddress),
+		fmt.Sprintf("--grpc-port=%d", actualPort))
 
 	// Redirect child's stderr to the parent's for logging
 	cmd.Stderr = os.Stderr
 
-	// 6. Start the child process
+	// Start the child process
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start child process: %w", err)
 	}
@@ -1072,38 +967,23 @@ func (r *Runner) executeSpawn(ctx context.Context, def SubWorkflowDef) error {
 		r.Broker.AddMessageCallback(mw.OnChildMessage)
 	}
 
-	// 7. Start a goroutine to listen for messages from the child (JSON mode only)
-	var wg sync.WaitGroup
-	if childStdout != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			// The parent's runner broker listens for messages from the child's stdout
-			if err := r.Broker.Listen(childStdout); err != nil {
-				// Log this error. The runner's logger could be used here.
-				// For simplicity, we print to stderr for now.
-				fmt.Fprintf(os.Stderr, "error listening to child process: %v\n", err)
-			}
-		}()
-	}
-	// For gRPC transport, the server handles incoming connections automatically
+	// Wait for child to signal it's ready to receive workflow definitions
+	childId := fmt.Sprintf("child-%d", cmd.Process.Pid)
 
-	// 8. Send the workflow definition to the child's stdin
-	_, err = childStdin.Write(defBytes)
-	if err != nil {
-		return fmt.Errorf("failed to write workflow definition to child: %w", err)
+	// Store the workflow definition for the child to request
+	if err := grpcTransport.SetPendingWorkflowDef(childId, def); err != nil {
+		cmd.Process.Kill()
+		return fmt.Errorf("failed to set pending workflow definition: %w", err)
 	}
-	// Close stdin to signal the child that the definition is complete.
-	childStdin.Close()
 
-	// 9. Wait for the child process to finish
+	if err := grpcTransport.WaitForChildReady(childId, 10*time.Second); err != nil {
+		// Kill the child process if it doesn't become ready
+		cmd.Process.Kill()
+		return fmt.Errorf("child process not ready: %w", err)
+	}
+
+	// Wait for the child process to finish
 	err = cmd.Wait()
-
-	// Wait for the listening goroutine to finish processing all messages (JSON mode)
-	if childStdout != nil {
-		wg.Wait()
-	}
-
 	if err != nil {
 		return fmt.Errorf("child process exited with error: %w", err)
 	}
@@ -1121,52 +1001,90 @@ func (r *Runner) AddIPCMiddleware(middleware ...IPCMiddleware) {
 	r.Broker.AddIPCMiddleware(middleware...)
 }
 
-// NewChildRunner creates a runner for child processes with the given workflow definition
-// This completely handles transport setup automatically based on the parent's configuration
-func NewChildRunner(workflowDef SubWorkflowDef) (*Runner, error) {
-	// Parent must provide transport configuration
-	if workflowDef.Transport == nil {
-		return nil, fmt.Errorf("no transport configuration provided by parent")
-	}
-
-	// Create transport using parent's configuration - completely automatic
-	transport, err := NewIPCTransport(*workflowDef.Transport)
+// NewChildRunner creates a runner for child processes with gRPC connection
+// This completely handles transport setup automatically based on command line arguments
+func NewChildRunner(address string, port int) (*Runner, error) {
+	// Create gRPC transport for child process
+	transport, err := NewGRPCTransport(address, port)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create transport: %w", err)
+		return nil, fmt.Errorf("failed to create gRPC transport: %w", err)
 	}
 
-	// Auto-connect if it's gRPC (technical requirement)
-	if grpcTransport, ok := transport.(*GRPCTransport); ok {
-		if err := grpcTransport.ConnectClient(); err != nil {
-			return nil, fmt.Errorf("failed to connect to gRPC server: %w", err)
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := grpcTransport.WaitForClientReady(ctx); err != nil {
-			return nil, fmt.Errorf("gRPC client not ready: %w", err)
-		}
+	// Connect to parent's gRPC server
+	if err := transport.ConnectClient(); err != nil {
+		return nil, fmt.Errorf("failed to connect to parent gRPC server: %w", err)
 	}
 
-	// Create runner with the transport - completely automatic
+	// Wait for client to be ready
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := transport.WaitForClientReady(ctx); err != nil {
+		return nil, fmt.Errorf("gRPC client not ready: %w", err)
+	}
+
+	// Create runner with the transport
 	runner := NewRunner()
 	runner.Broker = NewRunnerBrokerWithTransport(transport)
-	runner.transportConfig = workflowDef.Transport
 
 	return runner, nil
 }
 
-// ReadWorkflowDefinitionFromStdin is a utility function to read workflow definition from stdin
-// This is separate from NewChildRunner so developers can handle it how they want
+// ReceiveWorkflowDefinitionViaGRPC waits for workflow definition from parent via gRPC
+// This replaces ReadWorkflowDefinitionFromStdin for the pure gRPC approach
+func ReceiveWorkflowDefinitionViaGRPC(runner *Runner) (*SubWorkflowDef, error) {
+	var receivedDef *SubWorkflowDef
+	var receiveErr error
+	done := make(chan struct{})
+
+	// Set up workflow initialization handler
+	grpcTransport := runner.Broker.GetTransport()
+	grpcTransport.SetWorkflowInitHandler(func(workflowDef *proto.WorkflowDefinition) error {
+		// Convert protobuf definition back to SubWorkflowDef
+		var def SubWorkflowDef
+		if err := json.Unmarshal(workflowDef.DefinitionJson, &def); err != nil {
+			receiveErr = fmt.Errorf("failed to unmarshal workflow definition: %w", err)
+			close(done)
+			return receiveErr
+		}
+
+		// Convert initial store from protobuf format
+		if len(workflowDef.InitialStore) > 0 {
+			if def.InitialStore == nil {
+				def.InitialStore = make(map[string]interface{})
+			}
+			for k, v := range workflowDef.InitialStore {
+				var value interface{}
+				if err := json.Unmarshal(v, &value); err != nil {
+					receiveErr = fmt.Errorf("failed to unmarshal initial store value for key %s: %w", k, err)
+					close(done)
+					return receiveErr
+				}
+				def.InitialStore[k] = value
+			}
+		}
+
+		receivedDef = &def
+		close(done)
+		return nil
+	})
+
+	// Wait for workflow definition to be received
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	select {
+	case <-done:
+		if receiveErr != nil {
+			return nil, receiveErr
+		}
+		return receivedDef, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("timeout waiting for workflow definition from parent")
+	}
+}
+
+// DEPRECATED: ReadWorkflowDefinitionFromStdin is deprecated in favor of ReceiveWorkflowDefinitionViaGRPC
+// This function is kept for backward compatibility but should not be used in new code
 func ReadWorkflowDefinitionFromStdin() (*SubWorkflowDef, error) {
-	defBytes, err := io.ReadAll(os.Stdin)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read workflow definition: %w", err)
-	}
-
-	var workflowDef SubWorkflowDef
-	if err := json.Unmarshal(defBytes, &workflowDef); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal workflow definition: %w", err)
-	}
-
-	return &workflowDef, nil
+	return nil, fmt.Errorf("stdin-based workflow definition reading is deprecated - use ReceiveWorkflowDefinitionViaGRPC instead")
 }

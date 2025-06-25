@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -232,7 +232,7 @@ func (a *DemoAction) Execute(ctx *gostage.ActionContext) error {
 	return nil
 }
 
-// ChildLogger implements gostage.Logger and sends all logs via broker
+// ChildLogger implements gostage.Logger and sends all logs via gRPC broker
 type ChildLogger struct {
 	broker *gostage.RunnerBroker
 }
@@ -247,26 +247,27 @@ func (l *ChildLogger) send(level, format string, args ...interface{}) {
 		"level":   level,
 		"message": fmt.Sprintf(format, args...),
 	}
-	// This now goes through the middleware chain
+	// This now goes through the middleware chain via gRPC
 	l.broker.Send(gostage.MessageTypeLog, payload)
 }
 
-// childMain handles execution when running as a child process
+// childMain handles execution when running as a child process with the new pure gRPC approach
 func childMain() {
 	fmt.Fprintf(os.Stderr, "🔥 CHILD PROCESS STARTED - PID: %d, Parent PID: %d\n", os.Getpid(), os.Getppid())
 
-	// Set up broker for parent communication
-	broker := gostage.NewRunnerBroker(os.Stdout)
+	// Parse gRPC connection arguments from command line
+	var grpcAddress string = "localhost"
+	var grpcPort int = 50051
 
-	// Add the same middleware to child process for consistent behavior
-	broker.AddIPCMiddleware(MessageTransformMiddleware())
-	broker.AddIPCMiddleware(MessageEncryptionMiddleware())
-
-	// Create logger that sends all messages to parent
-	logger := &ChildLogger{broker: broker}
-
-	// Create runner with broker using the convenience constructor
-	runner := gostage.NewRunnerWithBroker(broker)
+	for _, arg := range os.Args {
+		if strings.HasPrefix(arg, "--grpc-address=") {
+			grpcAddress = strings.TrimPrefix(arg, "--grpc-address=")
+		} else if strings.HasPrefix(arg, "--grpc-port=") {
+			if port, err := strconv.Atoi(strings.TrimPrefix(arg, "--grpc-port=")); err == nil {
+				grpcPort = port
+			}
+		}
+	}
 
 	// Register the demo action
 	gostage.RegisterAction("demo-action", func() gostage.Action {
@@ -275,21 +276,31 @@ func childMain() {
 		}
 	})
 
-	// Read workflow definition from stdin
-	defBytes, err := io.ReadAll(os.Stdin)
+	// Create child runner with gRPC connection (NEW PURE GRPC API)
+	childRunner, err := gostage.NewChildRunner(grpcAddress, grpcPort)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Child process failed to read workflow definition: %v\n", err)
+		fmt.Fprintf(os.Stderr, "❌ Child process failed to initialize: %v\n", err)
 		os.Exit(1)
 	}
 
-	var workflowDef gostage.SubWorkflowDef
-	if err := json.Unmarshal(defBytes, &workflowDef); err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Child process failed to unmarshal workflow: %v\n", err)
+	// Add the same middleware to child process for consistent behavior
+	childRunner.AddIPCMiddleware(MessageTransformMiddleware())
+	childRunner.AddIPCMiddleware(MessageEncryptionMiddleware())
+
+	// Create logger that sends all messages to parent via gRPC
+	logger := &ChildLogger{broker: childRunner.Broker}
+
+	// Request workflow definition from parent (this also signals that we're ready)
+	childId := fmt.Sprintf("child-%d", os.Getpid())
+	grpcTransport := childRunner.Broker.GetTransport()
+	workflowDef, err := grpcTransport.RequestWorkflowDefinitionFromParent(context.Background(), childId)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed to request workflow definition: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Create workflow from definition
-	workflow, err := gostage.NewWorkflowFromDef(&workflowDef)
+	workflow, err := gostage.NewWorkflowFromDef(workflowDef)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Child process failed to create workflow: %v\n", err)
 		os.Exit(1)
@@ -298,10 +309,23 @@ func childMain() {
 	fmt.Fprintf(os.Stderr, "✅ Child process %d executing workflow: %s\n", os.Getpid(), workflowDef.ID)
 
 	// Execute workflow
-	if err := runner.Execute(context.Background(), workflow, logger); err != nil {
+	if err := childRunner.Execute(context.Background(), workflow, logger); err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Child process %d workflow execution failed: %v\n", os.Getpid(), err)
 		os.Exit(1)
 	}
+
+	// Send final store state to parent via gRPC
+	if workflow.Store != nil {
+		finalStore := workflow.Store.ExportAll()
+		if err := childRunner.Broker.Send(gostage.MessageTypeFinalStore, finalStore); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  Child process failed to send final store: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "📦 Child process sent final store with %d keys via gRPC\n", len(finalStore))
+		}
+	}
+
+	// Close broker to clean up gRPC connections
+	childRunner.Broker.Close()
 
 	fmt.Fprintf(os.Stderr, "✅ Child process %d completed successfully\n", os.Getpid())
 	os.Exit(0)
@@ -317,7 +341,7 @@ func main() {
 	}
 
 	// Parent process execution
-	fmt.Println("🎭 === MIDDLEWARE DEMONSTRATION ===")
+	fmt.Println("🎭 === MIDDLEWARE DEMONSTRATION (Pure gRPC) ===")
 	fmt.Println()
 
 	// Register actions
@@ -327,8 +351,8 @@ func main() {
 		}
 	})
 
-	// Create runner with middleware
-	runner := gostage.NewRunner()
+	// Create runner with pure gRPC transport and middleware
+	runner := gostage.NewRunner(gostage.WithGRPCTransport())
 	parentStore := store.NewKVStore()
 
 	// Add IPC middleware
@@ -378,11 +402,21 @@ func main() {
 		return err
 	})
 
+	// Handler to capture the final store from child
+	runner.Broker.RegisterHandler(gostage.MessageTypeFinalStore, func(msgType gostage.MessageType, payload json.RawMessage) error {
+		var storeData map[string]interface{}
+		if err := json.Unmarshal(payload, &storeData); err != nil {
+			return fmt.Errorf("failed to unmarshal final store: %w", err)
+		}
+		fmt.Printf("📦 Parent received final store with %d keys via gRPC\n", len(storeData))
+		return nil
+	})
+
 	// Define workflow
 	workflowDef := gostage.SubWorkflowDef{
 		ID:          "middleware-demo",
-		Name:        "Middleware Demonstration",
-		Description: "Shows middleware capabilities",
+		Name:        "Pure gRPC Middleware Demonstration",
+		Description: "Shows middleware capabilities with pure gRPC transport",
 		Stages: []gostage.StageDef{
 			{
 				ID: "demo-stage",
@@ -394,13 +428,13 @@ func main() {
 	}
 
 	// Run with middleware
-	fmt.Println("🚀 Starting middleware-enhanced spawn...")
+	fmt.Println("🚀 Starting pure gRPC middleware-enhanced spawn...")
 	err := runner.Spawn(context.Background(), workflowDef)
 
 	if err != nil {
 		fmt.Printf("❌ Error: %v\n", err)
 	} else {
-		fmt.Println("\n🎉 Middleware demo completed successfully!")
+		fmt.Println("\n🎉 Pure gRPC middleware demo completed successfully!")
 
 		// Show final store state
 		fmt.Println("\n📦 === FINAL STORE STATE ===")
@@ -409,5 +443,12 @@ func main() {
 				fmt.Printf("  %s: %v\n", key, value)
 			}
 		}
+
+		fmt.Println("\n✅ === MIDDLEWARE CAPABILITIES DEMONSTRATED ===")
+		fmt.Println("🔄 Message transformation (log enhancement)")
+		fmt.Println("🔒 Message encryption/decryption simulation")
+		fmt.Println("📊 Metrics collection and reporting")
+		fmt.Println("🚀 Process lifecycle tracking")
+		fmt.Println("⚡ All via pure gRPC protobuf communication")
 	}
 }

@@ -7,71 +7,72 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/davidroman0O/gostage"
+	"github.com/davidroman0O/gostage/store"
 )
 
-// This main function enables the self-spawning pattern with the new gRPC approach.
-func main() {
-	// Check for the --gostage-child flag instead of environment variable
-	for _, arg := range os.Args[1:] {
-		if arg == "--gostage-child" {
-			childMain()
-			return
-		}
+// This TestMain function is the key to testing the spawn functionality.
+// It allows the test binary to be re-executed in a "child" mode.
+func TestMain(m *testing.M) {
+	if os.Getenv("GOSTAGE_EXEC_CHILD") == "1" {
+		childMain()
+		return
 	}
-
-	fmt.Println("--- Running Parent Process (Action Registry Example with Pure gRPC) ---")
-	parentMain()
+	fmt.Println("--- Running Parent Process (gRPC) ---")
+	main()
 }
 
-// --- Action Definition and Registration ---
+// --- Action Definition ---
 
 const (
-	RegisteredActionID = "my-registered-action"
+	GrpcTestActionID = "grpc-test-action"
 )
 
-// RegisteredAction is a custom action we will register.
-type RegisteredAction struct {
+// GrpcTestAction is a basic action that sends messages back to the parent via gRPC.
+type GrpcTestAction struct {
 	gostage.BaseAction
 }
 
-func (a *RegisteredAction) Execute(ctx *gostage.ActionContext) error {
+func (a *GrpcTestAction) Execute(ctx *gostage.ActionContext) error {
 	processID := os.Getpid()
-	ctx.Logger.Info("The registered action is executing successfully in child process %d!", processID)
+	ctx.Logger.Info("gRPC child action is executing in process %d.", processID)
 
-	// Send real-time confirmation via gRPC
+	// Send real-time status updates via gRPC
 	ctx.Send(gostage.MessageTypeStorePut, map[string]interface{}{
-		"key":   "registry.worked",
-		"value": true,
+		"key":   "child.status.grpc",
+		"value": "running",
 	})
 
-	// Store results in workflow store
-	ctx.Workflow.Store.Put("registry_results", map[string]interface{}{
-		"action_executed": true,
-		"executed_by_pid": processID,
-		"registry_lookup": "successful",
-		"action_id":       RegisteredActionID,
-		"execution_time":  time.Now().Format("2006-01-02 15:04:05"),
-		"transport_used":  "grpc",
+	// Simulate some work
+	for i := 1; i <= 3; i++ {
+		time.Sleep(200 * time.Millisecond)
+		ctx.Send(gostage.MessageTypeStorePut, map[string]interface{}{
+			"key":   fmt.Sprintf("work.step.%d", i),
+			"value": fmt.Sprintf("completed by process %d", processID),
+		})
+		ctx.Logger.Info("gRPC child completed step %d/3", i)
+	}
+
+	// Store final results in the workflow store
+	ctx.Workflow.Store.Put("processing_results", map[string]interface{}{
+		"total_steps":   3,
+		"processor_pid": processID,
+		"transport":     "grpc",
+		"completed_at":  time.Now().Format("2006-01-02 15:04:05"),
 	})
 
-	ctx.Logger.Info("Registry-based action completed successfully!")
+	// Send final status update
+	ctx.Send(gostage.MessageTypeStorePut, map[string]interface{}{
+		"key":   "child.status.grpc",
+		"value": "completed",
+	})
+
+	ctx.Logger.Info("gRPC child action has finished.")
 	return nil
 }
-
-// registerActions contains all action registrations.
-// It's crucial that this is called by both parent and child processes.
-func registerActions() {
-	gostage.RegisterAction(RegisteredActionID, func() gostage.Action {
-		return &RegisteredAction{
-			BaseAction: gostage.NewBaseAction(RegisteredActionID, "An action created from the registry via gRPC."),
-		}
-	})
-}
-
-// --- Child Process Logic ---
 
 // ChildLogger sends log messages over the gRPC communication broker.
 type ChildLogger struct {
@@ -91,6 +92,8 @@ func (l *ChildLogger) Info(format string, args ...interface{})  { l.send("INFO",
 func (l *ChildLogger) Warn(format string, args ...interface{})  { l.send("WARN", format, args...) }
 func (l *ChildLogger) Error(format string, args ...interface{}) { l.send("ERROR", format, args...) }
 
+// --- Child Process Logic ---
+
 func childMain() {
 	fmt.Fprintf(os.Stderr, "🔥 CHILD PROCESS STARTED - PID: %d, Parent PID: %d\n", os.Getpid(), os.Getppid())
 
@@ -108,9 +111,12 @@ func childMain() {
 		}
 	}
 
-	// 1. Register the actions. The child needs to know how to build the action from its ID.
-	registerActions()
-	fmt.Fprintf(os.Stderr, "✅ Child process registered actions\n")
+	// Register the action in the child process
+	gostage.RegisterAction(GrpcTestActionID, func() gostage.Action {
+		return &GrpcTestAction{
+			BaseAction: gostage.NewBaseAction(GrpcTestActionID, "A test action for gRPC spawning."),
+		}
+	})
 
 	// Create child runner with gRPC connection (NEW PURE GRPC API)
 	childRunner, err := gostage.NewChildRunner(grpcAddress, grpcPort)
@@ -130,21 +136,21 @@ func childMain() {
 		os.Exit(1)
 	}
 
-	// 2. Reconstruct the workflow. NewWorkflowFromDef will use the action registry.
+	// Create workflow from definition
 	workflow, err := gostage.NewWorkflowFromDef(workflowDef)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Child process failed to create workflow from def: %v\n", err)
+		fmt.Fprintf(os.Stderr, "❌ Child process failed to create workflow: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Fprintf(os.Stderr, "✅ Child process %d executing workflow: %s (via action registry)\n", os.Getpid(), workflowDef.ID)
+	fmt.Fprintf(os.Stderr, "✅ Child process %d executing workflow: %s\n", os.Getpid(), workflowDef.ID)
 
 	// Create logger that sends all messages to parent via gRPC
 	logger := &ChildLogger{broker: childRunner.Broker}
 
-	// 3. Execute the workflow.
+	// Execute workflow
 	if err := childRunner.Execute(context.Background(), workflow, logger); err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Child process workflow execution failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "❌ Child process %d workflow execution failed: %v\n", os.Getpid(), err)
 		os.Exit(1)
 	}
 
@@ -167,32 +173,33 @@ func childMain() {
 
 // --- Parent Process Logic ---
 
-func parentMain() {
-	// 1. Register the actions in the parent process as well.
-	registerActions()
-	fmt.Println("✅ Parent process registered actions")
+func main() {
+	// Check if this is a child process
+	for _, arg := range os.Args[1:] {
+		if arg == "--gostage-child" {
+			childMain()
+			return
+		}
+	}
+
+	// Parent process execution with NEW PURE GRPC API
+	fmt.Printf("🚀 PARENT PROCESS STARTED - PID: %d\n", os.Getpid())
+
+	// Register the action in parent too
+	gostage.RegisterAction(GrpcTestActionID, func() gostage.Action {
+		return &GrpcTestAction{
+			BaseAction: gostage.NewBaseAction(GrpcTestActionID, "A test action for gRPC spawning."),
+		}
+	})
 
 	// 🎉 NEW PURE GRPC API - Create runner with automatic gRPC transport
 	fmt.Println("🔧 Setting up pure gRPC transport with automatic port assignment...")
 	parentRunner := gostage.NewRunner() // gRPC is now automatic!
 
-	// Variables to track test results
-	var registryWorked bool
+	parentStore := store.NewKVStore()
 	var finalStoreFromChild map[string]interface{}
 
-	// 2. Set up handlers to listen for gRPC messages from the child.
-	parentRunner.Broker.RegisterHandler(gostage.MessageTypeLog, func(msgType gostage.MessageType, payload json.RawMessage) error {
-		var logData struct {
-			Level   string `json:"level"`
-			Message string `json:"message"`
-		}
-		if err := json.Unmarshal(payload, &logData); err != nil {
-			return err
-		}
-		fmt.Printf("[CHILD-%s] %s\n", logData.Level, logData.Message)
-		return nil
-	})
-
+	// Register handlers for gRPC communication
 	parentRunner.Broker.RegisterHandler(gostage.MessageTypeStorePut, func(msgType gostage.MessageType, payload json.RawMessage) error {
 		var data struct {
 			Key   string      `json:"key"`
@@ -202,14 +209,20 @@ func parentMain() {
 			return err
 		}
 
-		// Track registry confirmation
-		if data.Key == "registry.worked" {
-			if worked, ok := data.Value.(bool); ok {
-				registryWorked = worked
-				fmt.Printf("🔄 Real-time confirmation via gRPC: Registry worked = %v\n", worked)
-			}
+		fmt.Printf("🔄 Real-time update via gRPC: %s = %v\n", data.Key, data.Value)
+		return parentStore.Put(data.Key, data.Value)
+	})
+
+	parentRunner.Broker.RegisterHandler(gostage.MessageTypeLog, func(msgType gostage.MessageType, payload json.RawMessage) error {
+		var logData struct {
+			Level   string `json:"level"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(payload, &logData); err != nil {
+			return err
 		}
 
+		fmt.Printf("[CHILD-%s] %s\n", logData.Level, logData.Message)
 		return nil
 	})
 
@@ -221,23 +234,22 @@ func parentMain() {
 		return nil
 	})
 
-	// 3. Define the sub-workflow using the registered action's ID.
-	//    We are not passing an instance of the action, only its identifier.
+	// Define the sub-workflow
 	subWorkflowDef := gostage.SubWorkflowDef{
-		ID:          "registry-test-workflow",
-		Name:        "Action Registry Test Workflow",
-		Description: "Demonstrates action lookup from registry via pure gRPC",
+		ID:          "child-workflow-grpc",
+		Name:        "Pure gRPC Child Workflow",
+		Description: "Demonstrates automatic gRPC communication",
 		Stages: []gostage.StageDef{{
-			ID:   "main-stage",
-			Name: "Registry Action Stage",
+			ID:   "child-stage-grpc",
+			Name: "gRPC Processing Stage",
 			Actions: []gostage.ActionDef{{
-				ID: RegisteredActionID, // This will be looked up in the child's registry!
+				ID: GrpcTestActionID,
 			}},
 		}},
 	}
 
-	// 4. Spawn the child process with automatic gRPC transport
-	fmt.Printf("📋 Parent process %d spawning child to execute workflow via registered action...\n", os.Getpid())
+	// 🎉 NEW PURE GRPC API - Spawn child with automatic gRPC transport configuration!
+	fmt.Printf("📋 Parent process %d spawning child with pure gRPC transport\n", os.Getpid())
 
 	ctx := context.Background()
 	startTime := time.Now()
@@ -249,7 +261,7 @@ func parentMain() {
 	fmt.Printf("⏱️  Child process execution completed in %v\n", duration)
 
 	if err != nil {
-		fmt.Printf("❌ Error spawning child process: %v\n", err)
+		fmt.Printf("❌ Child process execution failed: %v\n", err)
 	} else {
 		fmt.Println("✅ Child process execution completed successfully!")
 	}
@@ -257,45 +269,46 @@ func parentMain() {
 	// Clean up gRPC server
 	parentRunner.Broker.Close()
 
-	// 5. Verify the result.
+	// Display comprehensive results
 	fmt.Println()
 	fmt.Println("📊 === EXECUTION SUMMARY ===")
 	fmt.Printf("Parent Process ID: %d\n", os.Getpid())
 	fmt.Printf("Transport Type: Pure gRPC (protobuf)\n")
-
-	if registryWorked {
-		fmt.Println("✅ SUCCESS: Child process confirmed that the registered action was executed.")
-	} else {
-		fmt.Println("❌ FAILED: Did not receive confirmation from the child process.")
-	}
+	fmt.Printf("Real-time messages received: %d\n", parentStore.Count())
 
 	if finalStoreFromChild != nil {
 		fmt.Printf("Final store contains %d keys\n", len(finalStoreFromChild))
 
-		// Display registry results
-		if results, ok := finalStoreFromChild["registry_results"].(map[string]interface{}); ok {
-			fmt.Println("\n📦 Registry Results from Child:")
-			fmt.Printf("  Action executed: %v\n", results["action_executed"])
-			fmt.Printf("  Executed by PID: %.0f\n", results["executed_by_pid"])
-			fmt.Printf("  Registry lookup: %s\n", results["registry_lookup"])
-			fmt.Printf("  Action ID: %s\n", results["action_id"])
-			fmt.Printf("  Execution time: %s\n", results["execution_time"])
-			fmt.Printf("  Transport used: %s\n", results["transport_used"])
-
-			// Verify the child ran in a different process
-			childPID := int(results["executed_by_pid"].(float64))
-			parentPID := os.Getpid()
-			if childPID != parentPID {
-				fmt.Printf("  ✅ Process isolation confirmed: child PID %d ≠ parent PID %d\n", childPID, parentPID)
+		// Display real-time messages
+		fmt.Println("\n🔄 Real-time gRPC Messages:")
+		for _, key := range parentStore.ListKeys() {
+			if value, err := store.Get[interface{}](parentStore, key); err == nil {
+				fmt.Printf("  📡 %s: %v\n", key, value)
 			}
+		}
+
+		// Display final store data
+		fmt.Println("\n📦 Final Store Data (from child workflow):")
+		for key, value := range finalStoreFromChild {
+			fmt.Printf("  📥 %s: %v\n", key, value)
+		}
+
+		// Check processing results
+		if results, ok := finalStoreFromChild["processing_results"].(map[string]interface{}); ok {
+			fmt.Println("\n✅ Processing Results:")
+			fmt.Printf("  Total steps: %.0f\n", results["total_steps"])
+			fmt.Printf("  Processor PID: %.0f\n", results["processor_pid"])
+			fmt.Printf("  Transport: %s\n", results["transport"])
+			fmt.Printf("  Completed at: %s\n", results["completed_at"])
 		}
 	} else {
 		fmt.Println("No final store received from child")
 	}
 
-	fmt.Println("\n🎉 === ACTION REGISTRY SUCCESS ===")
-	fmt.Println("✅ Child process successfully looked up action by ID")
-	fmt.Println("✅ Action registry pattern working with pure gRPC")
+	fmt.Println("\n🎉 === PURE GRPC SUCCESS ===")
+	fmt.Println("✅ No transport configuration needed")
+	fmt.Println("✅ Automatic gRPC server setup")
 	fmt.Println("✅ Type-safe protobuf communication")
-	fmt.Println("✅ Seamless action reconstruction in child process")
+	fmt.Println("✅ Seamless child process coordination")
+	fmt.Println("✅ Real-time IPC and final store transfer")
 }

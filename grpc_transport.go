@@ -22,9 +22,10 @@ type GRPCTransport struct {
 	actualPort int // Store the actual port assigned by the system
 
 	// Server-side components (for parent process)
-	server      *grpc.Server
-	listener    net.Listener
-	serverReady chan struct{} // Signals when server is ready
+	server         *grpc.Server
+	listener       net.Listener
+	serverReady    chan struct{}      // Signals when server is ready
+	workflowServer *workflowIPCServer // Reference to the workflow server
 
 	// Client-side components (for child process)
 	client      proto.WorkflowIPCClient
@@ -41,6 +42,8 @@ type GRPCTransport struct {
 	isServer bool
 	ctx      context.Context
 	cancel   context.CancelFunc
+
+	workflowInitHandler func(*proto.WorkflowDefinition) error
 }
 
 // NewGRPCTransport creates a new gRPC-based transport
@@ -87,18 +90,22 @@ func (g *GRPCTransport) StartServer() error {
 	}
 
 	// Register the service implementation
-	proto.RegisterWorkflowIPCServer(g.server, &workflowIPCServer{transport: g})
+	workflowServer := &workflowIPCServer{transport: g}
+	g.workflowServer = workflowServer // Store reference for later access
+	proto.RegisterWorkflowIPCServer(g.server, workflowServer)
 
 	// Start serving in a goroutine
-	go func() {
+	go func(listener net.Listener, server *grpc.Server) {
 		// Signal that server is ready to accept connections
 		close(g.serverReady)
 
-		if err := g.server.Serve(lis); err != nil {
-			// Log error but don't panic
-			fmt.Printf("gRPC server error: %v\n", err)
+		if listener != nil && server != nil {
+			if err := server.Serve(listener); err != nil {
+				// Log error but don't panic
+				fmt.Printf("gRPC server error: %v\n", err)
+			}
 		}
-	}()
+	}(g.listener, g.server)
 
 	return nil
 }
@@ -386,11 +393,6 @@ func (g *GRPCTransport) Close() error {
 	return nil
 }
 
-// GetType returns the transport type
-func (g *GRPCTransport) GetType() TransportType {
-	return TransportGRPC
-}
-
 // processIncomingMessage processes a received protobuf message through handlers and middleware
 func (g *GRPCTransport) processIncomingMessage(protoMsg *proto.IPCMessage) error {
 	// Convert proto message back to our internal format
@@ -493,7 +495,161 @@ func (g *GRPCTransport) processIncomingMessage(protoMsg *proto.IPCMessage) error
 // workflowIPCServer implements the gRPC server interface
 type workflowIPCServer struct {
 	proto.UnimplementedWorkflowIPCServer
-	transport *GRPCTransport
+	transport           *GRPCTransport
+	childReadySignals   map[string]chan struct{}             // Track which children are ready
+	pendingWorkflowDefs map[string]*proto.WorkflowDefinition // Store workflow definitions for children
+	mu                  sync.RWMutex
+}
+
+// ChildReady signals that a child process is ready to receive workflow definitions
+func (s *workflowIPCServer) ChildReady(ctx context.Context, req *proto.ReadySignal) (*proto.MessageAck, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.childReadySignals == nil {
+		s.childReadySignals = make(map[string]chan struct{})
+	}
+
+	// Signal that this child is ready
+	if readyChan, exists := s.childReadySignals[req.ChildId]; exists {
+		close(readyChan)
+		delete(s.childReadySignals, req.ChildId)
+	}
+
+	return &proto.MessageAck{
+		Success:   true,
+		MessageId: req.ChildId,
+	}, nil
+}
+
+// WaitForChildReady waits for a specific child to signal it's ready
+func (g *GRPCTransport) WaitForChildReady(childId string, timeout time.Duration) error {
+	server := g.getWorkflowServer()
+	if server == nil {
+		return fmt.Errorf("gRPC server not available")
+	}
+
+	server.mu.Lock()
+	if server.childReadySignals == nil {
+		server.childReadySignals = make(map[string]chan struct{})
+	}
+	readyChan := make(chan struct{})
+	server.childReadySignals[childId] = readyChan
+	server.mu.Unlock()
+
+	select {
+	case <-readyChan:
+		return nil
+	case <-time.After(timeout):
+		// Clean up the channel
+		server.mu.Lock()
+		delete(server.childReadySignals, childId)
+		server.mu.Unlock()
+		return fmt.Errorf("timeout waiting for child %s to be ready", childId)
+	}
+}
+
+// Helper to get the workflow server
+func (g *GRPCTransport) getWorkflowServer() *workflowIPCServer {
+	// This is a bit hacky but necessary since we don't have direct access
+	// We'll store the server reference when we register it
+	return g.workflowServer
+}
+
+// InitializeWorkflow signals that a child process is ready to receive workflow definitions
+func (g *GRPCTransport) SignalChildReady(ctx context.Context, childId string) error {
+	g.mu.RLock()
+	client := g.client
+	g.mu.RUnlock()
+
+	if client == nil {
+		return fmt.Errorf("gRPC client not connected")
+	}
+
+	_, err := client.ChildReady(ctx, &proto.ReadySignal{ChildId: childId})
+	return err
+}
+
+// InitializeWorkflow handles workflow initialization requests from child processes
+func (s *workflowIPCServer) InitializeWorkflow(ctx context.Context, req *proto.WorkflowDefinition) (*proto.WorkflowAck, error) {
+	// This is actually a request FROM child TO parent asking for workflow definition
+	// In our new model, we'll use a different approach
+	return &proto.WorkflowAck{
+		Success:      false,
+		ErrorMessage: "InitializeWorkflow should not be called directly - use RequestWorkflowDefinition",
+	}, nil
+}
+
+// RequestWorkflowDefinition allows child to request its workflow definition
+func (s *workflowIPCServer) RequestWorkflowDefinition(ctx context.Context, req *proto.ReadySignal) (*proto.WorkflowDefinition, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Signal that this child is ready
+	if s.childReadySignals == nil {
+		s.childReadySignals = make(map[string]chan struct{})
+	}
+	if readyChan, exists := s.childReadySignals[req.ChildId]; exists {
+		close(readyChan)
+		delete(s.childReadySignals, req.ChildId)
+	}
+
+	// Return the pending workflow definition for this child
+	if s.pendingWorkflowDefs == nil {
+		return nil, fmt.Errorf("no pending workflow definitions")
+	}
+
+	workflowDef, exists := s.pendingWorkflowDefs[req.ChildId]
+	if !exists {
+		return nil, fmt.Errorf("no workflow definition available for child %s", req.ChildId)
+	}
+
+	// Remove the definition after sending it
+	delete(s.pendingWorkflowDefs, req.ChildId)
+
+	return workflowDef, nil
+}
+
+// SetPendingWorkflowDef stores a workflow definition for a specific child
+func (g *GRPCTransport) SetPendingWorkflowDef(childId string, def SubWorkflowDef) error {
+	server := g.getWorkflowServer()
+	if server == nil {
+		return fmt.Errorf("gRPC server not available")
+	}
+
+	// Convert SubWorkflowDef to protobuf WorkflowDefinition
+	defBytes, err := json.Marshal(def)
+	if err != nil {
+		return fmt.Errorf("failed to serialize workflow definition: %w", err)
+	}
+
+	// Convert initial store to protobuf format
+	initialStore := make(map[string][]byte)
+	if def.InitialStore != nil {
+		for k, v := range def.InitialStore {
+			valueBytes, err := json.Marshal(v)
+			if err != nil {
+				return fmt.Errorf("failed to marshal initial store value for key %s: %w", k, err)
+			}
+			initialStore[k] = valueBytes
+		}
+	}
+
+	workflowDef := &proto.WorkflowDefinition{
+		Id:             def.ID,
+		Name:           def.Name,
+		DefinitionJson: defBytes,
+		InitialStore:   initialStore,
+	}
+
+	server.mu.Lock()
+	if server.pendingWorkflowDefs == nil {
+		server.pendingWorkflowDefs = make(map[string]*proto.WorkflowDefinition)
+	}
+	server.pendingWorkflowDefs[childId] = workflowDef
+	server.mu.Unlock()
+
+	return nil
 }
 
 // SendMessage handles incoming gRPC messages
@@ -558,4 +714,106 @@ func (g *GRPCTransport) GetActualPort() int {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	return g.actualPort
+}
+
+// InitializeWorkflow sends a workflow definition to the child process via gRPC
+func (g *GRPCTransport) InitializeWorkflow(ctx context.Context, def SubWorkflowDef) error {
+	g.mu.RLock()
+	client := g.client
+	g.mu.RUnlock()
+
+	if client == nil {
+		return fmt.Errorf("gRPC client not connected")
+	}
+
+	// Convert SubWorkflowDef to protobuf WorkflowDefinition
+	defBytes, err := json.Marshal(def)
+	if err != nil {
+		return fmt.Errorf("failed to serialize workflow definition: %w", err)
+	}
+
+	// Convert initial store to protobuf format
+	initialStore := make(map[string][]byte)
+	if def.InitialStore != nil {
+		for k, v := range def.InitialStore {
+			valueBytes, err := json.Marshal(v)
+			if err != nil {
+				return fmt.Errorf("failed to marshal initial store value for key %s: %w", k, err)
+			}
+			initialStore[k] = valueBytes
+		}
+	}
+
+	workflowDef := &proto.WorkflowDefinition{
+		Id:             def.ID,
+		Name:           def.Name,
+		DefinitionJson: defBytes,
+		InitialStore:   initialStore,
+	}
+
+	// Send the workflow definition via gRPC
+	ack, err := client.InitializeWorkflow(ctx, workflowDef)
+	if err != nil {
+		return fmt.Errorf("failed to send workflow definition: %w", err)
+	}
+
+	if !ack.Success {
+		return fmt.Errorf("workflow initialization rejected: %s", ack.ErrorMessage)
+	}
+
+	return nil
+}
+
+// SetWorkflowInitHandler sets the handler for workflow initialization (used by child process)
+func (g *GRPCTransport) SetWorkflowInitHandler(handler func(*proto.WorkflowDefinition) error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.workflowInitHandler = handler
+}
+
+// RequestWorkflowDefinitionFromParent allows child to request workflow definition from parent
+func (g *GRPCTransport) RequestWorkflowDefinitionFromParent(ctx context.Context, childId string) (*SubWorkflowDef, error) {
+	g.mu.RLock()
+	client := g.client
+	g.mu.RUnlock()
+
+	if client == nil {
+		return nil, fmt.Errorf("gRPC client not connected")
+	}
+
+	// Request workflow definition from parent
+	workflowDef, err := client.RequestWorkflowDefinition(ctx, &proto.ReadySignal{ChildId: childId})
+	if err != nil {
+		return nil, fmt.Errorf("failed to request workflow definition: %w", err)
+	}
+
+	// Convert protobuf definition back to SubWorkflowDef
+	var def SubWorkflowDef
+	if err := json.Unmarshal(workflowDef.DefinitionJson, &def); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal workflow definition: %w", err)
+	}
+
+	// Convert initial store from protobuf format
+	if len(workflowDef.InitialStore) > 0 {
+		if def.InitialStore == nil {
+			def.InitialStore = make(map[string]interface{})
+		}
+		for k, v := range workflowDef.InitialStore {
+			var value interface{}
+			if err := json.Unmarshal(v, &value); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal initial store value for key %s: %w", k, err)
+			}
+			def.InitialStore[k] = value
+		}
+	}
+
+	return &def, nil
+}
+
+// GetGRPCAddressFromEnv returns the gRPC address from environment
+// Defaults to localhost:50051
+func GetGRPCAddressFromEnv() (string, int) {
+	address := "localhost"
+	port := 50051 // Default port
+	return address, port
 }

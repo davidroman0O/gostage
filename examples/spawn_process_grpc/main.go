@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/davidroman0O/gostage"
@@ -215,30 +217,25 @@ func getHostname() string {
 	return "unknown"
 }
 
-// childMain handles execution when running as a child process
+// childMain handles execution when running as a child process with the new pure gRPC approach
 func childMain() {
 	fmt.Fprintf(os.Stderr, "🔥 CHILD PROCESS STARTED - PID: %d, Parent PID: %d\n", os.Getpid(), os.Getppid())
 
-	// Read workflow definition from stdin
-	workflowDef, err := gostage.ReadWorkflowDefinitionFromStdin()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Child process failed to read workflow definition: %v\n", err)
-		os.Exit(1)
+	// Parse gRPC connection arguments from command line
+	var grpcAddress string = "localhost"
+	var grpcPort int = 50051
+
+	for _, arg := range os.Args {
+		if strings.HasPrefix(arg, "--grpc-address=") {
+			grpcAddress = strings.TrimPrefix(arg, "--grpc-address=")
+		} else if strings.HasPrefix(arg, "--grpc-port=") {
+			if port, err := strconv.Atoi(strings.TrimPrefix(arg, "--grpc-port=")); err == nil {
+				grpcPort = port
+			}
+		}
 	}
 
-	// 🎉 NEW TRANSPARENT API - just give the data to the child runner!
-	runner, err := gostage.NewChildRunner(*workflowDef)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Child process failed to initialize: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Fprintf(os.Stderr, "✅ Child process automatically configured with %s transport\n", workflowDef.Transport.Type)
-
-	// Create logger that sends all messages to parent
-	logger := &ChildLogger{broker: runner.Broker}
-
-	// Register actions
+	// Register actions that the child process will need
 	gostage.RegisterAction("data-processor", func() gostage.Action {
 		return &DataProcessorAction{
 			BaseAction: gostage.NewBaseAction("data-processor", "Processes data from store"),
@@ -251,6 +248,27 @@ func childMain() {
 		}
 	})
 
+	// Create child runner with gRPC connection (NEW PURE GRPC API)
+	childRunner, err := gostage.NewChildRunner(grpcAddress, grpcPort)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Child process failed to initialize: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Fprintf(os.Stderr, "✅ Child process automatically configured with pure gRPC transport\n")
+
+	// Request workflow definition from parent (this also signals that we're ready)
+	childId := fmt.Sprintf("child-%d", os.Getpid())
+	grpcTransport := childRunner.Broker.GetTransport()
+	workflowDef, err := grpcTransport.RequestWorkflowDefinitionFromParent(context.Background(), childId)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed to request workflow definition: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Create logger that sends all messages to parent via gRPC
+	logger := &ChildLogger{broker: childRunner.Broker}
+
 	// Create workflow from definition
 	workflow, err := gostage.NewWorkflowFromDef(workflowDef)
 	if err != nil {
@@ -261,29 +279,29 @@ func childMain() {
 	fmt.Fprintf(os.Stderr, "✅ Child process %d executing workflow: %s\n", os.Getpid(), workflowDef.ID)
 
 	// Execute workflow
-	if err := runner.Execute(context.Background(), workflow, logger); err != nil {
+	if err := childRunner.Execute(context.Background(), workflow, logger); err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Child process %d workflow execution failed: %v\n", os.Getpid(), err)
 		os.Exit(1)
 	}
 
-	// Send final store state to parent
+	// Send final store state to parent via gRPC
 	if workflow.Store != nil {
 		finalStore := workflow.Store.ExportAll()
-		if err := runner.Broker.Send(gostage.MessageTypeFinalStore, finalStore); err != nil {
+		if err := childRunner.Broker.Send(gostage.MessageTypeFinalStore, finalStore); err != nil {
 			fmt.Fprintf(os.Stderr, "⚠️  Child process failed to send final store: %v\n", err)
 		} else {
-			fmt.Fprintf(os.Stderr, "📦 Child process sent final store with %d keys\n", len(finalStore))
+			fmt.Fprintf(os.Stderr, "📦 Child process sent final store with %d keys via gRPC\n", len(finalStore))
 		}
 	}
 
-	// Close broker to clean up connections
-	runner.Broker.Close()
+	// Close broker to clean up gRPC connections
+	childRunner.Broker.Close()
 
 	fmt.Fprintf(os.Stderr, "✅ Child process %d completed successfully\n", os.Getpid())
 	os.Exit(0)
 }
 
-// ChildLogger implements gostage.Logger and sends all logs via broker
+// ChildLogger implements gostage.Logger and sends all logs via gRPC broker
 type ChildLogger struct {
 	broker *gostage.RunnerBroker
 }
@@ -310,7 +328,7 @@ func main() {
 		}
 	}
 
-	// Parent process execution with NEW CLEAN API
+	// Parent process execution with NEW PURE GRPC API
 	fmt.Printf("🚀 PARENT PROCESS STARTED - PID: %d\n", os.Getpid())
 
 	// Register actions in parent too
@@ -326,8 +344,8 @@ func main() {
 		}
 	})
 
-	// 🎉 NEW CLEAN API - Create runner with gRPC transport (random port!)
-	fmt.Println("🔧 Setting up gRPC transport with automatic port assignment...")
+	// 🎉 NEW PURE GRPC API - Create runner with automatic port assignment
+	fmt.Println("🔧 Setting up pure gRPC transport with automatic port assignment...")
 	parentRunner := gostage.NewRunner(gostage.WithGRPCTransport())
 
 	var childLogs []string
@@ -362,7 +380,7 @@ func main() {
 
 		err := realtimeStore.Put(data.Key, data.Value)
 		if err == nil {
-			fmt.Printf("🔄 Real-time update: %s = %v\n", data.Key, data.Value)
+			fmt.Printf("🔄 Real-time update via gRPC: %s = %v\n", data.Key, data.Value)
 		}
 		return err
 	})
@@ -374,7 +392,7 @@ func main() {
 			return fmt.Errorf("failed to unmarshal final store: %w", err)
 		}
 		finalStoreFromChild = storeData
-		fmt.Printf("📦 Parent received final store with %d keys\n", len(storeData))
+		fmt.Printf("📦 Parent received final store with %d keys via gRPC\n", len(storeData))
 		return nil
 	})
 
@@ -410,8 +428,8 @@ func main() {
 	// Define workflow that will process the store data
 	workflowDef := gostage.SubWorkflowDef{
 		ID:           "grpc-data-processing-workflow",
-		Name:         "gRPC Data Processing Workflow",
-		Description:  "Demonstrates type-safe store data processing via gRPC transport",
+		Name:         "Pure gRPC Data Processing Workflow",
+		Description:  "Demonstrates type-safe store data processing via pure gRPC transport",
 		InitialStore: initialStore,
 		Stages: []gostage.StageDef{
 			{
@@ -434,12 +452,12 @@ func main() {
 	fmt.Printf("📋 Parent process %d spawning child to process %d data items\n",
 		os.Getpid(), len(initialStore["input_data"].([]interface{})))
 
-	// 🎉 NEW CLEAN API - Spawn child with automatic transport configuration!
+	// 🎉 NEW PURE GRPC API - Spawn child with automatic gRPC transport configuration!
 	ctx := context.Background()
 	startTime := time.Now()
 
-	// This is the magic - automatically passes gRPC transport config to child!
-	err := parentRunner.SpawnWorkflow(ctx, workflowDef)
+	// This automatically uses gRPC transport - no configuration needed!
+	err := parentRunner.Spawn(ctx, workflowDef)
 
 	duration := time.Since(startTime)
 	fmt.Printf("⏱️  Child process execution completed in %v\n", duration)
@@ -456,7 +474,7 @@ func main() {
 	// Display comprehensive results
 	fmt.Println("📊 === EXECUTION SUMMARY ===")
 	fmt.Printf("Parent Process ID: %d\n", os.Getpid())
-	fmt.Printf("Transport Type: gRPC (protobuf)\n")
+	fmt.Printf("Transport Type: Pure gRPC (protobuf)\n")
 	fmt.Printf("Type Safety: Enforced\n")
 	fmt.Printf("Total child log messages: %d\n", len(childLogs))
 	fmt.Printf("Real-time IPC messages received: %d\n", realtimeStore.Count())
@@ -500,20 +518,18 @@ func main() {
 			fmt.Printf("  PID: %.0f (different from parent: %d)\n", processInfo["pid"], os.Getpid())
 			fmt.Printf("  Parent PID: %.0f\n", processInfo["parent_pid"])
 			fmt.Printf("  Hostname: %s\n", processInfo["hostname"])
-			fmt.Printf("  🔒 IPC Transport: %s\n", processInfo["ipc_transport"])
-			fmt.Printf("  🔒 Protocol: %s\n", processInfo["protocol"])
-			fmt.Printf("  🔒 Type Safe: %v\n", processInfo["type_safe"])
+			fmt.Printf("  Transport: %s\n", processInfo["ipc_transport"])
+			fmt.Printf("  Protocol: %s\n", processInfo["protocol"])
+			fmt.Printf("  Type Safe: %v\n", processInfo["type_safe"])
 		}
 
 		if stats, ok := finalStoreFromChild["processing_stats"].(map[string]interface{}); ok {
 			fmt.Printf("\n✅ Processing Statistics:\n")
 			fmt.Printf("  Items processed: %.0f\n", stats["items_processed"])
 			fmt.Printf("  Total value: %.2f\n", stats["total_value"])
-			fmt.Printf("  Processed at: %s\n", stats["processed_at"])
-			fmt.Printf("  Processor PID: %.0f\n", stats["processor_pid"])
-			fmt.Printf("  🔒 Transport Type: %s\n", stats["transport_type"])
-			fmt.Printf("  🔒 Protocol: %s\n", stats["protocol"])
-			fmt.Printf("  🔒 Type Safety: %s\n", stats["type_safety"])
+			fmt.Printf("  Transport type: %s\n", stats["transport_type"])
+			fmt.Printf("  Protocol: %s\n", stats["protocol"])
+			fmt.Printf("  Type safety: %s\n", stats["type_safety"])
 		}
 
 		if validation, ok := finalStoreFromChild["validation_results"].(map[string]interface{}); ok {
@@ -522,48 +538,36 @@ func main() {
 			if errorMsg, hasError := validation["error"]; hasError {
 				fmt.Printf("  ❌ Validation Error: %v\n", errorMsg)
 			} else {
-				if totalItems, ok := validation["total_items"]; ok {
-					fmt.Printf("  Total items: %.0f\n", totalItems)
-				}
-				if validItems, ok := validation["valid_items"]; ok {
-					fmt.Printf("  Valid items: %.0f\n", validItems)
-				}
-				if grpcItems, ok := validation["grpc_items"]; ok {
-					fmt.Printf("  🔒 gRPC processed items: %.0f\n", grpcItems)
-				}
-				if grpcSuccess, ok := validation["grpc_success"]; ok {
-					fmt.Printf("  🔒 gRPC Success: %v\n", grpcSuccess)
-				}
-				if transportUsed, ok := validation["transport_used"]; ok {
-					fmt.Printf("  🔒 Transport Used: %s\n", transportUsed)
-				}
-				if protocolUsed, ok := validation["protocol_used"]; ok {
-					fmt.Printf("  🔒 Protocol Used: %s\n", protocolUsed)
-				}
+				fmt.Printf("  Total items: %.0f\n", validation["total_items"])
+				fmt.Printf("  Valid items: %.0f\n", validation["valid_items"])
+				fmt.Printf("  gRPC items: %.0f\n", validation["grpc_items"])
+				fmt.Printf("  Validation success: %v\n", validation["validation_success"])
+				fmt.Printf("  gRPC success: %v\n", validation["grpc_success"])
+				fmt.Printf("  Transport used: %s\n", validation["transport_used"])
+				fmt.Printf("  Protocol used: %s\n", validation["protocol_used"])
 			}
 		}
 	}
 
-	fmt.Println()
-	fmt.Println("🎉 === EXAMPLE COMPLETED SUCCESSFULLY! ===")
-	fmt.Println("✅ Clean, developer-friendly API")
-	fmt.Println("🔒 Automatic transport configuration")
-	fmt.Println("⚡ Random port assignment (no conflicts)")
-	fmt.Println("🛡️  Type safety prevents message corruption")
-	fmt.Println("🚀 gRPC transport scales better for high-frequency communication")
+	fmt.Println("\n🎉 === PURE GRPC SUCCESS ===")
+	fmt.Println("✅ No transport configuration needed")
+	fmt.Println("✅ Automatic gRPC server setup")
+	fmt.Println("✅ Type-safe protobuf communication")
+	fmt.Println("✅ Seamless child process coordination")
+	fmt.Println("✅ Real-time IPC and final store transfer")
 }
 
 func summarizeValue(value interface{}) string {
 	switch v := value.(type) {
-	case map[string]interface{}:
-		return fmt.Sprintf("map[%d keys]", len(v))
 	case []interface{}:
-		return fmt.Sprintf("array[%d items]", len(v))
+		return fmt.Sprintf("array[%d]", len(v))
+	case map[string]interface{}:
+		return fmt.Sprintf("object{%d keys}", len(v))
 	case string:
-		if len(v) > 50 {
-			return v[:47] + "..."
+		if len(v) > 30 {
+			return fmt.Sprintf("\"%s...\"", v[:30])
 		}
-		return v
+		return fmt.Sprintf("\"%s\"", v)
 	default:
 		return fmt.Sprintf("%v", v)
 	}
