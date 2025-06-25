@@ -44,12 +44,21 @@ func (l *BrokerLogger) Error(format string, args ...interface{}) { l.send("error
 
 // This TestMain function is the key to testing the spawn functionality.
 // It allows the test binary to be re-executed in a "child" mode.
+// FIXED: Now handles both --gostage-child flag (production) and environment variable (legacy test support)
 func TestMain(m *testing.M) {
-	// If this env var is set, we run the special child process main func.
+	// Check for child process mode using command line arguments (production approach)
+	if len(os.Args) > 1 && os.Args[1] == "--gostage-child" {
+		childMain()
+		return
+	}
+
+	// Legacy support: If this env var is set, we run the special child process main func.
+	// This ensures backward compatibility with existing tests
 	if os.Getenv("GOSTAGE_EXEC_CHILD") == "1" {
 		childMain()
 		return
 	}
+
 	// Otherwise, run the tests as normal.
 	os.Exit(m.Run())
 }
@@ -254,7 +263,7 @@ func TestSpawnWorkflow_Success(t *testing.T) {
 		}},
 	}
 
-	// 4. Spawn the child process.
+	// 4. Spawn the child process using the FIXED spawn method.
 	err := spawnTestProcess(context.Background(), parentRunner, subWorkflowDef)
 	assert.NoError(t, err, "Spawning child process should succeed")
 
@@ -373,14 +382,15 @@ func TestSpawnWorkflow_WithStoreHandling(t *testing.T) {
 	assert.Equal(t, 2.0, sharedData["y"])
 }
 
-// spawnTestProcess is a helper that mimics runner.Spawn but sets the
-// environment variable needed to trigger the child logic in TestMain.
+// spawnTestProcess is a helper that NOW uses the --gostage-child flag approach
+// instead of environment variables, making it consistent with production code
 func spawnTestProcess(ctx context.Context, r *Runner, def SubWorkflowDef) error {
 	return spawnWorkflowWithTransport(ctx, r, def, nil) // Use JSON transport by default
 }
 
 // spawnWorkflowWithTransport spawns a child process with the specified transport
 // If grpcTransport is nil, it uses JSON transport over stdin/stdout
+// UPDATED: Now uses --gostage-child flag instead of environment variables
 func spawnWorkflowWithTransport(ctx context.Context, r *Runner, def SubWorkflowDef, grpcTransport *GRPCTransport) error {
 	// Always ensure the workflow definition has transport configuration
 	if grpcTransport != nil {
@@ -420,11 +430,8 @@ func spawnWorkflowWithTransport(ctx context.Context, r *Runner, def SubWorkflowD
 		return fmt.Errorf("failed to find executable path: %w", err)
 	}
 
-	// Create the command to re-run the test binary.
-	cmd := exec.CommandContext(ctx, exePath)
-
-	// Set the environment to trigger child mode
-	env := append(os.Environ(), "GOSTAGE_EXEC_CHILD=1")
+	// FIXED: Create the command using --gostage-child flag (like production code)
+	cmd := exec.CommandContext(ctx, exePath, "--gostage-child")
 
 	var childStdout io.Reader
 
@@ -433,7 +440,6 @@ func spawnWorkflowWithTransport(ctx context.Context, r *Runner, def SubWorkflowD
 		childStdout, _ = cmd.StdoutPipe()
 	}
 
-	cmd.Env = env
 	childStdin, _ := cmd.StdinPipe()
 	cmd.Stderr = os.Stderr
 

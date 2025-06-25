@@ -978,8 +978,16 @@ func (r *Runner) Spawn(ctx context.Context, def SubWorkflowDef) error {
 
 // executeSpawn contains the core spawn logic, separated for middleware integration
 func (r *Runner) executeSpawn(ctx context.Context, def SubWorkflowDef) error {
+	// Ensure transport configuration is set for the child process
+	// If no transport is specified, default to JSON transport
+	if def.Transport == nil {
+		def.Transport = &TransportConfig{
+			Type: TransportJSON,
+		}
+	}
+
 	// Handle transport-specific setup first
-	if def.Transport != nil && def.Transport.Type == TransportGRPC {
+	if def.Transport.Type == TransportGRPC {
 		// gRPC mode: start the server and update the port
 		if grpcTransport, ok := r.Broker.GetTransport().(*GRPCTransport); ok {
 			if err := grpcTransport.StartServer(); err != nil {
@@ -1000,7 +1008,7 @@ func (r *Runner) executeSpawn(ctx context.Context, def SubWorkflowDef) error {
 		}
 	}
 
-	// 1. Serialize the workflow definition (after updating port for gRPC)
+	// 1. Serialize the workflow definition (after updating port for gRPC and setting default transport)
 	defBytes, err := json.Marshal(def)
 	if err != nil {
 		return fmt.Errorf("failed to serialize sub-workflow definition: %w", err)
@@ -1018,7 +1026,7 @@ func (r *Runner) executeSpawn(ctx context.Context, def SubWorkflowDef) error {
 	// 4. Handle transport-specific pipe setup
 	var childStdout io.ReadCloser
 
-	if def.Transport != nil && def.Transport.Type == TransportGRPC {
+	if def.Transport.Type == TransportGRPC {
 		// For gRPC, we don't use stdout pipes
 	} else {
 		// JSON mode: set up stdout pipe
