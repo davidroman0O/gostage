@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -560,7 +559,7 @@ func TestMiddleware(t *testing.T) {
 // TestNewRunnerWithBroker tests the new constructor with broker
 func TestNewRunnerWithBroker(t *testing.T) {
 	// Create a custom broker
-	broker := NewRunnerBroker(os.Stdout)
+	broker := NewRunnerBroker()
 
 	// Test NewRunnerWithBroker constructor
 	runner := NewRunnerWithBroker(broker)
@@ -581,7 +580,7 @@ func TestNewRunnerWithBroker(t *testing.T) {
 // TestWithBrokerOption tests the WithBroker option
 func TestWithBrokerOption(t *testing.T) {
 	// Create a custom broker
-	broker := NewRunnerBroker(os.Stdout)
+	broker := NewRunnerBroker()
 
 	// Test WithBroker option
 	runner := NewRunner(WithBroker(broker))

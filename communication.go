@@ -3,8 +3,7 @@ package gostage
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"os"
+	"fmt"
 )
 
 // MessageType is a string that defines the purpose of a message.
@@ -36,51 +35,40 @@ type Message struct {
 type MessageHandler func(msgType MessageType, payload json.RawMessage) error
 
 // RunnerBroker handles message sending, receiving, and routing between processes
-// It now wraps an IPCTransport to support different communication protocols
+// It uses gRPC transport directly for all inter-process communication
 type RunnerBroker struct {
-	transport IPCTransport
+	transport *GRPCTransport
 }
 
-// NewRunnerBroker creates a new broker for IPC communication using JSON transport by default
-func NewRunnerBroker(output io.Writer) *RunnerBroker {
+// NewRunnerBroker creates a new broker for IPC communication using gRPC transport
+func NewRunnerBroker() *RunnerBroker {
+	// Create default gRPC transport
+	grpcTransport, err := NewGRPCTransport("localhost", 0)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to create default gRPC transport: %v", err))
+	}
+
 	return &RunnerBroker{
-		transport: NewJSONTransport(output),
+		transport: grpcTransport,
 	}
 }
 
-// NewRunnerBrokerWithTransport creates a new broker with a custom transport
-func NewRunnerBrokerWithTransport(transport IPCTransport) *RunnerBroker {
+// NewRunnerBrokerWithTransport creates a new broker with a custom gRPC transport
+func NewRunnerBrokerWithTransport(transport *GRPCTransport) *RunnerBroker {
 	return &RunnerBroker{
 		transport: transport,
 	}
 }
 
-// NewRunnerBrokerFromConfig creates a broker based on environment configuration
+// NewRunnerBrokerFromConfig creates a broker based on gRPC configuration
 func NewRunnerBrokerFromConfig() (*RunnerBroker, error) {
-	transportType := GetTransportTypeFromEnv()
-
-	var config TransportConfig
-	switch transportType {
-	case TransportGRPC:
-		address, port := GetGRPCAddressFromEnv()
-		config = TransportConfig{
-			Type:        TransportGRPC,
-			GRPCAddress: address,
-			GRPCPort:    port,
-		}
-	default:
-		config = TransportConfig{
-			Type:   TransportJSON,
-			Output: os.Stdout,
-		}
-	}
-
-	transport, err := NewIPCTransport(config)
+	address, port := GetGRPCAddressFromEnv()
+	grpcTransport, err := NewGRPCTransport(address, port)
 	if err != nil {
 		return nil, err
 	}
 
-	return NewRunnerBrokerWithTransport(transport), nil
+	return NewRunnerBrokerWithTransport(grpcTransport), nil
 }
 
 // RegisterHandler registers a handler for a specific message type.
@@ -103,23 +91,18 @@ func (b *RunnerBroker) AddMessageCallback(callback func(MessageType, json.RawMes
 	b.transport.AddMessageCallback(callback)
 }
 
-// Send sends a message through the underlying transport
+// Send sends a message through the underlying gRPC transport
 func (b *RunnerBroker) Send(msgType MessageType, payload interface{}) error {
 	return b.transport.Send(msgType, payload)
 }
 
-// Listen reads and processes messages from the given reader
-func (b *RunnerBroker) Listen(reader io.Reader) error {
-	return b.transport.Listen(reader)
-}
-
-// Close closes the underlying transport
+// Close closes the underlying gRPC transport
 func (b *RunnerBroker) Close() error {
 	return b.transport.Close()
 }
 
-// GetTransport returns the underlying transport (useful for gRPC-specific operations)
-func (b *RunnerBroker) GetTransport() IPCTransport {
+// GetTransport returns the underlying gRPC transport
+func (b *RunnerBroker) GetTransport() *GRPCTransport {
 	return b.transport
 }
 

@@ -50,8 +50,6 @@ type SubWorkflowDef struct {
 	// InitialStore contains key-value data that will be loaded into the
 	// workflow's store before execution begins. Values must be JSON-serializable.
 	InitialStore map[string]interface{} `json:"initialStore,omitempty"`
-	// Transport specifies the IPC transport configuration for the child process
-	Transport *TransportConfig `json:"transport,omitempty"`
 }
 
 // NewWorkflowFromDef creates a new Workflow instance from a SubWorkflowDef.

@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -67,26 +65,22 @@ func TestMain(m *testing.M) {
 // It sets up a runner, reads a workflow definition from stdin, executes it,
 // and communicates results back to the parent via stdout.
 func childMain() {
-	// Read workflow definition from stdin
-	workflowDef, err := ReadWorkflowDefinitionFromStdin()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "child process failed to read workflow definition: %v\n", err)
-		os.Exit(1)
-	}
+	// Register the action that the child process will need to create.
+	registerSpawnTestActions()
 
-	// 🎉 NEW TRANSPARENT API - just give the data to the child runner!
-	childRunner, err := NewChildRunner(*workflowDef)
+	// ✨ NEW SEAMLESS API - automatic gRPC setup and logger creation
+	childRunner, logger, err := NewChildRunner()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "child process failed to initialize: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Create a logger that sends all logs through this broker.
-	brokerLogger := NewBrokerLogger(childRunner.Broker)
-
-	// The child process must have the same actions registered as the parent
-	// so it can instantiate them from the definition.
-	registerSpawnTestActions()
+	// ✨ Direct method call - no GetTransport() needed!
+	workflowDef, err := childRunner.RequestWorkflowDefinitionFromParent(context.Background())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to request workflow definition: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Reconstruct the workflow from the definition.
 	wf, err := NewWorkflowFromDef(workflowDef)
@@ -96,8 +90,8 @@ func childMain() {
 	}
 
 	// Execute the reconstructed workflow.
-	// Passing brokerLogger ensures the runner's default logger is never used.
-	if err := childRunner.Execute(context.Background(), wf, brokerLogger); err != nil {
+	// Using the returned logger ensures all logs are sent to parent via gRPC.
+	if err := childRunner.Execute(context.Background(), wf, logger); err != nil {
 		// Errors here will be caught by the parent's cmd.Wait().
 		// We could also send an explicit error message.
 		fmt.Fprintf(os.Stderr, "child workflow execution failed: %v\n", err)
@@ -114,7 +108,7 @@ func childMain() {
 	}
 
 	// Close the broker to clean up connections
-	childRunner.Broker.Close()
+	childRunner.Close()
 
 	// Exit successfully.
 	os.Exit(0)
@@ -389,99 +383,10 @@ func spawnTestProcess(ctx context.Context, r *Runner, def SubWorkflowDef) error 
 }
 
 // spawnWorkflowWithTransport spawns a child process with the specified transport
-// If grpcTransport is nil, it uses JSON transport over stdin/stdout
-// UPDATED: Now uses --gostage-child flag instead of environment variables
+// Now uses pure gRPC approach without stdin/stdout pipes
 func spawnWorkflowWithTransport(ctx context.Context, r *Runner, def SubWorkflowDef, grpcTransport *GRPCTransport) error {
-	// Always ensure the workflow definition has transport configuration
-	if grpcTransport != nil {
-		// gRPC mode: start server and pass connection info via stdin
-		if err := grpcTransport.StartServer(); err != nil {
-			return fmt.Errorf("failed to start gRPC server: %w", err)
-		}
-
-		// Wait for server to be ready
-		serverCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		if err := grpcTransport.WaitForServerReady(serverCtx); err != nil {
-			return fmt.Errorf("server not ready: %w", err)
-		}
-
-		// Pass gRPC connection info in the workflow definition
-		def.Transport = &TransportConfig{
-			Type:        TransportGRPC,
-			GRPCAddress: grpcTransport.address,
-			GRPCPort:    grpcTransport.port,
-		}
-	} else {
-		// JSON mode: configure JSON transport (no Output field needed in child)
-		def.Transport = &TransportConfig{
-			Type: TransportJSON,
-		}
-	}
-
-	defBytes, err := json.Marshal(def)
-	if err != nil {
-		return fmt.Errorf("failed to serialize sub-workflow definition: %w", err)
-	}
-
-	// Get the path to the current running test binary.
-	exePath, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("failed to find executable path: %w", err)
-	}
-
-	// FIXED: Create the command using --gostage-child flag (like production code)
-	cmd := exec.CommandContext(ctx, exePath, "--gostage-child")
-
-	var childStdout io.Reader
-
-	if grpcTransport == nil {
-		// JSON mode: use stdout pipe
-		childStdout, _ = cmd.StdoutPipe()
-	}
-
-	childStdin, _ := cmd.StdinPipe()
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start child test process: %w", err)
-	}
-
-	// Handle message listening
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if childStdout != nil {
-			// JSON transport: listen on stdout
-			if err := r.Broker.Listen(childStdout); err != nil {
-				// It's okay if this errors when the pipe closes
-			}
-		}
-		// For gRPC transport, the server handles incoming connections automatically
-	}()
-
-	// Write the definition to the child's stdin
-	_, err = childStdin.Write(defBytes)
-	if err != nil {
-		if cmd.ProcessState != nil {
-			return fmt.Errorf("child process exited early: %s", cmd.ProcessState.String())
-		}
-		return fmt.Errorf("failed to write workflow definition to child: %w", err)
-	}
-	childStdin.Close()
-
-	// Wait for the child process to finish
-	err = cmd.Wait()
-
-	// Wait for message processing to complete
-	wg.Wait()
-
-	if err != nil {
-		return fmt.Errorf("child process exited with error: %w", err)
-	}
-
-	return nil
+	// Use the runner's existing executeSpawn method for consistency
+	return r.executeSpawn(ctx, def)
 }
 
 // TestSpawnWorkflow_WithPanic tests that panics in child processes are handled gracefully

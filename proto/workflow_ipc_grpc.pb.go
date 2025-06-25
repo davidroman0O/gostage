@@ -19,9 +19,12 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	WorkflowIPC_SendMessage_FullMethodName         = "/gostage.WorkflowIPC/SendMessage"
-	WorkflowIPC_StreamMessages_FullMethodName      = "/gostage.WorkflowIPC/StreamMessages"
-	WorkflowIPC_BidirectionalStream_FullMethodName = "/gostage.WorkflowIPC/BidirectionalStream"
+	WorkflowIPC_InitializeWorkflow_FullMethodName        = "/gostage.WorkflowIPC/InitializeWorkflow"
+	WorkflowIPC_RequestWorkflowDefinition_FullMethodName = "/gostage.WorkflowIPC/RequestWorkflowDefinition"
+	WorkflowIPC_ChildReady_FullMethodName                = "/gostage.WorkflowIPC/ChildReady"
+	WorkflowIPC_SendMessage_FullMethodName               = "/gostage.WorkflowIPC/SendMessage"
+	WorkflowIPC_StreamMessages_FullMethodName            = "/gostage.WorkflowIPC/StreamMessages"
+	WorkflowIPC_BidirectionalStream_FullMethodName       = "/gostage.WorkflowIPC/BidirectionalStream"
 )
 
 // WorkflowIPCClient is the client API for WorkflowIPC service.
@@ -30,6 +33,12 @@ const (
 //
 // WorkflowIPC service defines the communication between parent and child processes
 type WorkflowIPCClient interface {
+	// Initialize workflow - sends the workflow definition via gRPC
+	InitializeWorkflow(ctx context.Context, in *WorkflowDefinition, opts ...grpc.CallOption) (*WorkflowAck, error)
+	// Child requests workflow definition from parent (new pull model)
+	RequestWorkflowDefinition(ctx context.Context, in *ReadySignal, opts ...grpc.CallOption) (*WorkflowDefinition, error)
+	// Child signals it's ready to receive workflow definitions
+	ChildReady(ctx context.Context, in *ReadySignal, opts ...grpc.CallOption) (*MessageAck, error)
 	// Send a single message from child to parent
 	SendMessage(ctx context.Context, in *IPCMessage, opts ...grpc.CallOption) (*MessageAck, error)
 	// Stream messages for high-frequency communication
@@ -44,6 +53,36 @@ type workflowIPCClient struct {
 
 func NewWorkflowIPCClient(cc grpc.ClientConnInterface) WorkflowIPCClient {
 	return &workflowIPCClient{cc}
+}
+
+func (c *workflowIPCClient) InitializeWorkflow(ctx context.Context, in *WorkflowDefinition, opts ...grpc.CallOption) (*WorkflowAck, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WorkflowAck)
+	err := c.cc.Invoke(ctx, WorkflowIPC_InitializeWorkflow_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workflowIPCClient) RequestWorkflowDefinition(ctx context.Context, in *ReadySignal, opts ...grpc.CallOption) (*WorkflowDefinition, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WorkflowDefinition)
+	err := c.cc.Invoke(ctx, WorkflowIPC_RequestWorkflowDefinition_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workflowIPCClient) ChildReady(ctx context.Context, in *ReadySignal, opts ...grpc.CallOption) (*MessageAck, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MessageAck)
+	err := c.cc.Invoke(ctx, WorkflowIPC_ChildReady_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *workflowIPCClient) SendMessage(ctx context.Context, in *IPCMessage, opts ...grpc.CallOption) (*MessageAck, error) {
@@ -88,6 +127,12 @@ type WorkflowIPC_BidirectionalStreamClient = grpc.BidiStreamingClient[IPCMessage
 //
 // WorkflowIPC service defines the communication between parent and child processes
 type WorkflowIPCServer interface {
+	// Initialize workflow - sends the workflow definition via gRPC
+	InitializeWorkflow(context.Context, *WorkflowDefinition) (*WorkflowAck, error)
+	// Child requests workflow definition from parent (new pull model)
+	RequestWorkflowDefinition(context.Context, *ReadySignal) (*WorkflowDefinition, error)
+	// Child signals it's ready to receive workflow definitions
+	ChildReady(context.Context, *ReadySignal) (*MessageAck, error)
 	// Send a single message from child to parent
 	SendMessage(context.Context, *IPCMessage) (*MessageAck, error)
 	// Stream messages for high-frequency communication
@@ -104,6 +149,15 @@ type WorkflowIPCServer interface {
 // pointer dereference when methods are called.
 type UnimplementedWorkflowIPCServer struct{}
 
+func (UnimplementedWorkflowIPCServer) InitializeWorkflow(context.Context, *WorkflowDefinition) (*WorkflowAck, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method InitializeWorkflow not implemented")
+}
+func (UnimplementedWorkflowIPCServer) RequestWorkflowDefinition(context.Context, *ReadySignal) (*WorkflowDefinition, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RequestWorkflowDefinition not implemented")
+}
+func (UnimplementedWorkflowIPCServer) ChildReady(context.Context, *ReadySignal) (*MessageAck, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ChildReady not implemented")
+}
 func (UnimplementedWorkflowIPCServer) SendMessage(context.Context, *IPCMessage) (*MessageAck, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SendMessage not implemented")
 }
@@ -132,6 +186,60 @@ func RegisterWorkflowIPCServer(s grpc.ServiceRegistrar, srv WorkflowIPCServer) {
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&WorkflowIPC_ServiceDesc, srv)
+}
+
+func _WorkflowIPC_InitializeWorkflow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WorkflowDefinition)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkflowIPCServer).InitializeWorkflow(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkflowIPC_InitializeWorkflow_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkflowIPCServer).InitializeWorkflow(ctx, req.(*WorkflowDefinition))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkflowIPC_RequestWorkflowDefinition_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadySignal)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkflowIPCServer).RequestWorkflowDefinition(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkflowIPC_RequestWorkflowDefinition_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkflowIPCServer).RequestWorkflowDefinition(ctx, req.(*ReadySignal))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkflowIPC_ChildReady_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadySignal)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkflowIPCServer).ChildReady(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkflowIPC_ChildReady_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkflowIPCServer).ChildReady(ctx, req.(*ReadySignal))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _WorkflowIPC_SendMessage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -173,6 +281,18 @@ var WorkflowIPC_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "gostage.WorkflowIPC",
 	HandlerType: (*WorkflowIPCServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "InitializeWorkflow",
+			Handler:    _WorkflowIPC_InitializeWorkflow_Handler,
+		},
+		{
+			MethodName: "RequestWorkflowDefinition",
+			Handler:    _WorkflowIPC_RequestWorkflowDefinition_Handler,
+		},
+		{
+			MethodName: "ChildReady",
+			Handler:    _WorkflowIPC_ChildReady_Handler,
+		},
 		{
 			MethodName: "SendMessage",
 			Handler:    _WorkflowIPC_SendMessage_Handler,
