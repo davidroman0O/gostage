@@ -1002,15 +1002,18 @@ func (r *Runner) executeSpawn(ctx context.Context, def SubWorkflowDef) error {
 	if def.Transport.Type == TransportGRPC {
 		// gRPC mode: start the server and update the port
 		if grpcTransport, ok := r.Broker.GetTransport().(*GRPCTransport); ok {
-			if err := grpcTransport.StartServer(); err != nil {
-				return fmt.Errorf("failed to start gRPC server: %w", err)
-			}
+			// Only start the server if it's not already started
+			if !grpcTransport.IsServerReady() {
+				if err := grpcTransport.StartServer(); err != nil {
+					return fmt.Errorf("failed to start gRPC server: %w", err)
+				}
 
-			// Wait for server to be ready
-			serverCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			defer cancel()
-			if err := grpcTransport.WaitForServerReady(serverCtx); err != nil {
-				return fmt.Errorf("gRPC server not ready: %w", err)
+				// Wait for server to be ready
+				serverCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				defer cancel()
+				if err := grpcTransport.WaitForServerReady(serverCtx); err != nil {
+					return fmt.Errorf("gRPC server not ready: %w", err)
+				}
 			}
 
 			// Update the workflow definition with the actual assigned port

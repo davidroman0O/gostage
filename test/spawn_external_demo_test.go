@@ -434,6 +434,78 @@ func TestExternalSpawnDemo(t *testing.T) {
 
 		t.Logf("🎉 Core success: gRPC spawn with --gostage-child flag handled correctly!")
 	})
+
+	t.Run("multiple_grpc_spawns_same_runner", func(t *testing.T) {
+		// Test that we can call spawn multiple times on the same gRPC runner
+		// This reproduces the "server already started" bug
+		registerExternalTestActions()
+
+		// Create a single gRPC runner
+		runner := gostage.NewRunner(gostage.WithGRPCTransport("localhost", 50091))
+
+		// Create two different workflow definitions
+		def1 := gostage.SubWorkflowDef{
+			ID: "grpc-workflow-1",
+			InitialStore: map[string]interface{}{
+				"test_id": 1,
+			},
+			Stages: []gostage.StageDef{
+				{
+					ID: "calc-stage-1",
+					Actions: []gostage.ActionDef{
+						{ID: calculatorActionID},
+					},
+				},
+			},
+		}
+
+		def2 := gostage.SubWorkflowDef{
+			ID: "grpc-workflow-2",
+			InitialStore: map[string]interface{}{
+				"test_id": 2,
+			},
+			Stages: []gostage.StageDef{
+				{
+					ID: "calc-stage-2",
+					Actions: []gostage.ActionDef{
+						{ID: calculatorActionID},
+					},
+				},
+			},
+		}
+
+		// First spawn should work
+		err1 := runner.Spawn(context.Background(), def1)
+		require.NoError(t, err1, "First gRPC spawn should succeed")
+		t.Logf("✅ First gRPC spawn succeeded")
+
+		// Second spawn on the same runner should also work (this would fail before the fix)
+		err2 := runner.Spawn(context.Background(), def2)
+		require.NoError(t, err2, "Second gRPC spawn should succeed - server reuse should work")
+		t.Logf("✅ Second gRPC spawn succeeded - server reuse working!")
+
+		// Third spawn to be extra sure
+		def3 := gostage.SubWorkflowDef{
+			ID: "grpc-workflow-3",
+			InitialStore: map[string]interface{}{
+				"test_id": 3,
+			},
+			Stages: []gostage.StageDef{
+				{
+					ID: "calc-stage-3",
+					Actions: []gostage.ActionDef{
+						{ID: calculatorActionID},
+					},
+				},
+			},
+		}
+
+		err3 := runner.Spawn(context.Background(), def3)
+		require.NoError(t, err3, "Third gRPC spawn should succeed")
+		t.Logf("✅ Third gRPC spawn succeeded")
+
+		t.Logf("🎉 gRPC server reuse fix working - multiple spawns on same runner work correctly!")
+	})
 }
 
 // This main function shows the pattern for regular applications
