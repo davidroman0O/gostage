@@ -6,9 +6,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"time"
 
-	"github.com/davidroman0O/gostage/proto"
 	"github.com/davidroman0O/gostage/store"
 )
 
@@ -33,6 +34,11 @@ type Runner struct {
 	Broker *RunnerBroker
 	// Spawn middleware for process lifecycle and communication
 	spawnMiddleware []SpawnMiddleware
+}
+
+// ChildRunner embeds Runner and adds child-specific methods for spawned processes
+type ChildRunner struct {
+	*Runner // Inherits all Runner methods (Execute, etc.)
 }
 
 // RunnerOption is a function that configures a Runner
@@ -1001,90 +1007,89 @@ func (r *Runner) AddIPCMiddleware(middleware ...IPCMiddleware) {
 	r.Broker.AddIPCMiddleware(middleware...)
 }
 
-// NewChildRunner creates a runner for child processes with gRPC connection
-// This completely handles transport setup automatically based on command line arguments
-func NewChildRunner(address string, port int) (*Runner, error) {
-	// Create gRPC transport for child process
-	transport, err := NewGRPCTransport(address, port)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create gRPC transport: %w", err)
+// NewChildRunner creates a child runner with automatic gRPC setup and logger
+// This is the seamless API for child processes - no manual argument parsing needed
+func NewChildRunner() (*ChildRunner, Logger, error) {
+	// Automatically parse gRPC connection arguments from command line
+	var grpcAddress string = "localhost"
+	var grpcPort int = 50051
+
+	for _, arg := range os.Args {
+		if strings.HasPrefix(arg, "--grpc-address=") {
+			grpcAddress = strings.TrimPrefix(arg, "--grpc-address=")
+		} else if strings.HasPrefix(arg, "--grpc-port=") {
+			if port, err := strconv.Atoi(strings.TrimPrefix(arg, "--grpc-port=")); err == nil {
+				grpcPort = port
+			}
+		}
 	}
 
-	// Connect to parent's gRPC server
-	if err := transport.ConnectClient(); err != nil {
-		return nil, fmt.Errorf("failed to connect to parent gRPC server: %w", err)
+	// Create gRPC transport and connect to parent
+	grpcTransport, err := NewGRPCTransport(grpcAddress, grpcPort)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create gRPC transport: %w", err)
+	}
+
+	// Connect as client to parent's gRPC server
+	if err := grpcTransport.ConnectClient(); err != nil {
+		return nil, nil, fmt.Errorf("failed to connect to parent gRPC server: %w", err)
 	}
 
 	// Wait for client to be ready
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := transport.WaitForClientReady(ctx); err != nil {
-		return nil, fmt.Errorf("gRPC client not ready: %w", err)
+	if err := grpcTransport.WaitForClientReady(ctx); err != nil {
+		return nil, nil, fmt.Errorf("gRPC client not ready: %w", err)
 	}
 
-	// Create runner with the transport
-	runner := NewRunner()
-	runner.Broker = NewRunnerBrokerWithTransport(transport)
+	// Create runner broker with gRPC transport
+	broker := NewRunnerBrokerWithTransport(grpcTransport)
 
-	return runner, nil
-}
-
-// ReceiveWorkflowDefinitionViaGRPC waits for workflow definition from parent via gRPC
-// This replaces ReadWorkflowDefinitionFromStdin for the pure gRPC approach
-func ReceiveWorkflowDefinitionViaGRPC(runner *Runner) (*SubWorkflowDef, error) {
-	var receivedDef *SubWorkflowDef
-	var receiveErr error
-	done := make(chan struct{})
-
-	// Set up workflow initialization handler
-	grpcTransport := runner.Broker.GetTransport()
-	grpcTransport.SetWorkflowInitHandler(func(workflowDef *proto.WorkflowDefinition) error {
-		// Convert protobuf definition back to SubWorkflowDef
-		var def SubWorkflowDef
-		if err := json.Unmarshal(workflowDef.DefinitionJson, &def); err != nil {
-			receiveErr = fmt.Errorf("failed to unmarshal workflow definition: %w", err)
-			close(done)
-			return receiveErr
-		}
-
-		// Convert initial store from protobuf format
-		if len(workflowDef.InitialStore) > 0 {
-			if def.InitialStore == nil {
-				def.InitialStore = make(map[string]interface{})
-			}
-			for k, v := range workflowDef.InitialStore {
-				var value interface{}
-				if err := json.Unmarshal(v, &value); err != nil {
-					receiveErr = fmt.Errorf("failed to unmarshal initial store value for key %s: %w", k, err)
-					close(done)
-					return receiveErr
-				}
-				def.InitialStore[k] = value
-			}
-		}
-
-		receivedDef = &def
-		close(done)
-		return nil
-	})
-
-	// Wait for workflow definition to be received
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	select {
-	case <-done:
-		if receiveErr != nil {
-			return nil, receiveErr
-		}
-		return receivedDef, nil
-	case <-ctx.Done():
-		return nil, fmt.Errorf("timeout waiting for workflow definition from parent")
+	// Create base runner
+	runner := &Runner{
+		Broker:     broker,
+		middleware: []Middleware{},
 	}
+
+	// Create child runner that embeds the base runner
+	childRunner := &ChildRunner{
+		Runner: runner,
+	}
+
+	// Create logger that automatically sends to parent via gRPC
+	logger := &GRPCLogger{broker: broker}
+
+	return childRunner, logger, nil
 }
 
-// DEPRECATED: ReadWorkflowDefinitionFromStdin is deprecated in favor of ReceiveWorkflowDefinitionViaGRPC
-// This function is kept for backward compatibility but should not be used in new code
-func ReadWorkflowDefinitionFromStdin() (*SubWorkflowDef, error) {
-	return nil, fmt.Errorf("stdin-based workflow definition reading is deprecated - use ReceiveWorkflowDefinitionViaGRPC instead")
+// RequestWorkflowDefinitionFromParent requests the workflow definition using our PID
+// No need to manually construct child IDs - parent tracks by PID automatically
+func (cr *ChildRunner) RequestWorkflowDefinitionFromParent(ctx context.Context) (*SubWorkflowDef, error) {
+	childPID := os.Getpid()
+	grpcTransport := cr.Broker.GetTransport()
+	return grpcTransport.RequestWorkflowDefinitionFromParent(ctx, fmt.Sprintf("child-%d", childPID))
 }
+
+// Close closes the child runner and cleans up gRPC connections
+func (cr *ChildRunner) Close() error {
+	return cr.Broker.Close()
+}
+
+// GRPCLogger implements Logger interface and sends all logs to parent via gRPC
+type GRPCLogger struct {
+	broker *RunnerBroker
+}
+
+func (l *GRPCLogger) send(level, format string, args ...interface{}) {
+	payload := map[string]string{
+		"level":   level,
+		"message": fmt.Sprintf(format, args...),
+	}
+	// Send log message to parent via gRPC
+	l.broker.Send(MessageTypeLog, payload)
+}
+
+func (l *GRPCLogger) Debug(format string, args ...interface{}) { l.send("DEBUG", format, args...) }
+func (l *GRPCLogger) Info(format string, args ...interface{})  { l.send("INFO", format, args...) }
+func (l *GRPCLogger) Warn(format string, args ...interface{})  { l.send("WARN", format, args...) }
+func (l *GRPCLogger) Error(format string, args ...interface{}) { l.send("ERROR", format, args...) }

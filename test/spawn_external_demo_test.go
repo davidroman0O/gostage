@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strconv"
-	"strings"
 	"sync"
 	"testing"
 
@@ -36,51 +34,37 @@ func TestMain(m *testing.M) {
 // handleChildProcess implements the child process logic for external applications
 // This is the standard pattern that all gostage users should follow
 func handleChildProcess() {
-	// Parse gRPC connection arguments
-	var grpcAddress string = "localhost"
-	var grpcPort int = 50051
-
-	// Parse command line arguments for gRPC connection info
-	for _, arg := range os.Args {
-		if strings.HasPrefix(arg, "--grpc-address=") {
-			grpcAddress = strings.TrimPrefix(arg, "--grpc-address=")
-		} else if strings.HasPrefix(arg, "--grpc-port=") {
-			if port, err := strconv.Atoi(strings.TrimPrefix(arg, "--grpc-port=")); err == nil {
-				grpcPort = port
-			}
-		}
-	}
-
 	// CRITICAL: Register actions that the child process will need
 	registerExternalTestActions()
 
-	// Create child runner with gRPC connection
-	childRunner, err := gostage.NewChildRunner(grpcAddress, grpcPort)
+	// ✨ NEW SEAMLESS API - automatic gRPC setup and logger creation
+	childRunner, logger, err := gostage.NewChildRunner()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create child runner: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Request workflow definition from parent (this also signals that we're ready)
-	childId := fmt.Sprintf("child-%d", os.Getpid())
-	grpcTransport := childRunner.Broker.GetTransport()
-	workflowDef, err := grpcTransport.RequestWorkflowDefinitionFromParent(context.Background(), childId)
+	logger.Info("Child process started successfully - PID: %d", os.Getpid())
+
+	// ✨ Direct method call - no GetTransport() needed!
+	workflowDef, err := childRunner.RequestWorkflowDefinitionFromParent(context.Background())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to request workflow definition: %v\n", err)
+		logger.Error("Failed to request workflow definition: %v", err)
 		os.Exit(1)
 	}
+
+	logger.Info("Workflow definition received: %s", workflowDef.ID)
 
 	// Create workflow from definition
 	workflow, err := gostage.NewWorkflowFromDef(workflowDef)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create workflow: %v\n", err)
+		logger.Error("Failed to create workflow: %v", err)
 		os.Exit(1)
 	}
 
-	// Execute workflow
-	logger := gostage.NewDefaultLogger()
+	// ✨ Same logger used throughout - seamless!
 	if err := childRunner.Execute(context.Background(), workflow, logger); err != nil {
-		fmt.Fprintf(os.Stderr, "Child workflow execution failed: %v\n", err)
+		logger.Error("Child workflow execution failed: %v", err)
 		os.Exit(1)
 	}
 
@@ -88,13 +72,35 @@ func handleChildProcess() {
 	if workflow.Store != nil {
 		finalStore := workflow.Store.ExportAll()
 		if err := childRunner.Broker.Send(gostage.MessageTypeFinalStore, finalStore); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to send final store: %v\n", err)
+			logger.Error("Failed to send final store: %v", err)
+		} else {
+			logger.Info("Final store sent with %d keys", len(finalStore))
 		}
 	}
 
-	childRunner.Broker.Close()
+	logger.Info("Child process completed successfully")
+	childRunner.Close()
 	os.Exit(0)
 }
+
+// ChildLogger implements gostage.Logger and sends all logs to parent via gRPC
+type ChildLogger struct {
+	broker *gostage.RunnerBroker
+}
+
+func (l *ChildLogger) send(level, format string, args ...interface{}) {
+	payload := map[string]string{
+		"level":   level,
+		"message": fmt.Sprintf(format, args...),
+	}
+	// Send log message to parent via gRPC
+	l.broker.Send(gostage.MessageTypeLog, payload)
+}
+
+func (l *ChildLogger) Debug(format string, args ...interface{}) { l.send("DEBUG", format, args...) }
+func (l *ChildLogger) Info(format string, args ...interface{})  { l.send("INFO", format, args...) }
+func (l *ChildLogger) Warn(format string, args ...interface{})  { l.send("WARN", format, args...) }
+func (l *ChildLogger) Error(format string, args ...interface{}) { l.send("ERROR", format, args...) }
 
 // --- Real Action Definitions for Comprehensive Testing ---
 
@@ -342,6 +348,23 @@ func TestExternalSpawnDemo(t *testing.T) {
 		// Set up parent runner with gRPC transport
 		runner := gostage.NewRunner(gostage.WithGRPCTransport("localhost", 50071))
 		var finalStoreFromChild map[string]interface{}
+		var childLogs []string
+
+		// Register handler to capture logs from child via gRPC
+		runner.Broker.RegisterHandler(gostage.MessageTypeLog, func(msgType gostage.MessageType, payload json.RawMessage) error {
+			var logData struct {
+				Level   string `json:"level"`
+				Message string `json:"message"`
+			}
+			if err := json.Unmarshal(payload, &logData); err != nil {
+				return err
+			}
+
+			logMessage := fmt.Sprintf("[CHILD-%s] %s", logData.Level, logData.Message)
+			childLogs = append(childLogs, logMessage)
+			t.Logf("%s", logMessage) // Display logs in test output
+			return nil
+		})
 
 		// Register handler to capture final store
 		runner.Broker.RegisterHandler(gostage.MessageTypeFinalStore, func(msgType gostage.MessageType, payload json.RawMessage) error {
@@ -359,6 +382,10 @@ func TestExternalSpawnDemo(t *testing.T) {
 
 		// The most important verification: the workflow executed without the flag error
 		t.Logf("✅ Workflow spawned and executed successfully!")
+
+		// Verify we received logs from child via gRPC
+		assert.Greater(t, len(childLogs), 0, "Should have received log messages from child via gRPC")
+		t.Logf("📋 Received %d log messages from child via gRPC", len(childLogs))
 
 		// If we get final store, verify it contains expected data
 		if finalStoreFromChild != nil {
@@ -505,24 +532,86 @@ func registerMyActions() {
 }
 ```
 
-4. Now your application can use both JSON and gRPC transports:
+4. CRITICAL: Create a ChildLogger to send logs to parent via gRPC:
 
 ```go
-// JSON transport (default)
-runner := gostage.NewRunner()
-err := runner.Spawn(ctx, def)
+// ChildLogger implements gostage.Logger and sends all logs to parent via gRPC
+type ChildLogger struct {
+    broker *gostage.RunnerBroker
+}
 
-// gRPC transport
-runner := gostage.NewRunner(gostage.WithGRPCTransport("localhost", 50051))
+func (l *ChildLogger) send(level, format string, args ...interface{}) {
+    payload := map[string]string{
+        "level":   level,
+        "message": fmt.Sprintf(format, args...),
+    }
+    // Send log message to parent via gRPC
+    l.broker.Send(gostage.MessageTypeLog, payload)
+}
+
+func (l *ChildLogger) Debug(format string, args ...interface{}) { l.send("DEBUG", format, args...) }
+func (l *ChildLogger) Info(format string, args ...interface{})  { l.send("INFO", format, args...) }
+func (l *ChildLogger) Warn(format string, args ...interface{})  { l.send("WARN", format, args...) }
+func (l *ChildLogger) Error(format string, args ...interface{}) { l.send("ERROR", format, args...) }
+```
+
+5. In child process, use ChildLogger instead of default logger:
+
+```go
+func handleChildProcess() {
+    // ... setup child runner ...
+
+    // ✅ Use ChildLogger that sends logs to parent via gRPC
+    logger := &ChildLogger{broker: childRunner.Broker}
+    childRunner.Execute(context.Background(), workflow, logger)
+}
+```
+
+6. In parent process, register log handler to receive child logs:
+
+```go
+func parentProcess() {
+    runner := gostage.NewRunner()
+
+    // Register handler to capture logs from child via gRPC
+    runner.Broker.RegisterHandler(gostage.MessageTypeLog, func(msgType gostage.MessageType, payload json.RawMessage) error {
+        var logData struct {
+            Level   string `json:"level"`
+            Message string `json:"message"`
+        }
+        json.Unmarshal(payload, &logData)
+        fmt.Printf("[CHILD-%s] %s\n", logData.Level, logData.Message)
+        return nil
+    })
+
+    runner.Spawn(ctx, def)
+}
+```
+
+7. Now your application supports pure gRPC communication:
+
+```go
+// Pure gRPC transport (default)
+runner := gostage.NewRunner()
 err := runner.Spawn(ctx, def)
 ```
 
+HOW CHILD LOGS ARE EXPOSED TO PARENT:
+
+✅ Child uses ChildLogger that implements gostage.Logger interface
+✅ ChildLogger.Info/Debug/Warn/Error calls send gRPC messages to parent
+✅ Parent registers MessageTypeLog handler to receive log messages
+✅ All child logs (workflow, stage, action logs) are transmitted via gRPC
+✅ Parent can display, store, or process child logs in real-time
+
 BEFORE FIX:
 ❌ "flag provided but not defined: -gostage-child"
+❌ Child logs only visible in child's stderr (not sent to parent)
 
 AFTER FIX:
-✅ Child processes start properly for both JSON and gRPC transports
-✅ Transport configuration is automatically set and passed to child processes
+✅ Child processes start properly with pure gRPC transport
+✅ Child logs are transmitted to parent via type-safe gRPC messages
+✅ Parent receives and displays all child logs in real-time
 ✅ Real workflows with real actions execute successfully end-to-end
 ✅ Store data and IPC messages work correctly between parent and child
 

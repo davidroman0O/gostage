@@ -87,54 +87,35 @@ func TestSpawn(t *testing.T) {
 
 ### Child Worker Logic
 
-The `childMain` function contains all the logic the child needs: it parses gRPC connection info from command line, connects to the parent, requests the workflow definition, and executes it.
+The `childMain` function contains all the logic the child needs using the new seamless API:
 
 ```go
 func childMain() {
-    // Parse gRPC connection arguments from command line
-    var grpcAddress string = "localhost"
-    var grpcPort int = 50051
-
-    for _, arg := range os.Args {
-        if strings.HasPrefix(arg, "--grpc-address=") {
-            grpcAddress = strings.TrimPrefix(arg, "--grpc-address=")
-        } else if strings.HasPrefix(arg, "--grpc-port=") {
-            if port, err := strconv.Atoi(strings.TrimPrefix(arg, "--grpc-port=")); err == nil {
-                grpcPort = port
-            }
-        }
-    }
-
     // Register actions that the child process will need
     registerActions() // Critical: child must know how to build actions.
 
-    // Create child runner with gRPC connection
-    childRunner, err := gostage.NewChildRunner(grpcAddress, grpcPort)
+    // ✨ NEW SEAMLESS API - automatic gRPC setup and logger creation
+    childRunner, logger, err := gostage.NewChildRunner()
     if err != nil {
         fmt.Fprintf(os.Stderr, "Failed to initialize child runner: %v\n", err)
         os.Exit(1)
     }
 
-    // Request workflow definition from parent via gRPC
-    childId := fmt.Sprintf("child-%d", os.Getpid())
-    grpcTransport := childRunner.Broker.GetTransport()
-    workflowDef, err := grpcTransport.RequestWorkflowDefinitionFromParent(context.Background(), childId)
+    // ✨ Direct method call - no GetTransport() needed!
+    workflowDef, err := childRunner.RequestWorkflowDefinitionFromParent(context.Background())
     if err != nil {
         fmt.Fprintf(os.Stderr, "Failed to request workflow definition: %v\n", err)
         os.Exit(1)
     }
 
-    // Create and execute workflow
+    // Create and execute workflow with the returned logger
     workflow, err := gostage.NewWorkflowFromDef(workflowDef)
     if err != nil {
         fmt.Fprintf(os.Stderr, "Failed to create workflow: %v\n", err)
         os.Exit(1)
     }
 
-    // Logger that sends messages via gRPC
-    logger := &ChildLogger{broker: childRunner.Broker}
-
-    // Execute workflow
+    // Execute workflow - the returned logger automatically sends to parent via gRPC
     if err := childRunner.Execute(context.Background(), workflow, logger); err != nil {
         fmt.Fprintf(os.Stderr, "Workflow execution failed: %v\n", err)
         os.Exit(1)
@@ -145,30 +126,19 @@ func childMain() {
         childRunner.Broker.Send(gostage.MessageTypeFinalStore, workflow.Store.ExportAll())
     }
 
-    childRunner.Broker.Close()
+    childRunner.Close()
     os.Exit(0)
 }
-
-// ChildLogger implements gostage.Logger and sends all logs via gRPC
-type ChildLogger struct {
-    broker *gostage.RunnerBroker
-}
-
-func (l *ChildLogger) Info(format string, args ...interface{}) {
-    l.broker.Send(gostage.MessageTypeLog, map[string]string{
-        "level":   "INFO",
-        "message": fmt.Sprintf(format, args...),
-    })
-}
-// ... implement other log levels
 ```
 
-## Key Benefits of gRPC Testing
+## Key Benefits of the Seamless gRPC Testing API
 
+- **Zero Configuration**: No manual gRPC setup, argument parsing, or logger creation needed
 - **Type Safety**: All communication uses protobuf, catching serialization errors at compile time
 - **High Performance**: Binary protocol is efficient for test scenarios with lots of data
-- **Automatic Setup**: No transport configuration needed - gRPC server and client are set up automatically
+- **Automatic Setup**: gRPC server and client are set up automatically
 - **Real-time Communication**: Parent receives child messages immediately during test execution
 - **Clean Process Isolation**: Tests run in completely separate processes while maintaining reliable communication
+- **✨ Seamless Experience**: Child processes use the same API as regular workflows - no special test setup needed
 
-This pattern creates a fully self-contained integration test for your spawned workflows using high-performance gRPC communication, without needing separate binary builds or complex test scripts. 
+This pattern creates a fully self-contained integration test for your spawned workflows using the seamless gRPC API, without needing separate binary builds, complex test scripts, or manual transport configuration. 

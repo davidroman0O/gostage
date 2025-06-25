@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/davidroman0O/gostage"
@@ -221,20 +219,6 @@ func getHostname() string {
 func childMain() {
 	fmt.Fprintf(os.Stderr, "🔥 CHILD PROCESS STARTED - PID: %d, Parent PID: %d\n", os.Getpid(), os.Getppid())
 
-	// Parse gRPC connection arguments from command line
-	var grpcAddress string = "localhost"
-	var grpcPort int = 50051
-
-	for _, arg := range os.Args {
-		if strings.HasPrefix(arg, "--grpc-address=") {
-			grpcAddress = strings.TrimPrefix(arg, "--grpc-address=")
-		} else if strings.HasPrefix(arg, "--grpc-port=") {
-			if port, err := strconv.Atoi(strings.TrimPrefix(arg, "--grpc-port=")); err == nil {
-				grpcPort = port
-			}
-		}
-	}
-
 	// Register actions that the child process will need
 	gostage.RegisterAction("data-processor", func() gostage.Action {
 		return &DataProcessorAction{
@@ -248,8 +232,8 @@ func childMain() {
 		}
 	})
 
-	// Create child runner with gRPC connection (NEW PURE GRPC API)
-	childRunner, err := gostage.NewChildRunner(grpcAddress, grpcPort)
+	// ✨ NEW SEAMLESS API - automatic gRPC setup and logger creation
+	childRunner, logger, err := gostage.NewChildRunner()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Child process failed to initialize: %v\n", err)
 		os.Exit(1)
@@ -257,17 +241,12 @@ func childMain() {
 
 	fmt.Fprintf(os.Stderr, "✅ Child process automatically configured with pure gRPC transport\n")
 
-	// Request workflow definition from parent (this also signals that we're ready)
-	childId := fmt.Sprintf("child-%d", os.Getpid())
-	grpcTransport := childRunner.Broker.GetTransport()
-	workflowDef, err := grpcTransport.RequestWorkflowDefinitionFromParent(context.Background(), childId)
+	// ✨ Direct method call - no GetTransport() needed!
+	workflowDef, err := childRunner.RequestWorkflowDefinitionFromParent(context.Background())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Failed to request workflow definition: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Create logger that sends all messages to parent via gRPC
-	logger := &ChildLogger{broker: childRunner.Broker}
 
 	// Create workflow from definition
 	workflow, err := gostage.NewWorkflowFromDef(workflowDef)
@@ -278,7 +257,7 @@ func childMain() {
 
 	fmt.Fprintf(os.Stderr, "✅ Child process %d executing workflow: %s\n", os.Getpid(), workflowDef.ID)
 
-	// Execute workflow
+	// Execute workflow - using the returned logger
 	if err := childRunner.Execute(context.Background(), workflow, logger); err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Child process %d workflow execution failed: %v\n", os.Getpid(), err)
 		os.Exit(1)
@@ -295,7 +274,7 @@ func childMain() {
 	}
 
 	// Close broker to clean up gRPC connections
-	childRunner.Broker.Close()
+	childRunner.Close()
 
 	fmt.Fprintf(os.Stderr, "✅ Child process %d completed successfully\n", os.Getpid())
 	os.Exit(0)
@@ -452,7 +431,7 @@ func main() {
 	fmt.Printf("📋 Parent process %d spawning child to process %d data items\n",
 		os.Getpid(), len(initialStore["input_data"].([]interface{})))
 
-	// 🎉 NEW PURE GRPC API - Spawn child with automatic gRPC transport configuration!
+	// Spawn child with automatic gRPC transport configuration!
 	ctx := context.Background()
 	startTime := time.Now()
 

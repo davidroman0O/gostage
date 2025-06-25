@@ -72,10 +72,52 @@ subWorkflowDef := gostage.SubWorkflowDef{
 }
 
 // Now, you can spawn a child process with this definition.
-// runner.Spawn(ctx, subWorkflowDef)
+// The runner automatically uses gRPC transport with no configuration needed!
+runner := gostage.NewRunner() // gRPC is automatic
+err := runner.Spawn(ctx, subWorkflowDef)
 ```
 
 The child process will receive this definition, see the ID `"actions.copy"`, look it up in its registry, and create a new `CopyAction` instance to execute.
+
+## Child Process Implementation
+
+In your child process, the new seamless API makes setup trivial:
+
+```go
+func childMain() {
+    // Register actions (same as parent)
+    registerActions()
+    
+    // ✨ NEW SEAMLESS API - automatic gRPC setup and logger creation
+    childRunner, logger, err := gostage.NewChildRunner()
+    if err != nil {
+        log.Fatal(err)
+    }
+    
+    // ✨ Direct method call - no GetTransport() needed!
+    workflowDef, err := childRunner.RequestWorkflowDefinitionFromParent(context.Background())
+    if err != nil {
+        log.Fatal(err)
+    }
+    
+    // Create and execute workflow with the returned logger
+    workflow, err := gostage.NewWorkflowFromDef(workflowDef)
+    if err != nil {
+        log.Fatal(err)
+    }
+    
+    err = childRunner.Execute(context.Background(), workflow, logger)
+    if err != nil {
+        log.Fatal(err)
+    }
+    
+    // Send final store and clean up
+    if workflow.Store != nil {
+        childRunner.Broker.Send(gostage.MessageTypeFinalStore, workflow.Store.ExportAll())
+    }
+    childRunner.Close()
+}
+```
 
 ## Example
 

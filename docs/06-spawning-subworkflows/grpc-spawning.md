@@ -66,35 +66,19 @@ err := parentRunner.Spawn(context.Background(), workflowDef)
 // --- In the Child Process ---
 
 func childMain() {
-    // Parse gRPC connection from command line (automatic)
-    var grpcAddress string = "localhost"
-    var grpcPort int = 50051
-    
-    for _, arg := range os.Args {
-        if strings.HasPrefix(arg, "--grpc-address=") {
-            grpcAddress = strings.TrimPrefix(arg, "--grpc-address=")
-        } else if strings.HasPrefix(arg, "--grpc-port=") {
-            if port, err := strconv.Atoi(strings.TrimPrefix(arg, "--grpc-port=")); err == nil {
-                grpcPort = port
-            }
-        }
-    }
-    
     // Register actions that the child will need
     gostage.RegisterAction("my-action", func() gostage.Action {
         return &MyAction{BaseAction: gostage.NewBaseAction("my-action", "My action")}
     })
     
-    // Create child runner and connect via gRPC (automatic)
-    childRunner, err := gostage.NewChildRunner(grpcAddress, grpcPort)
+    // ✨ NEW SEAMLESS API - automatic gRPC setup and logger creation
+    childRunner, logger, err := gostage.NewChildRunner()
     if err != nil {
         log.Fatal(err)
     }
     
-    // Request workflow definition from parent (automatic gRPC call)
-    childId := fmt.Sprintf("child-%d", os.Getpid())
-    grpcTransport := childRunner.Broker.GetTransport()
-    workflowDef, err := grpcTransport.RequestWorkflowDefinitionFromParent(context.Background(), childId)
+    // ✨ Direct method call - no GetTransport() needed!
+    workflowDef, err := childRunner.RequestWorkflowDefinitionFromParent(context.Background())
     if err != nil {
         log.Fatal(err)
     }
@@ -105,8 +89,7 @@ func childMain() {
         log.Fatal(err)
     }
     
-    // Execute workflow - all communication is via gRPC
-    logger := &ChildLogger{broker: childRunner.Broker}
+    // Execute workflow - using the returned logger that automatically sends to parent
     if err := childRunner.Execute(context.Background(), workflow, logger); err != nil {
         log.Fatal(err)
     }
@@ -117,21 +100,8 @@ func childMain() {
         childRunner.Broker.Send(gostage.MessageTypeFinalStore, finalStore)
     }
     
-    childRunner.Broker.Close()
+    childRunner.Close()
 }
-
-// ChildLogger sends all logs via gRPC
-type ChildLogger struct {
-    broker *gostage.RunnerBroker
-}
-
-func (l *ChildLogger) Info(format string, args ...interface{}) {
-    l.broker.Send(gostage.MessageTypeLog, map[string]string{
-        "level":   "INFO",
-        "message": fmt.Sprintf(format, args...),
-    })
-}
-// ... implement other log levels
 ```
 
 ## Key Benefits
@@ -142,8 +112,9 @@ func (l *ChildLogger) Info(format string, args ...interface{}) {
 -   **Automatic Port Management**: No port conflicts when running multiple workflows
 -   **Real-time Communication**: Parent receives child messages immediately via gRPC streaming
 -   **Clean Process Isolation**: Child processes are completely isolated but can communicate efficiently
+-   **✨ Seamless API**: No manual argument parsing, gRPC setup, or logger creation needed
 
-The gRPC transport handles all the complexity of process communication, allowing you to focus on your workflow logic while ensuring reliable, high-performance inter-process communication.
+The seamless `NewChildRunner()` API handles all the complexity of process communication, allowing you to focus on your workflow logic while ensuring reliable, high-performance inter-process communication.
 
 ---
 

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -66,41 +65,22 @@ func TestMain(m *testing.M) {
 // It sets up a runner, reads a workflow definition from stdin, executes it,
 // and communicates results back to the parent via stdout.
 func childMain() {
-	// Parse gRPC connection arguments from command line
-	var grpcAddress string = "localhost"
-	var grpcPort int = 50051
-
-	for _, arg := range os.Args {
-		if strings.HasPrefix(arg, "--grpc-address=") {
-			grpcAddress = strings.TrimPrefix(arg, "--grpc-address=")
-		} else if strings.HasPrefix(arg, "--grpc-port=") {
-			if port, err := strconv.Atoi(strings.TrimPrefix(arg, "--grpc-port=")); err == nil {
-				grpcPort = port
-			}
-		}
-	}
-
 	// Register the action that the child process will need to create.
 	registerSpawnTestActions()
 
-	// Create child runner with gRPC connection
-	childRunner, err := NewChildRunner(grpcAddress, grpcPort)
+	// ✨ NEW SEAMLESS API - automatic gRPC setup and logger creation
+	childRunner, logger, err := NewChildRunner()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "child process failed to initialize: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Request workflow definition from parent
-	childId := fmt.Sprintf("child-%d", os.Getpid())
-	grpcTransport := childRunner.Broker.GetTransport()
-	workflowDef, err := grpcTransport.RequestWorkflowDefinitionFromParent(context.Background(), childId)
+	// ✨ Direct method call - no GetTransport() needed!
+	workflowDef, err := childRunner.RequestWorkflowDefinitionFromParent(context.Background())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to request workflow definition: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Create a logger that sends all logs through this broker.
-	brokerLogger := NewBrokerLogger(childRunner.Broker)
 
 	// Reconstruct the workflow from the definition.
 	wf, err := NewWorkflowFromDef(workflowDef)
@@ -110,8 +90,8 @@ func childMain() {
 	}
 
 	// Execute the reconstructed workflow.
-	// Passing brokerLogger ensures the runner's default logger is never used.
-	if err := childRunner.Execute(context.Background(), wf, brokerLogger); err != nil {
+	// Using the returned logger ensures all logs are sent to parent via gRPC.
+	if err := childRunner.Execute(context.Background(), wf, logger); err != nil {
 		// Errors here will be caught by the parent's cmd.Wait().
 		// We could also send an explicit error message.
 		fmt.Fprintf(os.Stderr, "child workflow execution failed: %v\n", err)
@@ -128,7 +108,7 @@ func childMain() {
 	}
 
 	// Close the broker to clean up connections
-	childRunner.Broker.Close()
+	childRunner.Close()
 
 	// Exit successfully.
 	os.Exit(0)

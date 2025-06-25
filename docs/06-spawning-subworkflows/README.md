@@ -98,37 +98,39 @@ err := parentRunner.Spawn(context.Background(), workflowDef)
 ```
 
 ```go
-// Child process - automatic gRPC setup
+// Child process - seamless gRPC setup
 func childMain() {
-    // Parse gRPC connection from command line (handled automatically)
-    var grpcAddress string = "localhost"
-    var grpcPort int = 50051
+    // Register actions that the child will need
+    registerActions()
     
-    for _, arg := range os.Args {
-        if strings.HasPrefix(arg, "--grpc-address=") {
-            grpcAddress = strings.TrimPrefix(arg, "--grpc-address=")
-        } else if strings.HasPrefix(arg, "--grpc-port=") {
-            if port, err := strconv.Atoi(strings.TrimPrefix(arg, "--grpc-port=")); err == nil {
-                grpcPort = port
-            }
-        }
-    }
-    
-    // Create child runner and connect via gRPC
-    childRunner, err := gostage.NewChildRunner(grpcAddress, grpcPort)
+    // ✨ NEW SEAMLESS API - automatic gRPC setup and logger creation
+    childRunner, logger, err := gostage.NewChildRunner()
     if err != nil {
         log.Fatal(err)
     }
     
-    // Request workflow definition from parent
-    childId := fmt.Sprintf("child-%d", os.Getpid())
-    grpcTransport := childRunner.Broker.GetTransport()
-    workflowDef, err := grpcTransport.RequestWorkflowDefinitionFromParent(context.Background(), childId)
+    // ✨ Direct method call - no GetTransport() needed!
+    workflowDef, err := childRunner.RequestWorkflowDefinitionFromParent(context.Background())
     if err != nil {
         log.Fatal(err)
     }
     
-    // Execute workflow...
+    // Create and execute workflow with the returned logger
+    workflow, err := gostage.NewWorkflowFromDef(workflowDef)
+    if err != nil {
+        log.Fatal(err)
+    }
+    
+    err = childRunner.Execute(context.Background(), workflow, logger)
+    if err != nil {
+        log.Fatal(err)
+    }
+    
+    // Send final store and clean up
+    if workflow.Store != nil {
+        childRunner.Broker.Send(gostage.MessageTypeFinalStore, workflow.Store.ExportAll())
+    }
+    childRunner.Close()
 }
 ```
 
@@ -136,4 +138,4 @@ func childMain() {
 
 ### In This Section
 
--   [**gRPC Spawning**](./02-ipc-grpc.md): Learn how to use the high-performance gRPC transport for spawned workflows. 
+-   [**gRPC Spawning**](./grpc-spawning.md): Learn how to use the high-performance gRPC transport for spawned workflows with the new seamless API. 
