@@ -7,11 +7,11 @@ This section covers advanced features and techniques in gostage for building sop
 ### 🔄 [Context Messaging](./context-messaging.md)
 Rich metadata and targeted message handling for workflows. This feature provides:
 
-- **Rich Context Metadata**: Every message includes workflow, stage, action, and process information
-- **Targeted Handlers**: Register handlers for specific workflows, stages, or actions  
-- **Process Identification**: Distinguish between parent and child process messages
-- **Message Sequencing**: Track message order with sequence numbers and session IDs
-- **Backward Compatibility**: Legacy handlers continue to work unchanged
+- **Rich Context Metadata**: Automatic workflow/stage/action/process information with every message
+- **Targeted Message Handling**: Register handlers for specific workflows, stages, or actions
+- **Global and Local Handlers**: Flexible message routing and processing
+- **Session Tracking**: Unique session IDs and message sequencing for ordering
+- **Legacy Support**: Existing handlers continue to work unchanged
 
 Perfect for debugging, monitoring, and building sophisticated message routing systems.
 

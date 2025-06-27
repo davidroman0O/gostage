@@ -298,8 +298,8 @@ func main() {
 	fmt.Println("✓ Custom context override capabilities")
 	fmt.Println()
 	fmt.Println("🔧 This context messaging system provides:")
-	fmt.Println("• Full traceability of message sources")
-	fmt.Println("• Targeted message handling by scope")
-	fmt.Println("• Rich debugging and monitoring capabilities")
-	fmt.Println("• Backward compatibility with existing code")
+	fmt.Println("• Rich context metadata (workflow/stage/action/PID)")
+	fmt.Println("• Targeted message handling")
+	fmt.Println("• Session tracking and message sequencing")
+	fmt.Println("• Same simple ctx.Send() API")
 }

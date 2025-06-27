@@ -4,11 +4,11 @@ Context messaging provides rich metadata about message sources and enables targe
 
 ## Overview
 
-- **Rich Metadata**: Every message includes source workflow, stage, action, and process information
+- **Context Metadata**: Automatic workflow/stage/action/process information
 - **Targeted Handlers**: Register handlers for specific workflows, stages, or actions
-- **Process Identification**: Distinguish between parent and child process messages
-- **Message Sequencing**: Track message order with sequence numbers and session IDs
-- **Backward Compatibility**: Existing code works unchanged
+- **Global Handlers**: Receive all messages with rich context
+- **Session Tracking**: Unique session IDs and sequence numbers for message ordering
+- **Legacy Support**: Existing code works unchanged
 
 ## Works With or Without gRPC
 
@@ -160,7 +160,7 @@ When multiple handlers are registered for the same message type, they are called
 2. **Stage-specific handler**
 3. **Workflow-specific handler** 
 4. **Global context handler**
-5. **Legacy handler** (for backward compatibility)
+5. **Legacy handler** (receives message without context)
 
 All applicable handlers will be called - both context handlers and legacy handlers.
 
@@ -401,4 +401,4 @@ func main() {
 5. **Session Correlation**: Use session IDs for end-to-end workflow tracking
 6. **Avoid Over-Filtering**: Don't create overly specific handlers unless necessary
 
-Context messaging provides powerful foundations for building sophisticated, observable, and debuggable workflows while maintaining full backward compatibility with existing code. 
+Context messaging provides powerful foundations for building sophisticated, observable, and debuggable workflows. 
