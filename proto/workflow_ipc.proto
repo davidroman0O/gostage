@@ -25,7 +25,20 @@ service WorkflowIPC {
   rpc BidirectionalStream(stream IPCMessage) returns (stream IPCMessage);
 }
 
-// Main message wrapper - replaces your current Message struct
+// Message metadata for comprehensive tracing
+message MessageContext {
+  string workflow_id = 1;      // ID of the workflow that sent this message
+  string stage_id = 2;         // ID of the stage that sent this message
+  string action_name = 3;      // Name of the action that sent this message
+  int32 process_id = 4;        // PID of the process that sent this message
+  bool is_child_process = 5;   // Whether this came from a spawned child process
+  int32 action_index = 6;      // Index of action within stage (0-based)
+  bool is_last_action = 7;     // Whether this is the last action in the stage
+  string session_id = 8;       // Unique session identifier for this workflow run
+  int64 sequence_number = 9;   // Incremental sequence number for this session
+}
+
+// Main message wrapper with metadata
 message IPCMessage {
   MessageType type = 1;
   oneof payload {
@@ -37,9 +50,10 @@ message IPCMessage {
     FinalStorePayload final_store = 15;
   }
   
-  // Metadata for tracking
+  // Metadata for comprehensive tracking
   string message_id = 20;
   int64 timestamp = 21;
+  MessageContext context = 22;  // Full context information
 }
 
 // Message types - matches your existing MessageType

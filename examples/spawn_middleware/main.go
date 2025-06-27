@@ -60,7 +60,7 @@ func MessageTransformMiddleware() gostage.IPCMiddlewareFunc {
 
 				// Add prefix to all log messages
 				if message, exists := logData["message"]; exists {
-					logData["message"] = "[ENHANCED] " + message
+					logData["message"] = "[MIDDLEWARE] " + message
 				}
 				// Add timestamp
 				logData["timestamp"] = time.Now().Format("15:04:05.000")
@@ -121,13 +121,13 @@ func ProcessLifecycleMiddleware() gostage.SpawnMiddlewareFunc {
 
 			// We could modify the workflow definition here
 			if def.Description == "" {
-				def.Description = "Enhanced by middleware"
+				def.Description = "Modified by middleware"
 			}
 
 			// Add context values
-			enhancedCtx := context.WithValue(ctx, "spawn_time", time.Now())
+			modifiedCtx := context.WithValue(ctx, "spawn_time", time.Now())
 
-			return enhancedCtx, def, nil
+			return modifiedCtx, def, nil
 		},
 		AfterSpawnFunc: func(ctx context.Context, def gostage.SubWorkflowDef, err error) error {
 			if spawnTime, ok := ctx.Value("spawn_time").(time.Time); ok {
@@ -408,7 +408,7 @@ func main() {
 	}
 
 	// Run with middleware
-	fmt.Println("🚀 Starting pure gRPC middleware-enhanced spawn...")
+	fmt.Println("🚀 Starting pure gRPC middleware-wrapped spawn...")
 	err := runner.Spawn(context.Background(), workflowDef)
 
 	if err != nil {

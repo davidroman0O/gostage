@@ -63,7 +63,7 @@ func (a *TimingWrapper) Execute(ctx *gostage.ActionContext) error {
 	return err
 }
 
-// LoggingWrapper adds enhanced logging around an action
+// LoggingWrapper adds detailed logging around an action
 type LoggingWrapper struct {
 	gostage.BaseAction
 	wrappedAction gostage.Action
@@ -79,7 +79,7 @@ func NewLoggingWrapper(wrappedAction gostage.Action, logLevel string) *LoggingWr
 	}
 }
 
-// Execute runs the wrapped action with enhanced logging
+// Execute runs the wrapped action with detailed logging
 func (a *LoggingWrapper) Execute(ctx *gostage.ActionContext) error {
 	// Log action start with context information
 	ctx.Logger.Info("[%s] Executing action: %s", a.logLevel, a.wrappedAction.Name())

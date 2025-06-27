@@ -188,7 +188,7 @@ func (l *SimpleLogger) Warn(format string, args ...interface{}) {
 }
 
 func main() {
-	fmt.Println("Starting enhanced store test playground...")
+	fmt.Println("Starting context store test playground...")
 
 	// Exit if there's any error
 	defer func() {
@@ -202,5 +202,5 @@ func main() {
 	demonstrateToolsProviderIssue()
 	demonstrateActionRetrieval()
 
-	fmt.Println("\nEnhanced store test playground completed.")
+	fmt.Println("\nContext store test playground completed.")
 }

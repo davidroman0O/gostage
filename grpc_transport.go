@@ -145,6 +145,12 @@ func (g *GRPCTransport) ConnectClient() error {
 
 // Send sends a message through the gRPC transport
 func (g *GRPCTransport) Send(msgType MessageType, payload interface{}) error {
+	// Send without context metadata for backward compatibility
+	return g.SendWithContext(msgType, payload, MessageContext{})
+}
+
+// SendWithContext sends a message through the gRPC transport with context metadata
+func (g *GRPCTransport) SendWithContext(msgType MessageType, payload interface{}, msgContext MessageContext) error {
 	// Process through outbound middleware chain
 	g.mu.RLock()
 	middleware := make([]IPCMiddleware, len(g.middleware))
@@ -162,8 +168,8 @@ func (g *GRPCTransport) Send(msgType MessageType, payload interface{}) error {
 		}
 	}
 
-	// Convert to protobuf message
-	protoMsg, err := g.convertToProtoMessage(currentType, currentPayload)
+	// Convert to protobuf message with context
+	protoMsg, err := g.convertToProtoMessageWithContext(currentType, currentPayload, msgContext)
 	if err != nil {
 		return fmt.Errorf("failed to convert to proto message: %w", err)
 	}
@@ -228,12 +234,28 @@ func convertFromProtoMessageType(protoType proto.MessageType) MessageType {
 	}
 }
 
-// convertToProtoMessage converts a MessageType and payload to a protobuf IPCMessage
+// convertToProtoMessage converts a MessageType and payload to a protobuf IPCMessage (legacy)
 func (g *GRPCTransport) convertToProtoMessage(msgType MessageType, payload interface{}) (*proto.IPCMessage, error) {
+	return g.convertToProtoMessageWithContext(msgType, payload, MessageContext{})
+}
+
+// convertToProtoMessageWithContext converts a MessageType, payload, and context to a protobuf IPCMessage
+func (g *GRPCTransport) convertToProtoMessageWithContext(msgType MessageType, payload interface{}, msgContext MessageContext) (*proto.IPCMessage, error) {
 	msg := &proto.IPCMessage{
 		Type:      convertToProtoMessageType(msgType),
 		MessageId: fmt.Sprintf("%d", time.Now().UnixNano()),
 		Timestamp: time.Now().Unix(),
+		Context: &proto.MessageContext{
+			WorkflowId:     msgContext.WorkflowID,
+			StageId:        msgContext.StageID,
+			ActionName:     msgContext.ActionName,
+			ProcessId:      msgContext.ProcessID,
+			IsChildProcess: msgContext.IsChildProcess,
+			ActionIndex:    msgContext.ActionIndex,
+			IsLastAction:   msgContext.IsLastAction,
+			SessionId:      msgContext.SessionID,
+			SequenceNumber: msgContext.SequenceNumber,
+		},
 	}
 
 	// Convert payload to JSON bytes for now (we can make this more type-safe later)
