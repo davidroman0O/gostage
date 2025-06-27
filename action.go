@@ -686,12 +686,23 @@ func (ctx *ActionContext) EnableStagesByTag(tag string) int {
 	return enabledCount
 }
 
-// Send sends a message through the Runner's broker.
+// Send sends a message through the Runner's broker with context metadata.
 // This is the primary way for an action to communicate with a parent process
-// or other external listeners.
+// or other external listeners. The message automatically includes information
+// about the source workflow, stage, action, and process.
 func (ctx *ActionContext) Send(msgType MessageType, payload interface{}) error {
 	if runner, ok := ctx.Workflow.Context["runner"].(*Runner); ok {
-		return runner.Broker.Send(msgType, payload)
+		// Send with automatic context metadata injection
+		return runner.Broker.SendWithContext(msgType, payload, ctx)
+	}
+	return fmt.Errorf("runner not found in workflow context")
+}
+
+// SendWithCustomContext allows sending messages with custom context metadata
+// This is useful for advanced scenarios where you want to override the automatic context
+func (ctx *ActionContext) SendWithCustomContext(msgType MessageType, payload interface{}, customContext map[string]interface{}) error {
+	if runner, ok := ctx.Workflow.Context["runner"].(*Runner); ok {
+		return runner.Broker.SendWithCustomContext(msgType, payload, ctx, customContext)
 	}
 	return fmt.Errorf("runner not found in workflow context")
 }

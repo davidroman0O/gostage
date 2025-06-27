@@ -31,11 +31,11 @@ func main() {
     // Check for child process mode
     for _, arg := range os.Args[1:] {
         if arg == "--gostage-child" {
-            // If the flag is present, run the logic for the child worker.
-            childMain()
-            return
+        // If the flag is present, run the logic for the child worker.
+        childMain()
+        return
         }
-    }
+    } 
     
     // Otherwise, run the main parent application logic.
     parentMain()

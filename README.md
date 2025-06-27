@@ -28,7 +28,8 @@ gostage provides a structured approach to workflow management with these core co
 - **Extensible Middleware** - Add cross-cutting concerns like logging, error handling, and retry logic
 - **Hierarchical Middleware** - Customize workflow behavior at multiple levels
 - **Process Spawning** - Execute workflows in separate child processes with full IPC
-- **Cross-Platform IPC** - Inter-process communication that works on Windows, Linux, macOS
+- **Context Messaging** - Rich metadata and targeted message handling for debugging and monitoring
+- **gRPC-Based IPC** - Type-safe inter-process communication using Protocol Buffers
 - **Advanced Middleware System** - Transform messages and manage process lifecycle
 
 ## Installation
@@ -110,6 +111,13 @@ func main() {
 ```
 
 ## Core Components
+
+1. **Workflows** - The top-level container representing an entire process
+2. **Stages** - Sequential phases within a workflow, each containing multiple actions
+3. **Actions** - Individual units of work that implement specific tasks
+4. **State Store** - A type-safe key-value store for workflow data
+5. **Context Messaging** - Rich metadata and targeted message handling system
+6. **Middleware** - Customizable hooks that wrap execution at different levels
 
 ### Action Interface
 
@@ -193,7 +201,7 @@ runner.Use(gostage.LoggingMiddleware())
 runner.Execute(context.Background(), wf, logger)
 ```
 
-Runners can also be extended to create domain-specific workflow executors (see the "Extending the Runner" section below).
+Runners can also be extended to create domain-specific workflow executors.
 
 ### Middleware
 
@@ -302,6 +310,67 @@ data, err := store.Get[MyType](ctx.Store, "other-key")
 ctx.Store().Put("key", value)
 data, err := store.Get[MyType](ctx.Store(), "other-key")
 ```
+
+## Context Messaging
+
+gostage provides rich context messaging that automatically includes metadata about message sources and enables targeted message handling. This works for both normal workflows and spawned child processes.
+
+### Basic Context Messaging
+
+```go
+// Works with both normal workflows and spawned workflows
+runner := gostage.NewRunner() // or WithGRPCTransport for spawning
+
+// Register global context handler
+runner.Broker.RegisterHandlerWithContext(gostage.MessageTypeStorePut,
+    func(msgType gostage.MessageType, payload json.RawMessage, context gostage.MessageContext) error {
+        fmt.Printf("📨 Message from %s->%s->%s (PID: %d)\n",
+            context.WorkflowID, context.StageID, context.ActionName, context.ProcessID)
+        return nil
+    })
+
+// Register workflow-specific handler
+runner.Broker.RegisterWorkflowHandler(gostage.MessageTypeLog, "critical-workflow",
+    func(msgType gostage.MessageType, payload json.RawMessage, context gostage.MessageContext) error {
+        // Only receives messages from "critical-workflow"
+        return nil
+    })
+```
+
+### Message Context Information
+
+Every message automatically includes comprehensive metadata:
+
+```go
+type MessageContext struct {
+    WorkflowID     string  // Which workflow sent this message
+    StageID        string  // Which stage sent this message
+    ActionName     string  // Which action sent this message
+    ProcessID      int32   // PID of the sending process
+    IsChildProcess bool    // Whether from spawned child process
+    ActionIndex    int32   // Position of action within stage
+    IsLastAction   bool    // Whether this is the last action in stage
+    SessionID      string  // Unique session ID for workflow execution
+    SequenceNumber int64   // Message sequence number for ordering
+}
+```
+
+### Same `ctx.Send` API
+
+Actions use the same `ctx.Send()` API - context metadata is added automatically:
+
+```go
+func (a *MyAction) Execute(ctx *gostage.ActionContext) error {
+    // Same API as before - context metadata added automatically
+    ctx.Send(gostage.MessageTypeStorePut, map[string]interface{}{
+        "key":   "processing_status",
+        "value": "completed",
+    })
+    return nil
+}
+```
+
+Context messaging enables sophisticated debugging, monitoring, and message routing.
 
 ## Process Spawning and IPC
 
@@ -926,14 +995,6 @@ The `examples/extended_runner` directory shows a complete example of this patter
 - How to provide helper functions for accessing typed resources
 - How to create a fluent configuration API for your extended runner
 
-## Core Components
-
-1. **Workflows** - The top-level container representing an entire process
-2. **Stages** - Sequential phases within a workflow, each containing multiple actions
-3. **Actions** - Individual units of work that implement specific tasks
-4. **State Store** - A type-safe key-value store for workflow data
-5. **Middleware** - Customizable hooks that wrap execution at different levels
-
 ## Features
 
 - Sequential execution of stages and actions
@@ -957,12 +1018,13 @@ The repository includes several examples demonstrating different features:
 - **Extended Runner** - Domain-specific workflow execution environments
 - **Middleware Patterns** - Cross-cutting concerns implementation
 - **Error Handling** - Recovery strategies and fault tolerance
-- **Process Spawning** (`examples/spawn_process/`) - Basic child process execution with IPC
+- **Context Messaging** (`examples/context_messaging/`) - Rich metadata and targeted message handling
+- **Process Spawning** (`examples/spawn_process/`) - Child process execution with gRPC IPC
 - **Spawn Middleware** (`examples/spawn_middleware/`) - Advanced IPC and spawn middleware system
 
 ### Process Spawning Examples
 
-The spawn examples demonstrate real child process execution:
+The spawn examples demonstrate real child process execution with gRPC-based IPC:
 
 #### Basic Spawn Example
 ```bash
@@ -972,7 +1034,8 @@ go run main.go
 
 Features demonstrated:
 - Real child processes with different PIDs
-- Inter-process communication via JSON messages
+- gRPC-based inter-process communication
+- Context messaging with rich metadata
 - File operations proving process isolation
 - Store synchronization between parent and child
 - Cross-platform compatibility

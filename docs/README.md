@@ -38,6 +38,7 @@ This documentation is designed to guide you from the basic concepts to advanced 
 
 9.  [**Advanced Topics**](./08-advanced-topics/README.md)
     *   Error Handling Strategies.
+    *   [Context Messaging](./08-advanced-topics/context-messaging.md)
 
 ---
 

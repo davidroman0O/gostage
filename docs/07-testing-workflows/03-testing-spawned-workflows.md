@@ -21,8 +21,8 @@ func TestMain(m *testing.M) {
 	for _, arg := range os.Args[1:] {
 		if arg == "--gostage-child" {
 			// 2. If it's present, we are the child. Run the child logic and exit.
-			childMain()
-			return
+		childMain()
+		return
 		}
 	}
 
