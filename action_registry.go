@@ -2,10 +2,6 @@ package gostage
 
 import "fmt"
 
-// ActionFactory is a function that creates a new instance of an Action.
-// It's used by the registry to instantiate actions from their IDs.
-type ActionFactory func() Action
-
 var (
 	actionRegistry = make(map[string]ActionFactory)
 )

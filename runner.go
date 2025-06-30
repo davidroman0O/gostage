@@ -13,15 +13,6 @@ import (
 	"github.com/davidroman0O/gostage/store"
 )
 
-// Middleware represents a function that wraps workflow execution.
-// Middleware can perform actions before and after workflow execution,
-// inject data into the workflow store, modify the context, or even
-// skip execution entirely.
-type Middleware func(next RunnerFunc) RunnerFunc
-
-// RunnerFunc is the core function type for executing a workflow.
-type RunnerFunc func(ctx context.Context, workflow *Workflow, logger Logger) error
-
 // Runner coordinates workflow execution and provides middleware support
 type Runner struct {
 	// Middleware chain to apply during workflow execution
@@ -40,9 +31,6 @@ type Runner struct {
 type ChildRunner struct {
 	*Runner // Inherits all Runner methods (Execute, etc.)
 }
-
-// RunnerOption is a function that configures a Runner
-type RunnerOption func(*Runner)
 
 // WithMiddleware adds middleware to the runner
 func WithMiddleware(middleware ...Middleware) RunnerOption {
@@ -459,31 +447,6 @@ func (r *Runner) executeStage(ctx context.Context, s *Stage, workflow *Workflow,
 	return err
 }
 
-// RunResult contains the result of a workflow execution
-type RunResult struct {
-	WorkflowID    string
-	Success       bool
-	Error         error
-	ExecutionTime time.Duration
-	// FinalStore contains the workflow's store state after execution
-	FinalStore map[string]interface{}
-}
-
-// RunOptions contains options for workflow execution
-type RunOptions struct {
-	// Logger to use for the workflow execution
-	Logger Logger
-
-	// Context to use for the workflow execution
-	Context context.Context
-
-	// Whether to ignore workflow errors and continue execution
-	IgnoreErrors bool
-
-	// InitialStore contains key-value pairs to populate the workflow store before execution
-	InitialStore map[string]interface{}
-}
-
 // DefaultRunOptions returns the default options for running a workflow
 func DefaultRunOptions() RunOptions {
 	return RunOptions{
@@ -848,13 +811,6 @@ func StageNotificationMiddleware(
 			return err
 		}
 	}
-}
-
-// SpawnResult contains the result of a spawned workflow execution
-type SpawnResult struct {
-	Success    bool
-	Error      error
-	FinalStore map[string]interface{}
 }
 
 // SpawnWithStore executes a sub-workflow in a new child process with an initial store.

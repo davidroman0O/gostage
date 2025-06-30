@@ -9,52 +9,6 @@ import (
 	"github.com/davidroman0O/gostage/store"
 )
 
-// ActionRunnerFunc is the core function type for executing an action.
-type ActionRunnerFunc func(ctx *ActionContext, action Action, index int, isLast bool) error
-
-// ActionMiddleware represents a function that wraps action execution.
-// It allows performing operations before and after an action executes,
-// with information about the action's position in the execution sequence.
-type ActionMiddleware func(next ActionRunnerFunc) ActionRunnerFunc
-
-// Action is a single unit of work within a stage.
-// Actions are the building blocks of workflows and represent individual tasks
-// that need to be executed. Actions can be organized using tags and can be
-// dynamically enabled or disabled at runtime.
-type Action interface {
-	// Name returns the action's name
-	Name() string
-
-	// Description returns a human-readable description of the action
-	Description() string
-
-	// Tags returns the action's tags for organization and filtering
-	Tags() []string
-
-	// Execute performs the action's work.
-	// The ActionContext provides access to the workflow environment,
-	// including the store for state management and the logger for output.
-	Execute(ctx *ActionContext) error
-}
-
-// ActionState tracks whether an action is enabled.
-// This is used to represent the runtime state of actions within a workflow.
-type ActionState struct {
-	// Action is a reference to the action
-	Action Action
-	// Enabled indicates whether the action is enabled and will be executed
-	Enabled bool
-}
-
-// StageState tracks whether a stage is enabled.
-// This is used to represent the runtime state of stages within a workflow.
-type StageState struct {
-	// Stage is a reference to the stage
-	Stage *Stage
-	// Enabled indicates whether the stage is enabled and will be executed
-	Enabled bool
-}
-
 // ActionContext provides access to the workflow environment.
 // It is passed to an Action's Execute method and provides access to
 // the workflow, stage, logger, and various utilities for

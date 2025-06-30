@@ -1,20 +1,5 @@
 package gostage
 
-// Logger provides a simple interface for workflow logging
-type Logger interface {
-	// Debug logs a message at debug level
-	Debug(format string, args ...interface{})
-
-	// Info logs a message at info level
-	Info(format string, args ...interface{})
-
-	// Warn logs a message at warning level
-	Warn(format string, args ...interface{})
-
-	// Error logs a message at error level
-	Error(format string, args ...interface{})
-}
-
 // DefaultLogger is a no-op logger implementation
 type DefaultLogger struct{}
 

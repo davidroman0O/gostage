@@ -1,19 +1,11 @@
 package gostage
 
 import (
-	"context"
 	"fmt"
 	"time"
 
 	"github.com/davidroman0O/gostage/store"
 )
-
-// WorkflowStageRunnerFunc is the core function type for executing a stage within a workflow.
-type WorkflowStageRunnerFunc func(ctx context.Context, stage *Stage, workflow *Workflow, logger Logger) error
-
-// WorkflowMiddleware represents a function that wraps stage execution within a workflow.
-// It allows performing operations before and after each stage executes.
-type WorkflowMiddleware func(next WorkflowStageRunnerFunc) WorkflowStageRunnerFunc
 
 // Workflow is a sequence of stages forming a complete process.
 // It provides the top-level coordination for executing a series of stages
@@ -44,19 +36,6 @@ type Workflow struct {
 
 	// middleware contains workflow-level middleware that wraps stage execution
 	middleware []WorkflowMiddleware
-}
-
-// WorkflowInfo holds serializable workflow information.
-// This is used when storing workflow data in persistent storage
-// or transmitting it over the network.
-type WorkflowInfo struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Tags        []string `json:"tags"`
-	StageIDs    []string `json:"stageIds"`
-	CreatedAt   string   `json:"createdAt"`
-	UpdatedAt   string   `json:"updatedAt"`
 }
 
 // NewWorkflow creates a new workflow with the given properties.
@@ -381,15 +360,3 @@ func (w *Workflow) ListStagesByStatus(status string) []*Stage {
 
 	return result
 }
-
-// MergeStrategy defines how key conflicts are handled when merging KV stores
-type MergeStrategy int
-
-const (
-	// Error returns an error if there are key collisions
-	Error MergeStrategy = iota
-	// Skip keeps the existing keys and ignores the new ones
-	Skip
-	// Overwrite replaces existing keys with new ones
-	Overwrite
-)

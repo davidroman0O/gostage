@@ -1,7 +1,6 @@
 package gostage
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -10,59 +9,6 @@ import (
 	"sync"
 	"time"
 )
-
-// MessageType is a string that defines the purpose of a message.
-type MessageType string
-
-const (
-	// MessageTypeLog is for sending log messages between processes.
-	MessageTypeLog MessageType = "log"
-	// MessageTypeStorePut is for synchronizing a single store.Put operation.
-	MessageTypeStorePut MessageType = "store_put"
-	// MessageTypeStoreDelete is for synchronizing a single store.Delete operation.
-	MessageTypeStoreDelete MessageType = "store_delete"
-	// MessageTypeWorkflowStart is the initial message from parent to child to start execution.
-	MessageTypeWorkflowStart MessageType = "workflow_start"
-	// MessageTypeWorkflowResult is the final message from child to parent with the outcome.
-	MessageTypeWorkflowResult MessageType = "workflow_result"
-	// MessageTypeFinalStore is sent from child to parent with the complete final store state.
-	MessageTypeFinalStore MessageType = "final_store"
-)
-
-// Message is the standard unit of communication between a parent and child process.
-// This is kept for backwards compatibility with existing JSON-based communication.
-type Message struct {
-	Type    MessageType     `json:"type"`
-	Payload json.RawMessage `json:"payload"`
-}
-
-// MessageHandler is a function that processes a received message.
-type MessageHandler func(msgType MessageType, payload json.RawMessage) error
-
-// ContextMessageHandler processes messages with full context metadata
-type ContextMessageHandler func(msgType MessageType, payload json.RawMessage, context MessageContext) error
-
-// MessageContext provides comprehensive information about message source
-type MessageContext struct {
-	WorkflowID     string
-	StageID        string
-	ActionName     string
-	ProcessID      int32
-	IsChildProcess bool
-	ActionIndex    int32
-	IsLastAction   bool
-	SessionID      string
-	SequenceNumber int64
-}
-
-// HandlerRegistration defines how a handler should be registered
-type HandlerRegistration struct {
-	MessageType MessageType
-	Handler     MessageHandler
-	WorkflowID  string // Empty string means global handler
-	StageID     string // Empty string means any stage
-	ActionName  string // Empty string means any action
-}
 
 // RunnerBroker handles message sending, receiving, and routing between processes
 // It uses gRPC transport directly for all inter-process communication
@@ -338,76 +284,4 @@ func (b *RunnerBroker) Close() error {
 // GetTransport returns the underlying gRPC transport
 func (b *RunnerBroker) GetTransport() *GRPCTransport {
 	return b.transport
-}
-
-// IPCMiddleware allows customization of inter-process communication
-type IPCMiddleware interface {
-	// ProcessOutbound is called before sending a message from child to parent
-	ProcessOutbound(msgType MessageType, payload interface{}) (MessageType, interface{}, error)
-
-	// ProcessInbound is called when parent receives a message from child
-	ProcessInbound(msgType MessageType, payload json.RawMessage) (MessageType, json.RawMessage, error)
-}
-
-// IPCHandler handles IPC messages with middleware support
-type IPCHandler func(msgType MessageType, payload json.RawMessage) error
-
-// SpawnMiddleware provides hooks for spawn process lifecycle and communication
-type SpawnMiddleware interface {
-	// BeforeSpawn is called before creating a child process
-	BeforeSpawn(ctx context.Context, def SubWorkflowDef) (context.Context, SubWorkflowDef, error)
-
-	// AfterSpawn is called after child process completes (success or failure)
-	AfterSpawn(ctx context.Context, def SubWorkflowDef, err error) error
-
-	// OnChildMessage is called when parent receives any message from child
-	OnChildMessage(msgType MessageType, payload json.RawMessage) error
-}
-
-// IPCMiddlewareFunc is a function adapter for IPCMiddleware
-type IPCMiddlewareFunc struct {
-	ProcessOutboundFunc func(MessageType, interface{}) (MessageType, interface{}, error)
-	ProcessInboundFunc  func(MessageType, json.RawMessage) (MessageType, json.RawMessage, error)
-}
-
-func (f IPCMiddlewareFunc) ProcessOutbound(msgType MessageType, payload interface{}) (MessageType, interface{}, error) {
-	if f.ProcessOutboundFunc != nil {
-		return f.ProcessOutboundFunc(msgType, payload)
-	}
-	return msgType, payload, nil
-}
-
-func (f IPCMiddlewareFunc) ProcessInbound(msgType MessageType, payload json.RawMessage) (MessageType, json.RawMessage, error) {
-	if f.ProcessInboundFunc != nil {
-		return f.ProcessInboundFunc(msgType, payload)
-	}
-	return msgType, payload, nil
-}
-
-// SpawnMiddlewareFunc is a function adapter for SpawnMiddleware
-type SpawnMiddlewareFunc struct {
-	BeforeSpawnFunc    func(context.Context, SubWorkflowDef) (context.Context, SubWorkflowDef, error)
-	AfterSpawnFunc     func(context.Context, SubWorkflowDef, error) error
-	OnChildMessageFunc func(MessageType, json.RawMessage) error
-}
-
-func (f SpawnMiddlewareFunc) BeforeSpawn(ctx context.Context, def SubWorkflowDef) (context.Context, SubWorkflowDef, error) {
-	if f.BeforeSpawnFunc != nil {
-		return f.BeforeSpawnFunc(ctx, def)
-	}
-	return ctx, def, nil
-}
-
-func (f SpawnMiddlewareFunc) AfterSpawn(ctx context.Context, def SubWorkflowDef, err error) error {
-	if f.AfterSpawnFunc != nil {
-		return f.AfterSpawnFunc(ctx, def, err)
-	}
-	return nil
-}
-
-func (f SpawnMiddlewareFunc) OnChildMessage(msgType MessageType, payload json.RawMessage) error {
-	if f.OnChildMessageFunc != nil {
-		return f.OnChildMessageFunc(msgType, payload)
-	}
-	return nil
 }

@@ -1,18 +1,8 @@
 package gostage
 
 import (
-	"context"
-
 	"github.com/davidroman0O/gostage/store"
 )
-
-// StageRunnerFunc is the core function type for executing a stage.
-// It follows the same pattern as RunnerFunc for workflow execution.
-type StageRunnerFunc func(ctx context.Context, stage *Stage, workflow *Workflow, logger Logger) error
-
-// StageMiddleware represents a function that wraps stage execution.
-// It allows performing operations before and after a stage executes.
-type StageMiddleware func(next StageRunnerFunc) StageRunnerFunc
 
 // Stage is a logical phase within a workflow that contains a sequence of actions.
 // Stages provide organization and grouping of related actions and can be
@@ -34,16 +24,6 @@ type Stage struct {
 
 	// middleware contains the middleware functions to apply during stage execution
 	middleware []StageMiddleware
-}
-
-// StageInfo holds serializable stage information for persistence and transmission.
-// This is used when storing stage data in the workflow's key-value store.
-type StageInfo struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Tags        []string `json:"tags"`
-	ActionIDs   []string `json:"actionIds"`
 }
 
 // NewStage creates a new stage with the given properties.
