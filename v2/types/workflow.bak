@@ -1,0 +1,104 @@
+
+```
+
+	// ListAllStages returns a list of all stages in the workflow.
+	// This includes both static stages defined at workflow creation
+	// and any dynamic stages added during execution.
+	ListAllStages() []Stage
+
+	// FindStage finds a stage by ID.
+	// Returns the stage if found, or nil if not found.
+	FindStage(stageID string) Stage
+
+	// RemoveStage removes a stage from the workflow by ID
+	RemoveStage(stageID string) bool
+
+	// ListAllStageActions returns a list of all actions in a stage
+	ListAllStageActions(stageID string) []Action
+
+	// ListAllActions returns a list of all actions in all stages
+	ListAllActions() []Action
+
+	// FindAction finds an action by name across all stages
+	// Returns the action and its stage, or nil if not found
+	FindAction(actionName string) (Action, Stage)
+
+	// FindActionInStage finds an action by name in a specific stage
+	FindActionInStage(stageID, actionName string) Action
+
+	// AddActionToStage adds an action to a specific stage
+	AddActionToStage(stageID string, action Action) error
+
+	// GetStageStates returns the states (enabled/disabled) of all stages
+	GetStageStates() []StageState
+
+	// GetActionStates returns the states (enabled/disabled) of all actions in a stage
+	GetActionStates(stageID string) []ActionState
+
+	// FilterStages returns stages that match the filter function
+	FilterStages(filter func(Stage) bool) []Stage
+
+	// FilterActions returns actions that match the filter function
+	FilterActions(filter func(Action) bool) []Action
+
+	// FindActionsByTag returns all actions with a specific tag
+	FindActionsByTag(tag string) []Action
+
+	// FindActionsByTags returns all actions that have all the specified tags
+	FindActionsByTags(tags []string) []Action
+
+	// FindActionsByAnyTag returns actions that have at least one of the specified tags
+	FindActionsByAnyTag(tags []string) []Action
+
+	// FindActionsByName returns actions with names that contain the search string (case-insensitive)
+	FindActionsByName(nameSubstring string) []Action
+
+	// FindActionsByExactName returns actions with names that exactly match the search string
+	// NOTE: This remains case-sensitive for exact matching.
+	FindActionsByExactName(name string) []Action
+
+	// FindActionsByDescription returns actions with descriptions that contain the search string (case-insensitive)
+	FindActionsByDescription(descSubstring string) []Action
+
+	// FindActionsByType returns actions that match the specified type
+	// This uses type assertions to check if an action is of a specific type
+	FindActionsByType(actionType interface{}) []Action
+
+	// FindStagesByTag returns all stages with a specific tag
+	FindStagesByTag(tag string) []*Stage
+
+	// FindStagesByAllTags returns all stages that have all the specified tags
+	FindStagesByAllTags(tags []string) []*Stage
+
+	// FindStagesByAnyTag returns all stages that have at least one of the specified tags
+	FindStagesByAnyTag(tags []string) []*Stage
+
+	// FindStagesByName returns stages with names that contain the search string (case-insensitive)
+	FindStagesByName(nameSubstring string) []*Stage
+
+	// FindStagesByExactName returns stages with names that exactly match the search string
+	// NOTE: This remains case-sensitive for exact matching.
+	FindStagesByExactName(name string) []*Stage
+
+	// FindStagesByDescription returns stages with descriptions that contain the search string (case-insensitive)
+	FindStagesByDescription(descSubstring string) []*Stage
+
+	// DisableActionsByTag disables all actions with a specific tag
+	DisableActionsByTag(tag string) int
+
+	// EnableActionsByTag enables all actions with a specific tag
+	EnableActionsByTag(tag string) int
+
+	// DisableActionsByType disables all actions of a specific type
+	DisableActionsByType(actionType interface{}) int
+
+	// EnableActionsByType enables all actions of a specific type
+	EnableActionsByType(actionType interface{}) int
+
+	// DisableStagesByTag disables all stages with a specific tag
+	DisableStagesByTag(tag string) int
+
+	// EnableStagesByTag enables all stages with a specific tag
+	EnableStagesByTag(tag string) int
+    ```
+    

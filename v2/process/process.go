@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/davidroman0O/gostage/types"
+	"github.com/davidroman0O/gostage/v2/types"
 )
 
 // ChildHandler represents a function that handles child process execution

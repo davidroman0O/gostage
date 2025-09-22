@@ -1,12 +1,13 @@
 package runner
 
 import (
-	"time"
-
-	"github.com/davidroman0O/gostage/types"
+	"github.com/davidroman0O/gostage/v2/types"
+	deadlock "github.com/sasha-s/go-deadlock"
 )
 
 type actionContext struct {
+	mu deadlock.RWMutex // Thread-safe access with deadlock detection
+
 	workflow types.Workflow
 
 	// Dynamically generated actions (will be inserted after the current action)
@@ -58,15 +59,24 @@ func newActionContext(workflow types.Workflow) *actionContext {
 // populateActions populates the allActions slice with actions from the provided slice
 // This method should be called externally when the actual actions are available
 func (ctx *actionContext) populateActions(actions []types.Action) {
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+
 	ctx.allActions = make([]types.Action, len(actions))
 	copy(ctx.allActions, actions)
 }
 
 func (a *actionMutationContext) Add(entity types.Action) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
 	a.actionContext.dynamicActions = append(a.actionContext.dynamicActions, entity)
 }
 
 func (a *actionMutationContext) Disable(entityID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
 	if a.disabledActions == nil {
 		a.disabledActions = make(map[string]bool)
 	}
@@ -74,6 +84,9 @@ func (a *actionMutationContext) Disable(entityID string) {
 }
 
 func (a *actionMutationContext) DisableByTags(tags []string) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
 	if a.disabledActions == nil {
 		a.disabledActions = make(map[string]bool)
 	}
@@ -93,12 +106,15 @@ func (a *actionMutationContext) DisableByTags(tags []string) int {
 				}
 			}
 		}
-		nextAction:
+	nextAction:
 	}
 	return disabledCount
 }
 
 func (a *actionMutationContext) Enable(entityID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
 	if a.disabledActions == nil {
 		a.disabledActions = make(map[string]bool)
 	}
@@ -125,12 +141,15 @@ func (a *actionMutationContext) EnableByTags(tags []string) int {
 				}
 			}
 		}
-		nextAction:
+	nextAction:
 	}
 	return enabledCount
 }
 
 func (a *actionMutationContext) IsEnabled(entityID string) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
 	if a.disabledActions == nil {
 		return true
 	}
@@ -156,6 +175,9 @@ func (a *actionMutationContext) Remove(entityID string) bool {
 }
 
 func (a *actionMutationContext) RemoveByTags(tags []string) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
 	removedCount := 0
 
 	// Remove from allActions
@@ -208,216 +230,4 @@ func (a *actionMutationContext) RemoveByTags(tags []string) int {
 // Since Action interface doesn't have an ID method, we use Name as identifier
 func (a *actionMutationContext) getActionID(action types.Action) string {
 	return action.Name()
-}
-
-// stageMutationContext implements the StageActionMutation interface
-type stageMutationContext struct {
-	*actionContext
-}
-
-func newStageMutation(ctx *actionContext) types.StageActionMutation {
-	return &stageMutationContext{
-		actionContext: ctx,
-	}
-}
-
-func (s *stageMutationContext) Add(entity types.Stage) {
-	s.actionContext.dynamicStages = append(s.actionContext.dynamicStages, entity)
-}
-
-func (s *stageMutationContext) Remove(entityID string) bool {
-	for _, stage := range s.actionContext.workflow.Stages() {
-		if stage.ID() == entityID {
-			// Note: We can't actually remove from the workflow.Stages() slice
-			// since it's read-only. Instead, we mark it as disabled.
-			s.Disable(entityID)
-			return true
-		}
-	}
-	// Also remove from dynamic stages if present
-	for i, stage := range s.dynamicStages {
-		if stage.ID() == entityID {
-			s.dynamicStages = append(s.dynamicStages[:i], s.dynamicStages[i+1:]...)
-			return true
-		}
-	}
-	return false
-}
-
-func (s *stageMutationContext) RemoveByTags(tags []string) int {
-	removedCount := 0
-
-	// Remove from workflow stages (mark as disabled)
-	for _, stage := range s.actionContext.workflow.Stages() {
-		for _, stageTag := range stage.Tags() {
-			for _, targetTag := range tags {
-				if stageTag == targetTag {
-					s.Disable(stage.ID())
-					removedCount++
-					goto nextStage
-				}
-			}
-		}
-		nextStage:
-	}
-
-	// Remove from dynamicStages
-	newDynamicStages := make([]types.Stage, 0, len(s.dynamicStages))
-	for _, stage := range s.dynamicStages {
-		hasTag := false
-		for _, stageTag := range stage.Tags() {
-			for _, targetTag := range tags {
-				if stageTag == targetTag {
-					hasTag = true
-					break
-				}
-			}
-			if hasTag {
-				break
-			}
-		}
-		if !hasTag {
-			newDynamicStages = append(newDynamicStages, stage)
-		}
-	}
-	s.dynamicStages = newDynamicStages
-
-	return removedCount
-}
-
-func (s *stageMutationContext) Enable(entityID string) {
-	if s.disabledStages == nil {
-		s.disabledStages = make(map[string]bool)
-	}
-	delete(s.disabledStages, entityID)
-}
-
-func (s *stageMutationContext) EnableByTags(tags []string) int {
-	if s.disabledStages == nil {
-		return 0
-	}
-
-	enabledCount := 0
-	for _, stage := range s.actionContext.workflow.Stages() {
-		for _, stageTag := range stage.Tags() {
-			for _, targetTag := range tags {
-				if stageTag == targetTag {
-					stageID := stage.ID()
-					if _, exists := s.disabledStages[stageID]; exists {
-						delete(s.disabledStages, stageID)
-						enabledCount++
-					}
-					goto nextStage
-				}
-			}
-		}
-		nextStage:
-	}
-	return enabledCount
-}
-
-func (s *stageMutationContext) Disable(entityID string) {
-	if s.disabledStages == nil {
-		s.disabledStages = make(map[string]bool)
-	}
-	s.disabledStages[entityID] = true
-}
-
-func (s *stageMutationContext) DisableByTags(tags []string) int {
-	if s.disabledStages == nil {
-		s.disabledStages = make(map[string]bool)
-	}
-
-	disabledCount := 0
-	for _, stage := range s.actionContext.workflow.Stages() {
-		for _, stageTag := range stage.Tags() {
-			for _, targetTag := range tags {
-				if stageTag == targetTag {
-					stageID := stage.ID()
-					if _, exists := s.disabledStages[stageID]; !exists {
-						s.disabledStages[stageID] = true
-						disabledCount++
-					}
-					goto nextStage
-				}
-			}
-		}
-		nextStage:
-	}
-	return disabledCount
-}
-
-func (s *stageMutationContext) IsEnabled(entityID string) bool {
-	if s.disabledStages == nil {
-		return true
-	}
-	return !s.disabledStages[entityID]
-}
-
-// contextImpl implements the types.Context interface
-type contextImpl struct {
-	*actionContext
-	broker types.BrokerCall
-	// Context fields for deadline management
-	deadline    time.Time
-	hasDeadline bool
-	done        chan struct{}
-	err         error
-	values      map[interface{}]interface{}
-}
-
-// NewContext creates a new context implementation
-func NewContext(workflow types.Workflow, broker types.BrokerCall) types.Context {
-	actionCtx := newActionContext(workflow)
-	return &contextImpl{
-		actionContext: actionCtx,
-		broker:        broker,
-		done:          make(chan struct{}),
-		values:        make(map[interface{}]interface{}),
-	}
-}
-
-// Context interface methods
-func (c *contextImpl) Deadline() (deadline time.Time, ok bool) {
-	return c.deadline, c.hasDeadline
-}
-
-func (c *contextImpl) Done() <-chan struct{} {
-	return c.done
-}
-
-func (c *contextImpl) Err() error {
-	return c.err
-}
-
-func (c *contextImpl) Value(key any) any {
-	return c.values[key]
-}
-
-// Workflow mutation methods
-func (c *contextImpl) Stages() types.StageActionMutation {
-	return newStageMutation(c.actionContext)
-}
-
-func (c *contextImpl) Actions() types.ActionMutation {
-	return newActionMutation(c.actionContext)
-}
-
-func (c *contextImpl) Broker() types.BrokerCall {
-	return c.broker
-}
-
-// Helper methods for context management
-func (c *contextImpl) SetDeadline(deadline time.Time) {
-	c.deadline = deadline
-	c.hasDeadline = true
-}
-
-func (c *contextImpl) SetValue(key, value interface{}) {
-	c.values[key] = value
-}
-
-func (c *contextImpl) Cancel(err error) {
-	c.err = err
-	close(c.done)
 }
