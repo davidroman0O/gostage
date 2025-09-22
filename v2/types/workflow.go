@@ -72,6 +72,17 @@ type Context interface {
 	// Mutate the workflow at the action level
 	Actions() ActionMutation
 
+	// Execution state helpers
+	Workflow() Workflow
+	Stage() Stage
+	Action() Action
+	ActionIndex() int
+	IsLastAction() bool
+
+	// Shared resources
+	Store() *store.KVStore
+	Logger() Logger
+
 	// Communication
 	Broker() BrokerCall
 }
@@ -122,7 +133,7 @@ type ActionInfo struct {
 
 // StageRunnerFunc is the core function type for executing a stage.
 // It follows the same pattern as RunnerFunc for workflow execution.
-type StageRunnerFunc func(ctx context.Context, stage *Stage, workflow *Workflow, logger Logger) error
+type StageRunnerFunc func(ctx context.Context, stage Stage, workflow Workflow, logger Logger) error
 
 // StageMiddleware represents a function that wraps stage execution.
 // It allows performing operations before and after a stage executes.
@@ -143,6 +154,9 @@ type Stage interface {
 
 	// Mutate the workflow at the action level
 	Actions() ActionMutation
+
+	// ActionList returns the actions attached to the stage in execution order
+	ActionList() []Action
 
 	// Tags for organization and filtering
 	Tags() []string
@@ -174,7 +188,7 @@ type StageState struct {
 }
 
 // WorkflowStageRunnerFunc is the core function type for executing a stage within a workflow.
-type WorkflowStageRunnerFunc func(ctx context.Context, stage *Stage, workflow *Workflow, logger Logger) error
+type WorkflowStageRunnerFunc func(ctx context.Context, stage Stage, workflow Workflow, logger Logger) error
 
 // WorkflowMiddleware represents a function that wraps stage execution within a workflow.
 // It allows performing operations before and after each stage executes.
@@ -202,6 +216,9 @@ type Workflow interface {
 	// It stores workflow metadata, stage information, and execution data
 	// That's the initial store, once the workflow is running you have zero guarantee to have the latest values
 	InitialStore() *store.KVStore
+
+	// Store returns the runtime key-value store backing this workflow execution
+	Store() *store.KVStore
 
 	// Stages contains all the workflow's stages in execution order
 	// This provides direct access during execution
