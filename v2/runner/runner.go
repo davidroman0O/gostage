@@ -2,9 +2,13 @@ package runner
 
 import (
 	"context"
+	"fmt"
 	"time"
 
+	"github.com/davidroman0O/gostage/v2/broker"
+	"github.com/davidroman0O/gostage/v2/registry"
 	"github.com/davidroman0O/gostage/v2/runtime/core"
+	"github.com/davidroman0O/gostage/v2/state"
 	"github.com/davidroman0O/gostage/v2/types"
 )
 
@@ -17,24 +21,29 @@ const (
 	StatusCompleted ExecutionStatus = "completed"
 	StatusFailed    ExecutionStatus = "failed"
 	StatusSkipped   ExecutionStatus = "skipped"
+	StatusRemoved   ExecutionStatus = "removed"
 )
 
 // StageStatus captures lifecycle details for a stage.
 type StageStatus struct {
-	ID        string
-	Name      string
-	Status    ExecutionStatus
-	Dynamic   bool
-	CreatedBy string
+	ID          string
+	Name        string
+	Description string
+	Tags        []string
+	Status      ExecutionStatus
+	Dynamic     bool
+	CreatedBy   string
 }
 
 // ActionStatus captures lifecycle details for an action.
 type ActionStatus struct {
-	StageID   string
-	Name      string
-	Status    ExecutionStatus
-	Dynamic   bool
-	CreatedBy string
+	StageID     string
+	Name        string
+	Description string
+	Tags        []string
+	Status      ExecutionStatus
+	Dynamic     bool
+	CreatedBy   string
 }
 
 // DynamicStage describes a stage generated during execution.
@@ -66,6 +75,8 @@ type RunResult struct {
 
 	DisabledStages  map[string]bool
 	DisabledActions map[string]bool
+	RemovedStages   map[string]string
+	RemovedActions  map[string]string
 }
 
 // RunOptions configures Run behaviour.
@@ -81,6 +92,8 @@ type Runner struct {
 	factory       core.Factory
 	workflowMW    []types.WorkflowMiddleware
 	defaultLogger types.Logger
+	broker        broker.Broker
+	registry      registry.Registry
 }
 
 // Option configures a runner.
@@ -111,15 +124,23 @@ func WithDefaultLogger(logger types.Logger) Option {
 	}
 }
 
-// New creates a local runner ready for execution.
-func New(factory core.Factory, options ...Option) *Runner {
+// New creates a runner wired to the provided factory, registry, and broker.
+func New(factory core.Factory, reg registry.Registry, br broker.Broker, options ...Option) *Runner {
 	if factory == nil {
 		panic("runner: execution context factory required")
+	}
+	if reg == nil {
+		panic("runner: registry required")
+	}
+	if br == nil {
+		panic("runner: broker required")
 	}
 	r := &Runner{
 		factory:       factory,
 		workflowMW:    make([]types.WorkflowMiddleware, 0),
 		defaultLogger: noopLogger{},
+		registry:      reg,
+		broker:        br,
 	}
 	for _, opt := range options {
 		opt(r)
@@ -141,7 +162,30 @@ func (r *Runner) Run(workflow types.Workflow, options RunOptions) RunResult {
 		logger = r.defaultLogger
 	}
 
-	execContext := r.factory.New(workflow, nil)
+	if err := r.validateWorkflowRegistration(workflow); err != nil {
+		return RunResult{
+			WorkflowID: workflow.ID(),
+			Success:    false,
+			Error:      err,
+		}
+	}
+
+	runCtx := options.Context
+	if runCtx == nil {
+		runCtx = context.Background()
+	}
+
+	var brokerProxy *runnerBrokerProxy
+	var brokerCall types.BrokerCall
+	if r.broker != nil {
+		brokerProxy = r.newBrokerProxy(runCtx, workflow, logger)
+		brokerCall = brokerProxy
+	}
+
+	execContext := r.factory.New(workflow, brokerCall)
+	if brokerProxy != nil {
+		brokerProxy.attach(execContext)
+	}
 	execContext.SetLogger(logger)
 	execContext.SetDisabledMaps(make(map[string]bool), make(map[string]bool))
 
@@ -151,13 +195,13 @@ func (r *Runner) Run(workflow types.Workflow, options RunOptions) RunResult {
 		}
 	}
 
-	runCtx := options.Context
-	if runCtx == nil {
-		runCtx = context.Background()
-	}
-
 	tele := newTelemetry(workflow)
+	// telemetry is maintained within the runner; broker proxy no longer mutates it directly.
 	start := time.Now()
+	if r.broker != nil {
+		r.registerWorkflow(runCtx, workflow, logger)
+		r.notifyWorkflowStatus(runCtx, logger, workflow.ID(), StatusRunning)
+	}
 	err := r.executeWorkflow(runCtx, workflow, execContext, logger, tele)
 	duration := time.Since(start)
 
@@ -166,7 +210,7 @@ func (r *Runner) Run(workflow types.Workflow, options RunOptions) RunResult {
 		Success:        err == nil,
 		Error:          err,
 		Duration:       duration,
-		FinalStore:     map[string]interface{}{},
+		FinalStore:     nil,
 		Stages:         tele.stageStatuses(),
 		Actions:        tele.actionStatuses(),
 		DynamicStages:  tele.dynamicStages,
@@ -186,9 +230,23 @@ func (r *Runner) Run(workflow types.Workflow, options RunOptions) RunResult {
 		}
 	}
 
+	result.RemovedStages = tele.removedStages()
+	result.RemovedActions = tele.removedActions()
+
 	if err != nil && options.IgnoreErrors {
 		result.Success = true
 		result.Error = nil
+	}
+
+	if r.broker != nil {
+		workflowState := StatusCompleted
+		if !result.Success {
+			workflowState = StatusFailed
+		}
+		r.flushStageStatuses(runCtx, workflow, tele, logger)
+		r.flushActionStatuses(runCtx, workflow, tele, logger)
+		r.notifyWorkflowStatus(runCtx, logger, workflow.ID(), workflowState)
+		r.emitExecutionSummary(runCtx, workflow, result, start, workflowState, logger)
 	}
 
 	return result
@@ -212,26 +270,33 @@ func (r *Runner) executeWorkflow(ctx context.Context, workflow types.Workflow, e
 	disabledStages := tele.disabledStages(execCtx)
 
 	for i := 0; i < len(stages); i++ {
+		r.drainRemovedStages(execCtx, tele, ctx, workflow, logger)
 		stage := stages[i]
-		stageStatus := tele.stage(stage.ID(), stage.Name(), false, "")
+		stageStatus := tele.stage(stage.ID(), stage.Name(), stage.Description(), stage.Tags(), false, "")
 
 		if disabledStages[stage.ID()] {
 			stageStatus.Status = StatusSkipped
+			r.notifyStageStatus(ctx, workflow.ID(), stage.ID(), StatusSkipped, logger)
 			continue
 		}
 
 		stageStatus.Status = StatusRunning
+		r.notifyStageStatus(ctx, workflow.ID(), stage.ID(), StatusRunning, logger)
 		if err := stageRunner(ctx, stage, workflow, logger); err != nil {
 			stageStatus.Status = StatusFailed
+			r.notifyStageStatus(ctx, workflow.ID(), stage.ID(), StatusFailed, logger)
 			return err
 		}
 		stageStatus.Status = StatusCompleted
+		r.notifyStageStatus(ctx, workflow.ID(), stage.ID(), StatusCompleted, logger)
 
 		if len(tele.pendingStageInsertions) > 0 {
 			stages = tele.insertPendingStages(stages, i+1)
 		}
+		r.drainRemovedStages(execCtx, tele, ctx, workflow, logger)
 	}
 
+	r.drainRemovedStages(execCtx, tele, ctx, workflow, logger)
 	return nil
 }
 
@@ -267,15 +332,30 @@ func (r *Runner) runActions(ctx context.Context, workflow types.Workflow, stage 
 	for i := 0; i < len(actionList); i++ {
 		action := actionList[i]
 		actionKey := actionKey(stage.ID(), action.Name())
-		actionStatus := tele.action(stage.ID(), action.Name(), false, "")
+		actionStatus := tele.action(stage.ID(), action.Name(), action.Description(), action.Tags(), false, "")
+
+		if err := r.ensureActionRegistered(action.Name()); err != nil {
+			actionStatus.Status = StatusFailed
+			r.notifyActionStatus(ctx, workflow.ID(), stage.ID(), action.Name(), StatusFailed, logger)
+			return err
+		}
+
+		if removed, createdBy := execCtx.ConsumeRemovedAction(stage.ID(), action.Name()); removed {
+			actionStatus.Status = StatusRemoved
+			r.updateActionTelemetryRemoval(tele, stage.ID(), action.Name(), createdBy)
+			r.notifyActionRemoved(ctx, workflow.ID(), stage.ID(), action.Name(), createdBy, logger)
+			continue
+		}
 
 		if disabledActions != nil && disabledActions[action.Name()] {
 			actionStatus.Status = StatusSkipped
+			r.notifyActionStatus(ctx, workflow.ID(), stage.ID(), action.Name(), StatusSkipped, logger)
 			continue
 		}
 
 		actionStatus.Status = StatusRunning
 		execCtx.SetAction(action, i, i == len(actionList)-1)
+		r.notifyActionStatus(ctx, workflow.ID(), stage.ID(), action.Name(), StatusRunning, logger)
 
 		runnerFn := func(ctx types.Context, act types.Action, index int, isLast bool) error {
 			return act.Execute(ctx)
@@ -288,28 +368,31 @@ func (r *Runner) runActions(ctx context.Context, workflow types.Workflow, stage 
 
 		if err := runnerFn(execCtx, action, i, i == len(actionList)-1); err != nil {
 			actionStatus.Status = StatusFailed
+			r.notifyActionStatus(ctx, workflow.ID(), stage.ID(), action.Name(), StatusFailed, logger)
 			return err
 		}
 
 		actionStatus.Status = StatusCompleted
+		r.notifyActionStatus(ctx, workflow.ID(), stage.ID(), action.Name(), StatusCompleted, logger)
 
 		if added := execCtx.ConsumeDynamicActions(); len(added) > 0 {
 			actionList = insertActions(actionList, added, i+1)
 			execCtx.SetActionList(actionList)
 			for _, dyn := range added {
-				dynStatus := tele.action(stage.ID(), dyn.Name(), true, actionKey)
+				dynStatus := tele.action(stage.ID(), dyn.Name(), dyn.Description(), dyn.Tags(), true, actionKey)
 				dynStatus.Status = StatusPending
 				tele.dynamicActions = append(tele.dynamicActions, DynamicAction{
 					StageID:   stage.ID(),
 					Action:    dyn,
 					CreatedBy: actionKey,
 				})
+				r.registerAction(ctx, logger, workflow.ID(), stage.ID(), dyn, true, actionKey)
 			}
 		}
 
 		if dynStages := execCtx.ConsumeDynamicStages(); len(dynStages) > 0 {
 			for _, dynStage := range dynStages {
-				t := tele.stage(dynStage.ID(), dynStage.Name(), true, actionKey)
+				t := tele.stage(dynStage.ID(), dynStage.Name(), dynStage.Description(), dynStage.Tags(), true, actionKey)
 				t.Status = StatusPending
 				tele.pendingStageInsertions = append(tele.pendingStageInsertions, pendingStage{
 					stage:     dynStage,
@@ -319,6 +402,7 @@ func (r *Runner) runActions(ctx context.Context, workflow types.Workflow, stage 
 					Stage:     dynStage,
 					CreatedBy: actionKey,
 				})
+				r.registerStage(ctx, workflow, dynStage, true, actionKey, logger)
 			}
 		}
 	}
@@ -374,6 +458,464 @@ func copyBoolMap(src map[string]bool) map[string]bool {
 	return dst
 }
 
+func copyStringMap(src map[string]string) map[string]string {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]string, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func groupActionsByStage(actions []ActionStatus) map[string][]ActionStatus {
+	if len(actions) == 0 {
+		return nil
+	}
+	grouped := make(map[string][]ActionStatus)
+	for _, action := range actions {
+		stageID := action.StageID
+		grouped[stageID] = append(grouped[stageID], action)
+	}
+	return grouped
+}
+
+func (result RunResult) toExecutionReport(workflow types.Workflow, finalState ExecutionStatus, started time.Time) state.ExecutionReport {
+	report := state.ExecutionReport{
+		WorkflowID:      result.WorkflowID,
+		Status:          toWorkflowState(finalState),
+		Success:         result.Success,
+		Duration:        result.Duration,
+		Stages:          buildStageSummaries(result),
+		DisabledStages:  copyBoolMap(result.DisabledStages),
+		DisabledActions: copyBoolMap(result.DisabledActions),
+		RemovedStages:   copyStringMap(result.RemovedStages),
+		RemovedActions:  copyStringMap(result.RemovedActions),
+	}
+	if !started.IsZero() {
+		report.StartedAt = started
+		if result.Duration > 0 {
+			report.CompletedAt = started.Add(result.Duration)
+		} else {
+			report.CompletedAt = started
+		}
+	}
+	if result.Error != nil {
+		report.ErrorMessage = result.Error.Error()
+	}
+	if len(result.FinalStore) > 0 {
+		report.FinalStore = copyMetadata(result.FinalStore)
+	}
+	if workflow != nil {
+		report.WorkflowName = workflow.Name()
+		report.Description = workflow.Description()
+		report.WorkflowTags = copyStrings(workflow.Tags())
+		if typed, ok := workflow.(types.TypedWorkflow); ok {
+			report.WorkflowType = typed.WorkflowType()
+		}
+	}
+	return report
+}
+
+func buildStageSummaries(result RunResult) []state.StageSummary {
+	if len(result.Stages) == 0 {
+		return nil
+	}
+	groupedActions := groupActionsByStage(result.Actions)
+	summaries := make([]state.StageSummary, 0, len(result.Stages))
+	for _, stage := range result.Stages {
+		summary := state.StageSummary{
+			ID:          stage.ID,
+			Name:        stage.Name,
+			Description: stage.Description,
+			Tags:        copyStrings(stage.Tags),
+			Dynamic:     stage.Dynamic,
+			CreatedBy:   stage.CreatedBy,
+			Status:      toWorkflowState(stage.Status),
+			Disabled:    result.DisabledStages != nil && result.DisabledStages[stage.ID],
+		}
+		if result.RemovedStages != nil {
+			summary.RemovedBy = result.RemovedStages[stage.ID]
+		}
+		if actions := groupedActions[stage.ID]; len(actions) > 0 {
+			summary.Actions = buildActionSummariesForStage(stage.ID, actions, result)
+		}
+		summaries = append(summaries, summary)
+	}
+	return summaries
+}
+
+func buildActionSummariesForStage(stageID string, actions []ActionStatus, result RunResult) []state.ActionSummary {
+	if len(actions) == 0 {
+		return nil
+	}
+	summaries := make([]state.ActionSummary, 0, len(actions))
+	for _, action := range actions {
+		summary := state.ActionSummary{
+			StageID:     stageID,
+			Name:        action.Name,
+			Description: action.Description,
+			Tags:        copyStrings(action.Tags),
+			Dynamic:     action.Dynamic,
+			CreatedBy:   action.CreatedBy,
+			Status:      toWorkflowState(action.Status),
+			Disabled:    result.DisabledActions != nil && result.DisabledActions[action.Name],
+		}
+		if result.RemovedActions != nil {
+			summary.RemovedBy = result.RemovedActions[actionKey(stageID, action.Name)]
+		}
+		summaries = append(summaries, summary)
+	}
+	return summaries
+}
+
+func (r *Runner) emitExecutionSummary(ctx context.Context, workflow types.Workflow, result RunResult, started time.Time, finalState ExecutionStatus, logger types.Logger) {
+	if r.broker == nil {
+		return
+	}
+	report := result.toExecutionReport(workflow, finalState, started)
+	if err := r.broker.ExecutionSummary(ctx, result.WorkflowID, report); err != nil && logger != nil {
+		logger.Warn("runner: failed to persist execution summary: %v", err)
+	}
+}
+
+func (r *Runner) registerWorkflow(ctx context.Context, workflow types.Workflow, logger types.Logger) {
+	if r.broker == nil || workflow == nil {
+		return
+	}
+	stages := workflow.Stages()
+	stageMap := make(map[string]*state.StageRecord, len(stages))
+	for _, stage := range stages {
+		if stage == nil {
+			continue
+		}
+		rec := makeStageRecord(stage, false, "")
+		copy := rec
+		stageMap[stage.ID()] = &copy
+	}
+	definition := state.SubWorkflowDef{
+		ID:        workflow.ID(),
+		Name:      workflow.Name(),
+		Tags:      copyStrings(workflow.Tags()),
+		Metadata:  copyMetadata(workflow.Metadata()),
+		Priority:  state.PriorityDefault,
+		CreatedAt: time.Now(),
+	}
+	if typed, ok := workflow.(types.TypedWorkflow); ok {
+		definition.Type = typed.WorkflowType()
+		definition.Payload = copyMetadata(typed.WorkflowPayload())
+	}
+	record := state.WorkflowRecord{
+		ID:          workflow.ID(),
+		Name:        workflow.Name(),
+		Description: workflow.Description(),
+		Tags:        copyStrings(workflow.Tags()),
+		State:       state.WorkflowPending,
+		Definition:  definition,
+		Stages:      stageMap,
+	}
+	r.safeBrokerCall(logger, "WorkflowRegistered", func() error {
+		return r.broker.WorkflowRegistered(ctx, record)
+	})
+	for _, stage := range stages {
+		r.registerStage(ctx, workflow, stage, false, "", logger)
+	}
+}
+
+func (r *Runner) registerStage(ctx context.Context, workflow types.Workflow, stage types.Stage, dynamic bool, createdBy string, logger types.Logger) {
+	if r.broker == nil || workflow == nil || stage == nil {
+		return
+	}
+	rec := makeStageRecord(stage, dynamic, createdBy)
+	r.safeBrokerCall(logger, "StageRegistered", func() error {
+		return r.broker.StageRegistered(ctx, workflow.ID(), rec)
+	})
+	for _, action := range stage.ActionList() {
+		r.registerAction(ctx, logger, workflow.ID(), stage.ID(), action, dynamic, createdBy)
+	}
+}
+
+func (r *Runner) registerAction(ctx context.Context, logger types.Logger, workflowID, stageID string, action types.Action, dynamic bool, createdBy string) {
+	if r.broker == nil || action == nil {
+		return
+	}
+	rec := makeActionRecord(action, dynamic, createdBy)
+	r.safeBrokerCall(logger, "ActionRegistered", func() error {
+		return r.broker.ActionRegistered(ctx, workflowID, stageID, rec)
+	})
+}
+
+func (r *Runner) flushStageStatuses(ctx context.Context, workflow types.Workflow, tele *telemetry, logger types.Logger) {
+	if r.broker == nil || workflow == nil || tele == nil {
+		return
+	}
+	for _, status := range tele.stageStatuses() {
+		r.notifyStageStatus(ctx, workflow.ID(), status.ID, status.Status, logger)
+	}
+}
+
+func (r *Runner) flushActionStatuses(ctx context.Context, workflow types.Workflow, tele *telemetry, logger types.Logger) {
+	if r.broker == nil || workflow == nil || tele == nil {
+		return
+	}
+	for _, status := range tele.actionStatuses() {
+		r.notifyActionStatus(ctx, workflow.ID(), status.StageID, status.Name, status.Status, logger)
+	}
+}
+
+func (r *Runner) notifyWorkflowStatus(ctx context.Context, logger types.Logger, workflowID string, status ExecutionStatus) {
+	if r.broker == nil {
+		return
+	}
+	stateValue := toWorkflowState(status)
+	r.safeBrokerCall(logger, "WorkflowStatus", func() error {
+		return r.broker.WorkflowStatus(ctx, workflowID, stateValue)
+	})
+}
+
+func (r *Runner) notifyStageStatus(ctx context.Context, workflowID, stageID string, status ExecutionStatus, logger types.Logger) {
+	if r.broker == nil {
+		return
+	}
+	stateValue := toWorkflowState(status)
+	r.safeBrokerCall(logger, "StageStatus", func() error {
+		return r.broker.StageStatus(ctx, workflowID, stageID, stateValue)
+	})
+}
+
+func (r *Runner) notifyActionStatus(ctx context.Context, workflowID, stageID, actionName string, status ExecutionStatus, logger types.Logger) {
+	if r.broker == nil {
+		return
+	}
+	stateValue := toWorkflowState(status)
+	r.safeBrokerCall(logger, "ActionStatus", func() error {
+		return r.broker.ActionStatus(ctx, workflowID, stageID, actionName, stateValue)
+	})
+}
+
+func (r *Runner) notifyActionProgress(ctx context.Context, workflowID, stageID, actionName string, progress int, message string, logger types.Logger) {
+	if r.broker == nil {
+		return
+	}
+	r.safeBrokerCall(logger, "ActionProgress", func() error {
+		return r.broker.ActionProgress(ctx, workflowID, stageID, actionName, progress, message)
+	})
+}
+
+func (r *Runner) notifyActionRemoved(ctx context.Context, workflowID, stageID, actionName, createdBy string, logger types.Logger) {
+	r.notifyActionStatus(ctx, workflowID, stageID, actionName, StatusRemoved, logger)
+	if r.broker != nil {
+		r.safeBrokerCall(logger, "ActionRemoved", func() error {
+			return r.broker.ActionRemoved(ctx, workflowID, stageID, actionName, createdBy)
+		})
+	}
+}
+
+func (r *Runner) notifyStageRemoved(ctx context.Context, workflowID, stageID, createdBy string, logger types.Logger) {
+	r.notifyStageStatus(ctx, workflowID, stageID, StatusRemoved, logger)
+	if r.broker != nil {
+		r.safeBrokerCall(logger, "StageRemoved", func() error {
+			return r.broker.StageRemoved(ctx, workflowID, stageID, createdBy)
+		})
+	}
+}
+
+func (r *Runner) drainRemovedStages(execCtx core.ExecutionContext, tele *telemetry, ctx context.Context, workflow types.Workflow, logger types.Logger) {
+	if execCtx == nil || workflow == nil {
+		return
+	}
+	removed := execCtx.ConsumeRemovedStages()
+	if len(removed) == 0 {
+		return
+	}
+	for stageID, createdBy := range removed {
+		r.updateStageTelemetryRemoval(tele, stageID, createdBy)
+		r.notifyStageRemoved(ctx, workflow.ID(), stageID, createdBy, logger)
+	}
+}
+
+func (r *Runner) safeBrokerCall(logger types.Logger, op string, fn func() error) {
+	if err := fn(); err != nil {
+		if logger != nil {
+			logger.Warn("runner broker %s failed: %v", op, err)
+		}
+	}
+}
+
+func (r *Runner) newBrokerProxy(ctx context.Context, workflow types.Workflow, logger types.Logger) *runnerBrokerProxy {
+	return &runnerBrokerProxy{
+		runner:   r,
+		workflow: workflow,
+		runCtx:   ctx,
+		logger:   logger,
+	}
+}
+
+type runnerBrokerProxy struct {
+	runner   *Runner
+	workflow types.Workflow
+	exec     core.ExecutionContext
+	runCtx   context.Context
+	logger   types.Logger
+}
+
+func (p *runnerBrokerProxy) attach(exec core.ExecutionContext) {
+	p.exec = exec
+}
+
+func (p *runnerBrokerProxy) Call(types.MessageType, []byte) error { return nil }
+
+func (p *runnerBrokerProxy) Publish(string, []byte, map[string]interface{}) error { return nil }
+
+func (p *runnerBrokerProxy) Progress(percent int) error {
+	return p.reportProgress(percent, "")
+}
+
+func (p *runnerBrokerProxy) ProgressCause(message string, percent int) error {
+	return p.reportProgress(percent, message)
+}
+
+func (p *runnerBrokerProxy) Log(types.LogLevel, string, ...types.LogField) error { return nil }
+
+func (p *runnerBrokerProxy) reportProgress(percent int, message string) error {
+	if p == nil || p.runner == nil || p.exec == nil {
+		return nil
+	}
+	stage := p.exec.Stage()
+	action := p.exec.Action()
+	if stage == nil || action == nil {
+		return nil
+	}
+	p.runner.notifyActionProgress(
+		p.runCtx,
+		p.workflow.ID(),
+		stage.ID(),
+		action.Name(),
+		percent,
+		message,
+		p.logger,
+	)
+	return nil
+}
+
+func (r *Runner) validateWorkflowRegistration(workflow types.Workflow) error {
+	if workflow == nil {
+		return fmt.Errorf("runner: workflow is nil")
+	}
+	for _, stage := range workflow.Stages() {
+		if stage == nil {
+			continue
+		}
+		for _, action := range stage.ActionList() {
+			if err := r.ensureActionRegistered(action.Name()); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (r *Runner) ensureActionRegistered(id string) error {
+	if r.registry == nil {
+		return fmt.Errorf("runner: registry is nil")
+	}
+	if id == "" {
+		return fmt.Errorf("runner: empty action id")
+	}
+	if r.registry.HasAction(id) {
+		return nil
+	}
+	return fmt.Errorf("runner: action %s not registered", id)
+}
+
+func (r *Runner) updateActionTelemetryRemoval(tele *telemetry, stageID, actionName, createdBy string) {
+	if tele == nil {
+		return
+	}
+	status := tele.action(stageID, actionName, "", nil, createdBy != "", createdBy)
+	status.Status = StatusRemoved
+	tele.removedActionMap[actionKey(stageID, actionName)] = createdBy
+}
+
+func (r *Runner) updateStageTelemetryRemoval(tele *telemetry, stageID, createdBy string) {
+	if tele == nil {
+		return
+	}
+	status := tele.stage(stageID, stageID, "", nil, createdBy != "", createdBy)
+	status.Status = StatusRemoved
+	tele.removedStageMap[stageID] = createdBy
+}
+
+func makeStageRecord(stage types.Stage, dynamic bool, createdBy string) state.StageRecord {
+	record := state.StageRecord{
+		ID:          stage.ID(),
+		Name:        stage.Name(),
+		Description: stage.Description(),
+		Tags:        copyStrings(stage.Tags()),
+		Dynamic:     dynamic,
+		CreatedBy:   createdBy,
+		Status:      state.WorkflowPending,
+		Actions:     make(map[string]*state.ActionRecord),
+	}
+	for _, action := range stage.ActionList() {
+		actionRecord := makeActionRecord(action, dynamic, createdBy)
+		recCopy := actionRecord
+		record.Actions[action.Name()] = &recCopy
+	}
+	return record
+}
+
+func makeActionRecord(action types.Action, dynamic bool, createdBy string) state.ActionRecord {
+	return state.ActionRecord{
+		Name:        action.Name(),
+		Description: action.Description(),
+		Tags:        copyStrings(action.Tags()),
+		Dynamic:     dynamic,
+		CreatedBy:   createdBy,
+		Status:      state.WorkflowPending,
+	}
+}
+
+func copyStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	copyValues := make([]string, len(values))
+	copy(copyValues, values)
+	return copyValues
+}
+
+func copyMetadata(src map[string]interface{}) map[string]interface{} {
+	if src == nil {
+		return nil
+	}
+	dup := make(map[string]interface{}, len(src))
+	for k, v := range src {
+		dup[k] = v
+	}
+	return dup
+}
+
+func toWorkflowState(status ExecutionStatus) state.WorkflowState {
+	switch status {
+	case StatusPending:
+		return state.WorkflowPending
+	case StatusRunning:
+		return state.WorkflowRunning
+	case StatusCompleted:
+		return state.WorkflowCompleted
+	case StatusFailed:
+		return state.WorkflowFailed
+	case StatusSkipped:
+		return state.WorkflowSkipped
+	case StatusRemoved:
+		return state.WorkflowRemoved
+	default:
+		return state.WorkflowPending
+	}
+}
+
 // telemetry tracks execution state while running.
 type telemetry struct {
 	stages                 map[string]*StageStatus
@@ -381,6 +923,8 @@ type telemetry struct {
 	dynamicStages          []DynamicStage
 	dynamicActions         []DynamicAction
 	pendingStageInsertions []pendingStage
+	removedStageMap        map[string]string
+	removedActionMap       map[string]string
 }
 
 type pendingStage struct {
@@ -395,10 +939,20 @@ func newTelemetry(workflow types.Workflow) *telemetry {
 		dynamicStages:          make([]DynamicStage, 0),
 		dynamicActions:         make([]DynamicAction, 0),
 		pendingStageInsertions: make([]pendingStage, 0),
+		removedStageMap:        make(map[string]string),
+		removedActionMap:       make(map[string]string),
 	}
 	for _, stage := range workflow.Stages() {
-		status := &StageStatus{ID: stage.ID(), Name: stage.Name(), Status: StatusPending}
-		t.stages[stage.ID()] = status
+		if stage == nil {
+			continue
+		}
+		t.stages[stage.ID()] = &StageStatus{
+			ID:          stage.ID(),
+			Name:        stage.Name(),
+			Description: stage.Description(),
+			Tags:        copyStrings(stage.Tags()),
+			Status:      StatusPending,
+		}
 	}
 	return t
 }
@@ -410,11 +964,20 @@ func (t *telemetry) disabledStages(execCtx core.ExecutionContext) map[string]boo
 	return map[string]bool{}
 }
 
-func (t *telemetry) stage(id, name string, dynamic bool, createdBy string) *StageStatus {
+func (t *telemetry) stage(id, name, description string, tags []string, dynamic bool, createdBy string) *StageStatus {
 	status, ok := t.stages[id]
 	if !ok {
-		status = &StageStatus{ID: id, Name: name, Status: StatusPending}
+		status = &StageStatus{ID: id, Status: StatusPending}
 		t.stages[id] = status
+	}
+	if name != "" {
+		status.Name = name
+	}
+	if description != "" {
+		status.Description = description
+	}
+	if len(tags) > 0 {
+		status.Tags = copyStrings(tags)
 	}
 	if dynamic {
 		status.Dynamic = true
@@ -425,12 +988,18 @@ func (t *telemetry) stage(id, name string, dynamic bool, createdBy string) *Stag
 	return status
 }
 
-func (t *telemetry) action(stageID, name string, dynamic bool, createdBy string) *ActionStatus {
+func (t *telemetry) action(stageID, name, description string, tags []string, dynamic bool, createdBy string) *ActionStatus {
 	key := actionKey(stageID, name)
 	status, ok := t.actions[key]
 	if !ok {
 		status = &ActionStatus{StageID: stageID, Name: name, Status: StatusPending}
 		t.actions[key] = status
+	}
+	if description != "" {
+		status.Description = description
+	}
+	if len(tags) > 0 {
+		status.Tags = copyStrings(tags)
 	}
 	if dynamic {
 		status.Dynamic = true
@@ -444,7 +1013,11 @@ func (t *telemetry) action(stageID, name string, dynamic bool, createdBy string)
 func (t *telemetry) stageStatuses() []StageStatus {
 	result := make([]StageStatus, 0, len(t.stages))
 	for _, status := range t.stages {
-		result = append(result, *status)
+		copyStatus := *status
+		if len(copyStatus.Tags) > 0 {
+			copyStatus.Tags = copyStrings(copyStatus.Tags)
+		}
+		result = append(result, copyStatus)
 	}
 	return result
 }
@@ -452,9 +1025,35 @@ func (t *telemetry) stageStatuses() []StageStatus {
 func (t *telemetry) actionStatuses() []ActionStatus {
 	result := make([]ActionStatus, 0, len(t.actions))
 	for _, status := range t.actions {
-		result = append(result, *status)
+		copyStatus := *status
+		if len(copyStatus.Tags) > 0 {
+			copyStatus.Tags = copyStrings(copyStatus.Tags)
+		}
+		result = append(result, copyStatus)
 	}
 	return result
+}
+
+func (t *telemetry) removedStages() map[string]string {
+	if len(t.removedStageMap) == 0 {
+		return nil
+	}
+	copyMap := make(map[string]string, len(t.removedStageMap))
+	for k, v := range t.removedStageMap {
+		copyMap[k] = v
+	}
+	return copyMap
+}
+
+func (t *telemetry) removedActions() map[string]string {
+	if len(t.removedActionMap) == 0 {
+		return nil
+	}
+	copyMap := make(map[string]string, len(t.removedActionMap))
+	for k, v := range t.removedActionMap {
+		copyMap[k] = v
+	}
+	return copyMap
 }
 
 func (t *telemetry) insertPendingStages(existing []types.Stage, index int) []types.Stage {
@@ -470,7 +1069,7 @@ func (t *telemetry) insertPendingStages(existing []types.Stage, index int) []typ
 	stages = append(stages, existing[index:]...)
 
 	for _, pending := range t.pendingStageInsertions {
-		status := t.stage(pending.stage.ID(), pending.stage.Name(), true, pending.createdBy)
+		status := t.stage(pending.stage.ID(), pending.stage.Name(), pending.stage.Description(), pending.stage.Tags(), true, pending.createdBy)
 		if status.Status == StatusPending {
 			status.Status = StatusPending
 		}
