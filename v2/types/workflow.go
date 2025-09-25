@@ -43,6 +43,9 @@ type StageActionMutation mutation[Stage]
 
 type ActionMutation mutation[Action]
 
+// BrokerCall is the per-action lightweight communication channel. Removal
+// events are handled internally by the runtime and flushed through the runner's
+// broker; callers do not dispatch removal notifications directly.
 type BrokerCall interface {
 	// Low-level message calling
 	Call(msgType MessageType, payload []byte) error
@@ -238,4 +241,35 @@ type WorkflowInfo struct {
 	Description string   `json:"description"`
 	Tags        []string `json:"tags"`
 	StageIDs    []string `json:"stageIds"`
+}
+
+// RuntimeStageRecorder can be implemented by concrete stage types that want to
+// receive lifecycle notifications for runtime-only mutations (dynamic actions,
+// disabled/enabled toggles, removals). The runner/runtime will check for this
+// interface and invoke the hooks opportunistically; implementations are free
+// to store the metadata in-memory for later inspection.
+type RuntimeStageRecorder interface {
+	RecordDynamicAction(action Action, createdBy string)
+	RecordActionDisabled(actionID, createdBy string)
+	RecordActionEnabled(actionID, createdBy string)
+	RecordActionRemoved(actionID, createdBy string)
+}
+
+// RuntimeWorkflowRecorder allows concrete workflows to observe runtime stage
+// mutations (dynamic insertions, toggles). This mirrors RuntimeStageRecorder
+// at the workflow level.
+type RuntimeWorkflowRecorder interface {
+	RecordDynamicStage(stage Stage, createdBy string)
+	RecordStageDisabled(stageID, createdBy string)
+	RecordStageEnabled(stageID, createdBy string)
+	RecordStageRemoved(stageID, createdBy string)
+}
+
+// TypedWorkflow can be implemented by workflow definitions that expose a
+// logical type identifier and optional payload for orchestration systems.
+// Runners may inspect this interface to populate state management metadata
+// without requiring every Workflow implementation to embed specific fields.
+type TypedWorkflow interface {
+	WorkflowType() string
+	WorkflowPayload() map[string]interface{}
 }
