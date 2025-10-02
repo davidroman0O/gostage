@@ -12,6 +12,8 @@ type Action struct {
 	name        string
 	description string
 	tags        []string
+	version     string
+	author      string
 	reg         registry.Registry
 }
 
@@ -53,24 +55,35 @@ func WithActionTags(tags ...string) ActionOption {
 	}
 }
 
+// WithActionVersion records the version string for the action in the registry metadata.
+func WithActionVersion(version string) ActionOption {
+	return func(meta *registry.ActionMetadata) {
+		meta.Version = version
+	}
+}
+
+// WithActionAuthor records the author information for the action in the registry metadata.
+func WithActionAuthor(author string) ActionOption {
+	return func(meta *registry.ActionMetadata) {
+		meta.Author = author
+	}
+}
+
 // NewAction creates a workflow action definition referencing the registry entry.
 // The action must have been registered beforehand via RegisterAction/MustRegisterAction.
 func NewAction(name string) *Action {
-	reg := registry.Default()
-	if reg == nil {
-		panic("defaults: default registry is nil")
-	}
-	_, meta, err := reg.ResolveAction(name)
+	action, err := buildActionInstance(name)
 	if err != nil {
-		panic(fmt.Sprintf("defaults: action %s is not registered: %v", name, err))
+		panic(err)
 	}
+	return action
+}
 
-	return &Action{
-		name:        name,
-		description: meta.Description,
-		tags:        append([]string(nil), meta.Tags...),
-		reg:         reg,
-	}
+// BuildAction constructs a concrete types.Action instance by looking up the registered
+// action definition in the default registry. Unlike NewAction, this helper returns an error
+// instead of panicking when the action cannot be resolved.
+func BuildAction(name string) (types.Action, error) {
+	return buildActionInstance(name)
 }
 
 // SetTags replaces the action tags and updates registry metadata.
@@ -111,4 +124,24 @@ func (a *Action) Execute(ctx types.Context) error {
 		return err
 	}
 	return factory(ctx)
+}
+
+func buildActionInstance(name string) (*Action, error) {
+	reg := registry.Default()
+	if reg == nil {
+		return nil, fmt.Errorf("defaults: default registry is nil")
+	}
+	_, meta, err := reg.ResolveAction(name)
+	if err != nil {
+		return nil, fmt.Errorf("defaults: action %s is not registered: %v", name, err)
+	}
+
+	return &Action{
+		name:        name,
+		description: meta.Description,
+		tags:        append([]string(nil), meta.Tags...),
+		version:     meta.Version,
+		author:      meta.Author,
+		reg:         reg,
+	}, nil
 }

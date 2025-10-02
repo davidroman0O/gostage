@@ -15,6 +15,7 @@ type Factory struct{}
 // New creates a new execution context for the provided workflow.
 func (Factory) New(workflow types.Workflow, broker types.BrokerCall) core.ExecutionContext {
 	actionCtx := newActionContext(workflow)
+	actionCtx.setBroker(broker)
 	return &contextImpl{
 		actionContext: actionCtx,
 		broker:        broker,
@@ -102,6 +103,14 @@ func (c *contextImpl) SetDisabledMaps(actions, stages map[string]bool) {
 }
 func (c *contextImpl) DisabledMaps() (map[string]bool, map[string]bool) {
 	return c.actionContext.disabledMaps()
+}
+
+func (c *contextImpl) ConsumeRemovedAction(stageID, actionName string) (bool, string) {
+	return c.actionContext.consumeRemovedAction(stageID, actionName)
+}
+
+func (c *contextImpl) ConsumeRemovedStages() map[string]string {
+	return c.actionContext.consumeRemovedStages()
 }
 
 func (c *contextImpl) SetDeadline(deadline time.Time) {

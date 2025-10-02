@@ -15,19 +15,10 @@ func (a *actionMutationContext) Add(entity types.Action) { a.addDynamicAction(en
 func (a *actionMutationContext) Disable(entityID string) { a.disableAction(entityID) }
 
 func (a *actionMutationContext) DisableByTags(tags []string) int {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if a.disabledActions == nil {
-		a.disabledActions = make(map[string]bool)
-	}
-
 	disabled := 0
-	for _, action := range a.allActions {
+	for _, action := range a.snapshotAllActions() {
 		if hasAny(action.Tags(), tags) {
-			id := a.getActionID(action)
-			if !a.disabledActions[id] {
-				a.disabledActions[id] = true
+			if a.disableAction(a.getActionID(action)) {
 				disabled++
 			}
 		}
@@ -38,18 +29,10 @@ func (a *actionMutationContext) DisableByTags(tags []string) int {
 func (a *actionMutationContext) Enable(entityID string) { a.enableAction(entityID) }
 
 func (a *actionMutationContext) EnableByTags(tags []string) int {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if a.disabledActions == nil {
-		return 0
-	}
 	enabled := 0
-	for _, action := range a.allActions {
+	for _, action := range a.snapshotAllActions() {
 		if hasAny(action.Tags(), tags) {
-			id := a.getActionID(action)
-			if a.disabledActions[id] {
-				delete(a.disabledActions, id)
+			if a.enableAction(a.getActionID(action)) {
 				enabled++
 			}
 		}
@@ -68,35 +51,51 @@ func (a *actionMutationContext) IsEnabled(entityID string) bool {
 }
 
 func (a *actionMutationContext) Remove(entityID string) bool {
+	removedFromStatic, removedFromDynamic := false, false
 	a.mu.Lock()
-	defer a.mu.Unlock()
-
 	for i, action := range a.allActions {
 		if a.getActionID(action) == entityID {
 			a.allActions = append(a.allActions[:i], a.allActions[i+1:]...)
-			return true
+			removedFromStatic = true
+			break
 		}
 	}
-
-	for i, action := range a.dynamicActions {
-		if a.getActionID(action) == entityID {
-			a.dynamicActions = append(a.dynamicActions[:i], a.dynamicActions[i+1:]...)
-			return true
+	if !removedFromStatic {
+		for i, action := range a.dynamicActions {
+			if a.getActionID(action) == entityID {
+				a.dynamicActions = append(a.dynamicActions[:i], a.dynamicActions[i+1:]...)
+				removedFromDynamic = true
+				break
+			}
 		}
+	}
+	stage := a.currentStage
+	currentAction := a.currentAction
+	a.mu.Unlock()
+
+	if removedFromStatic || removedFromDynamic {
+		createdBy := mutationSource(stage, currentAction)
+		if recorder, ok := stage.(types.RuntimeStageRecorder); ok {
+			recorder.RecordActionRemoved(entityID, createdBy)
+		}
+		stageID := ""
+		if stage != nil {
+			stageID = stage.ID()
+		}
+		a.actionContext.markActionRemoved(stageID, entityID, createdBy)
+		_ = a.disableAction(entityID)
+		return true
 	}
 	return false
 }
 
 func (a *actionMutationContext) RemoveByTags(tags []string) int {
+	removedIDs := make([]string, 0)
 	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	removed := 0
-
 	filteredActions := a.allActions[:0]
 	for _, action := range a.allActions {
 		if hasAny(action.Tags(), tags) {
-			removed++
+			removedIDs = append(removedIDs, a.getActionID(action))
 			continue
 		}
 		filteredActions = append(filteredActions, action)
@@ -106,16 +105,43 @@ func (a *actionMutationContext) RemoveByTags(tags []string) int {
 	filteredDynamic := a.dynamicActions[:0]
 	for _, action := range a.dynamicActions {
 		if hasAny(action.Tags(), tags) {
-			removed++
+			removedIDs = append(removedIDs, a.getActionID(action))
 			continue
 		}
 		filteredDynamic = append(filteredDynamic, action)
 	}
 	a.dynamicActions = filteredDynamic
+	stage := a.currentStage
+	currentAction := a.currentAction
+	a.mu.Unlock()
 
-	return removed
+	for _, id := range removedIDs {
+		createdBy := mutationSource(stage, currentAction)
+		if recorder, ok := stage.(types.RuntimeStageRecorder); ok {
+			recorder.RecordActionRemoved(id, createdBy)
+		}
+		stageID := ""
+		if stage != nil {
+			stageID = stage.ID()
+		}
+		a.actionContext.markActionRemoved(stageID, id, createdBy)
+		_ = a.disableAction(id)
+	}
+
+	return len(removedIDs)
 }
 
 func (a *actionMutationContext) getActionID(action types.Action) string {
 	return action.Name()
+}
+
+func (a *actionMutationContext) snapshotAllActions() []types.Action {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if len(a.allActions) == 0 {
+		return nil
+	}
+	copyList := make([]types.Action, len(a.allActions))
+	copy(copyList, a.allActions)
+	return copyList
 }

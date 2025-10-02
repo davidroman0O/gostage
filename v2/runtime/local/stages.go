@@ -16,10 +16,9 @@ func (s *stageMutationContext) Add(entity types.Stage) {
 
 func (s *stageMutationContext) Remove(entityID string) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	for _, stage := range s.workflow.Stages() {
 		if stage.ID() == entityID {
+			s.mu.Unlock()
 			s.disableStage(entityID)
 			return true
 		}
@@ -28,56 +27,66 @@ func (s *stageMutationContext) Remove(entityID string) bool {
 	for i, stage := range s.dynamicStages {
 		if stage.ID() == entityID {
 			s.dynamicStages = append(s.dynamicStages[:i], s.dynamicStages[i+1:]...)
+			workflow := s.workflow
+			currentStage := s.currentStage
+			currentAction := s.currentAction
+			s.mu.Unlock()
+			createdBy := mutationSource(currentStage, currentAction)
+			if recorder, ok := workflow.(types.RuntimeWorkflowRecorder); ok {
+				recorder.RecordStageRemoved(entityID, createdBy)
+			}
+			s.actionContext.markStageRemoved(entityID, createdBy)
 			return true
 		}
 	}
+	s.mu.Unlock()
 	return false
 }
 
 func (s *stageMutationContext) RemoveByTags(tags []string) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	removed := 0
-
-	if s.disabledStages == nil {
-		s.disabledStages = make(map[string]bool)
-	}
-
 	for _, stage := range s.workflow.Stages() {
 		if hasAny(stage.Tags(), tags) {
-			s.disabledStages[stage.ID()] = true
-			removed++
+			if s.disableStage(stage.ID()) {
+				removed++
+			}
 		}
 	}
 
+	s.mu.Lock()
 	filtered := s.dynamicStages[:0]
+	removedIDs := make([]string, 0)
 	for _, stage := range s.dynamicStages {
 		if hasAny(stage.Tags(), tags) {
-			removed++
+			removedIDs = append(removedIDs, stage.ID())
 			continue
 		}
 		filtered = append(filtered, stage)
 	}
 	s.dynamicStages = filtered
+	workflow := s.workflow
+	currentStage := s.currentStage
+	currentAction := s.currentAction
+	s.mu.Unlock()
 
-	return removed
+	for _, id := range removedIDs {
+		createdBy := mutationSource(currentStage, currentAction)
+		if recorder, ok := workflow.(types.RuntimeWorkflowRecorder); ok {
+			recorder.RecordStageRemoved(id, createdBy)
+		}
+		s.actionContext.markStageRemoved(id, createdBy)
+	}
+
+	return removed + len(removedIDs)
 }
 
 func (s *stageMutationContext) Enable(entityID string) { s.enableStage(entityID) }
 
 func (s *stageMutationContext) EnableByTags(tags []string) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.disabledStages == nil {
-		return 0
-	}
 	enabled := 0
 	for _, stage := range s.workflow.Stages() {
 		if hasAny(stage.Tags(), tags) {
-			if _, ok := s.disabledStages[stage.ID()]; ok {
-				delete(s.disabledStages, stage.ID())
+			if s.enableStage(stage.ID()) {
 				enabled++
 			}
 		}
@@ -88,17 +97,10 @@ func (s *stageMutationContext) EnableByTags(tags []string) int {
 func (s *stageMutationContext) Disable(entityID string) { s.disableStage(entityID) }
 
 func (s *stageMutationContext) DisableByTags(tags []string) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.disabledStages == nil {
-		s.disabledStages = make(map[string]bool)
-	}
 	disabled := 0
 	for _, stage := range s.workflow.Stages() {
 		if hasAny(stage.Tags(), tags) {
-			if !s.disabledStages[stage.ID()] {
-				s.disabledStages[stage.ID()] = true
+			if s.disableStage(stage.ID()) {
 				disabled++
 			}
 		}

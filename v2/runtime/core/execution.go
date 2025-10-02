@@ -15,6 +15,8 @@ type ExecutionContext interface {
 	SetActionList([]types.Action)
 	SetDisabledMaps(map[string]bool, map[string]bool)
 	DisabledMaps() (map[string]bool, map[string]bool)
+	ConsumeRemovedAction(stageID, actionName string) (bool, string)
+	ConsumeRemovedStages() map[string]string
 }
 
 // Factory builds an execution context for a given workflow.
