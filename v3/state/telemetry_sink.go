@@ -1,0 +1,61 @@
+package state
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+
+	"github.com/davidroman0O/gostage/v3/state/sqlc"
+	"github.com/davidroman0O/gostage/v3/telemetry"
+)
+
+// SQLiteTelemetrySink writes telemetry events into SQLite.
+type SQLiteTelemetrySink struct {
+	queries *sqlc.Queries
+}
+
+func NewSQLiteTelemetrySink(db *sql.DB) (*SQLiteTelemetrySink, error) {
+	if db == nil {
+		return nil, sql.ErrConnDone
+	}
+	return &SQLiteTelemetrySink{queries: sqlc.New(db)}, nil
+}
+
+func (s *SQLiteTelemetrySink) Record(evt telemetry.Event) {
+	metadata, _ := json.Marshal(evt.Metadata)
+	workflowID := sql.NullString{}
+	if evt.WorkflowID != "" {
+		workflowID = sql.NullString{String: evt.WorkflowID, Valid: true}
+	}
+	stageID := sql.NullString{}
+	if evt.StageID != "" {
+		stageID = sql.NullString{String: evt.StageID, Valid: true}
+	}
+	actionID := sql.NullString{}
+	if evt.ActionID != "" {
+		actionID = sql.NullString{String: evt.ActionID, Valid: true}
+	}
+	message := sql.NullString{}
+	if evt.Message != "" {
+		message = sql.NullString{String: evt.Message, Valid: true}
+	}
+	attempt := sql.NullInt64{}
+	if evt.Attempt > 0 {
+		attempt = sql.NullInt64{Int64: int64(evt.Attempt), Valid: true}
+	}
+	errMsg := sql.NullString{}
+	if evt.Err != nil {
+		errMsg = sql.NullString{String: evt.Err.Error(), Valid: true}
+	}
+	_ = s.queries.InsertTelemetryEvent(context.Background(), sqlc.InsertTelemetryEventParams{
+		WorkflowID: workflowID,
+		StageID:    stageID,
+		ActionID:   actionID,
+		Kind:       evt.Kind,
+		Attempt:    attempt,
+		OccurredAt: evt.Timestamp,
+		Message:    message,
+		Metadata:   metadata,
+		Error:      errMsg,
+	})
+}
