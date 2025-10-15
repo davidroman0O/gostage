@@ -4,15 +4,15 @@ import "maps"
 
 // Definition describes a workflow definition as referenced by the runtime.
 type Definition struct {
-	ID          string
-	Name        string
-	Description string
-	Tags        []string
-	Metadata    map[string]any
-	Stages      []Stage
-	Type        string
-	Payload     map[string]any
-	Middleware  []WorkflowMiddleware
+	ID          string         `json:"id"`
+	Name        string         `json:"name,omitempty"`
+	Description string         `json:"description,omitempty"`
+	Tags        []string       `json:"tags,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+	Stages      []Stage        `json:"stages,omitempty"`
+	Type        string         `json:"type,omitempty"`
+	Payload     map[string]any `json:"payload,omitempty"`
+	Middleware  []string       `json:"middleware,omitempty"`
 }
 
 // Clone returns a deep copy of the definition so runtime mutations do not
@@ -23,30 +23,26 @@ func (d Definition) Clone() Definition {
 	out.Metadata = maps.Clone(d.Metadata)
 	out.Payload = maps.Clone(d.Payload)
 	out.Stages = cloneStages(d.Stages)
-	out.Middleware = append([]WorkflowMiddleware(nil), d.Middleware...)
+	out.Middleware = append([]string(nil), d.Middleware...)
 	return out
 }
 
 // Stage represents a sequential set of actions executed within a workflow.
 type Stage struct {
-	ID           string
-	Name         string
-	Description  string
-	Tags         []string
-	Actions      []Action
-	Middleware   []StageMiddleware
-	ActionMW     []ActionMiddleware
-	InitialStore map[string]any
-	Dynamic      bool
-	CreatedBy    string
+	ID           string         `json:"id"`
+	Name         string         `json:"name,omitempty"`
+	Description  string         `json:"description,omitempty"`
+	Tags         []string       `json:"tags,omitempty"`
+	Actions      []Action       `json:"actions,omitempty"`
+	Middleware   []string       `json:"middleware,omitempty"`
+	InitialStore map[string]any `json:"initialStore,omitempty"`
 }
 
 func (s Stage) Clone() Stage {
 	out := s
 	out.Tags = append([]string(nil), s.Tags...)
 	out.Actions = cloneActions(s.Actions)
-	out.Middleware = append([]StageMiddleware(nil), s.Middleware...)
-	out.ActionMW = append([]ActionMiddleware(nil), s.ActionMW...)
+	out.Middleware = append([]string(nil), s.Middleware...)
 	if s.InitialStore != nil {
 		out.InitialStore = maps.Clone(s.InitialStore)
 	}
@@ -55,19 +51,17 @@ func (s Stage) Clone() Stage {
 
 // Action represents a single unit of execution resolved through the action registry.
 type Action struct {
-	ID          string
-	Ref         string
-	Description string
-	Tags        []string
-	Middleware  []ActionMiddleware
-	Dynamic     bool
-	CreatedBy   string
+	ID          string   `json:"id"`
+	Ref         string   `json:"ref"`
+	Description string   `json:"description,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Middleware  []string `json:"middleware,omitempty"`
 }
 
 func (a Action) Clone() Action {
 	out := a
 	out.Tags = append([]string(nil), a.Tags...)
-	out.Middleware = append([]ActionMiddleware(nil), a.Middleware...)
+	out.Middleware = append([]string(nil), a.Middleware...)
 	return out
 }
 

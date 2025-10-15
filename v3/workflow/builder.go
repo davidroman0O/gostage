@@ -17,7 +17,7 @@ func New(id string) *Builder {
 		def: Definition{
 			ID:         id,
 			Metadata:   make(map[string]any),
-			Middleware: make([]WorkflowMiddleware, 0),
+			Middleware: make([]string, 0),
 		},
 	}
 }
@@ -64,8 +64,8 @@ func (b *Builder) Payload(payload map[string]any) *Builder {
 	return b
 }
 
-func (b *Builder) Use(mw ...WorkflowMiddleware) *Builder {
-	b.def.Middleware = append(b.def.Middleware, mw...)
+func (b *Builder) Use(ids ...string) *Builder {
+	b.def.Middleware = appendUnique(b.def.Middleware, ids...)
 	return b
 }
 
@@ -91,13 +91,12 @@ func (b *Builder) Build() (Definition, error) {
 	}
 	seenStage := make(map[string]struct{})
 	for _, stage := range b.def.Stages {
-		if stage.ID == "" {
-			return Definition{}, fmt.Errorf("workflow: stage id required")
+		if stage.ID != "" {
+			if _, ok := seenStage[stage.ID]; ok {
+				return Definition{}, fmt.Errorf("workflow: duplicate stage id %q", stage.ID)
+			}
+			seenStage[stage.ID] = struct{}{}
 		}
-		if _, ok := seenStage[stage.ID]; ok {
-			return Definition{}, fmt.Errorf("workflow: duplicate stage id %q", stage.ID)
-		}
-		seenStage[stage.ID] = struct{}{}
 		if err := validateStage(stage); err != nil {
 			return Definition{}, err
 		}
@@ -115,8 +114,7 @@ func StageDef(id string) *StageBuilder {
 		stage: Stage{
 			ID:         id,
 			Actions:    make([]Action, 0),
-			Middleware: make([]StageMiddleware, 0),
-			ActionMW:   make([]ActionMiddleware, 0),
+			Middleware: make([]string, 0),
 		},
 	}
 }
@@ -150,16 +148,9 @@ func (s *StageBuilder) WithInitialStore(values map[string]any) *StageBuilder {
 	return s
 }
 
-func (s *StageBuilder) Use(mw StageMiddleware) *StageBuilder {
-	if mw != nil {
-		s.stage.Middleware = append(s.stage.Middleware, mw)
-	}
-	return s
-}
-
-func (s *StageBuilder) UseActionMiddleware(mw ActionMiddleware) *StageBuilder {
-	if mw != nil {
-		s.stage.ActionMW = append(s.stage.ActionMW, mw)
+func (s *StageBuilder) Use(id string) *StageBuilder {
+	if id != "" {
+		s.stage.Middleware = appendUnique(s.stage.Middleware, id)
 	}
 	return s
 }
@@ -177,18 +168,14 @@ func (s *StageBuilder) Action(action *ActionBuilder) *StageBuilder {
 }
 
 func (s *StageBuilder) Build() (Stage, error) {
-	if s.stage.ID == "" {
-		return Stage{}, fmt.Errorf("workflow: stage id is required")
-	}
 	actionIDs := make(map[string]struct{})
 	for _, act := range s.stage.Actions {
-		if act.ID == "" {
-			return Stage{}, fmt.Errorf("workflow: action id required (stage %s)", s.stage.ID)
+		if act.ID != "" {
+			if _, ok := actionIDs[act.ID]; ok {
+				return Stage{}, fmt.Errorf("workflow: duplicate action id %s in stage %s", act.ID, s.stage.ID)
+			}
+			actionIDs[act.ID] = struct{}{}
 		}
-		if _, ok := actionIDs[act.ID]; ok {
-			return Stage{}, fmt.Errorf("workflow: duplicate action id %s in stage %s", act.ID, s.stage.ID)
-		}
-		actionIDs[act.ID] = struct{}{}
 		if act.Ref == "" {
 			return Stage{}, fmt.Errorf("workflow: action %s requires registry ref", act.ID)
 		}
@@ -206,7 +193,7 @@ func ActionDef(ref string) *ActionBuilder {
 	return &ActionBuilder{
 		action: Action{
 			Ref:        ref,
-			Middleware: make([]ActionMiddleware, 0),
+			Middleware: make([]string, 0),
 		},
 	}
 }
@@ -226,9 +213,9 @@ func (a *ActionBuilder) AddTags(tags ...string) *ActionBuilder {
 	return a
 }
 
-func (a *ActionBuilder) Use(mw ActionMiddleware) *ActionBuilder {
-	if mw != nil {
-		a.action.Middleware = append(a.action.Middleware, mw)
+func (a *ActionBuilder) Use(id string) *ActionBuilder {
+	if id != "" {
+		a.action.Middleware = appendUnique(a.action.Middleware, id)
 	}
 	return a
 }
@@ -240,22 +227,18 @@ func (a *ActionBuilder) Build() (Action, error) {
 	if a.action.Ref == "" {
 		return Action{}, fmt.Errorf("workflow: action ref required")
 	}
-	if a.action.ID == "" {
-		a.action.ID = a.action.Ref
-	}
 	return a.action.Clone(), nil
 }
 
 func validateStage(stage Stage) error {
 	actionIDs := make(map[string]struct{})
 	for _, action := range stage.Actions {
-		if action.ID == "" {
-			return fmt.Errorf("workflow: action id required in stage %s", stage.ID)
+		if action.ID != "" {
+			if _, ok := actionIDs[action.ID]; ok {
+				return fmt.Errorf("workflow: duplicate action id %s in stage %s", action.ID, stage.ID)
+			}
+			actionIDs[action.ID] = struct{}{}
 		}
-		if _, ok := actionIDs[action.ID]; ok {
-			return fmt.Errorf("workflow: duplicate action id %s in stage %s", action.ID, stage.ID)
-		}
-		actionIDs[action.ID] = struct{}{}
 		if action.Ref == "" {
 			return fmt.Errorf("workflow: action %s missing ref", action.ID)
 		}
