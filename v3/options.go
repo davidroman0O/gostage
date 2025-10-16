@@ -23,6 +23,8 @@ type options struct {
 	queue          state.Queue
 	store          state.Store
 	stateReader    state.StateReader
+	observers      []state.ManagerObserver
+	sqlite         *SQLiteConfig
 	pools          []PoolConfig
 	childPools     []PoolConfig
 	spawners       []SpawnerConfig
@@ -45,9 +47,6 @@ func (fn childOptionFunc) apply(opts *childOptions) {
 type childOptions struct {
 	pools []PoolConfig
 }
-
-// FailurePolicy allows overriding workflow retry/abort behaviour.
-type FailurePolicy interface{}
 
 const (
 	defaultClaimInterval = 50 * time.Millisecond
@@ -88,10 +87,28 @@ func WithStore(store state.Store) Option {
 	})
 }
 
+// WithSQLite configures the node to use an embedded SQLite backend.
+func WithSQLite(cfg SQLiteConfig) Option {
+	copy := cfg
+	return optionFunc(func(o *options) {
+		o.sqlite = &copy
+	})
+}
+
 // WithStateReader overrides the read-only state facade exposed via Node.State.
 func WithStateReader(reader state.StateReader) Option {
 	return optionFunc(func(o *options) {
 		o.stateReader = reader
+	})
+}
+
+// WithStateObserver registers a StoreManager observer hook chain.
+func WithStateObserver(observer state.ManagerObserver) Option {
+	if observer == nil {
+		return optionFunc(func(*options) {})
+	}
+	return optionFunc(func(o *options) {
+		o.observers = append(o.observers, observer)
 	})
 }
 
@@ -116,8 +133,8 @@ func WithSpawner(cfg SpawnerConfig) Option {
 	})
 }
 
-// WithDispatcher sets dispatcher tuning parameters.
-func WithDispatcher(cfg DispatcherConfig) Option {
+// WithDispatcherConfig sets dispatcher tuning parameters.
+func WithDispatcherConfig(cfg DispatcherConfig) Option {
 	return optionFunc(func(o *options) {
 		o.dispatcher = cfg
 	})

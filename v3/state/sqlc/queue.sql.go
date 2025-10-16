@@ -7,8 +7,6 @@ package sqlc
 
 import (
 	"context"
-	"database/sql"
-	"time"
 )
 
 const ackWorkflow = `-- name: AckWorkflow :exec
@@ -30,56 +28,6 @@ WHERE id = ?
 func (q *Queries) CancelWorkflow(ctx context.Context, id string) error {
 	_, err := q.exec(ctx, q.cancelWorkflowStmt, cancelWorkflow, id)
 	return err
-}
-
-const claimNextWorkflow = `-- name: ClaimNextWorkflow :one
-UPDATE queue_entries
-SET state = 'claimed',
-    claimed_by = ?,
-    claimed_at = CURRENT_TIMESTAMP,
-    lease_id = ?,
-    attempts = attempts + 1
-WHERE id = (
-    SELECT id FROM queue_entries
-    WHERE state = 'pending'
-    ORDER BY priority DESC, created_at ASC
-    LIMIT 1
-)
-RETURNING id, definition, priority, created_at, attempts, claimed_by, claimed_at, lease_id, metadata
-`
-
-type ClaimNextWorkflowParams struct {
-	ClaimedBy sql.NullString `json:"claimed_by"`
-	LeaseID   sql.NullString `json:"lease_id"`
-}
-
-type ClaimNextWorkflowRow struct {
-	ID         string         `json:"id"`
-	Definition []byte         `json:"definition"`
-	Priority   int64          `json:"priority"`
-	CreatedAt  time.Time      `json:"created_at"`
-	Attempts   int64          `json:"attempts"`
-	ClaimedBy  sql.NullString `json:"claimed_by"`
-	ClaimedAt  sql.NullTime   `json:"claimed_at"`
-	LeaseID    sql.NullString `json:"lease_id"`
-	Metadata   []byte         `json:"metadata"`
-}
-
-func (q *Queries) ClaimNextWorkflow(ctx context.Context, arg ClaimNextWorkflowParams) (ClaimNextWorkflowRow, error) {
-	row := q.queryRow(ctx, q.claimNextWorkflowStmt, claimNextWorkflow, arg.ClaimedBy, arg.LeaseID)
-	var i ClaimNextWorkflowRow
-	err := row.Scan(
-		&i.ID,
-		&i.Definition,
-		&i.Priority,
-		&i.CreatedAt,
-		&i.Attempts,
-		&i.ClaimedBy,
-		&i.ClaimedAt,
-		&i.LeaseID,
-		&i.Metadata,
-	)
-	return i, err
 }
 
 const enqueueWorkflow = `-- name: EnqueueWorkflow :exec
@@ -104,6 +52,21 @@ func (q *Queries) EnqueueWorkflow(ctx context.Context, arg EnqueueWorkflowParams
 		arg.Priority,
 		arg.Metadata,
 	)
+	return err
+}
+
+const insertQueueTags = `-- name: InsertQueueTags :exec
+INSERT INTO queue_entry_tags (entry_id, tag)
+VALUES (?1, ?2)
+`
+
+type InsertQueueTagsParams struct {
+	EntryID string `json:"entry_id"`
+	Tag     string `json:"tag"`
+}
+
+func (q *Queries) InsertQueueTags(ctx context.Context, arg InsertQueueTagsParams) error {
+	_, err := q.exec(ctx, q.insertQueueTagsStmt, insertQueueTags, arg.EntryID, arg.Tag)
 	return err
 }
 

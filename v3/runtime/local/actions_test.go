@@ -3,7 +3,7 @@ package local
 import (
 	"testing"
 
-	"github.com/davidroman0O/gostage/v3/types"
+	rt "github.com/davidroman0O/gostage/v3/runtime"
 )
 
 type mockAction struct {
@@ -12,10 +12,10 @@ type mockAction struct {
 	tags        []string
 }
 
-func (m *mockAction) Name() string                    { return m.name }
-func (m *mockAction) Description() string             { return m.description }
-func (m *mockAction) Tags() []string                  { return m.tags }
-func (m *mockAction) Execute(ctx types.Context) error { return nil }
+func (m *mockAction) Name() string                 { return m.name }
+func (m *mockAction) Description() string          { return m.description }
+func (m *mockAction) Tags() []string               { return m.tags }
+func (m *mockAction) Execute(ctx rt.Context) error { return nil }
 
 func TestActionMutation_Add(t *testing.T) {
 	ctx := newActionContext(&mockWorkflow{})
@@ -37,7 +37,7 @@ func TestActionMutation_DisableEnable(t *testing.T) {
 	action2 := &mockAction{name: "action2", tags: []string{"test"}}
 
 	ctx := newActionContext(&mockWorkflow{})
-	ctx.populateActions([]types.Action{action1, action2})
+	ctx.populateActions([]rt.Action{action1, action2})
 
 	mutation := newActionMutation(ctx)
 
@@ -57,7 +57,7 @@ func TestActionMutation_DisableByTags(t *testing.T) {
 	action2 := &mockAction{name: "action2", tags: []string{"t", "x"}}
 
 	ctx := newActionContext(&mockWorkflow{})
-	ctx.populateActions([]types.Action{action1, action2})
+	ctx.populateActions([]rt.Action{action1, action2})
 
 	mutation := newActionMutation(ctx)
 	count := mutation.DisableByTags([]string{"t"})

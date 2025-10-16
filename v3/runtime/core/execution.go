@@ -1,18 +1,18 @@
 package core
 
-import "github.com/davidroman0O/gostage/v3/types"
+import rt "github.com/davidroman0O/gostage/v3/runtime"
 
 // ExecutionContext describes the extended context capabilities required by runner backends.
 type ExecutionContext interface {
-	types.Context
+	rt.Context
 
-	SetLogger(types.Logger)
-	SetStage(types.Stage)
+	SetLogger(rt.Logger)
+	SetStage(rt.Stage)
 	ClearStage()
-	SetAction(types.Action, int, bool)
-	ConsumeDynamicActions() []types.Action
-	ConsumeDynamicStages() []types.Stage
-	SetActionList([]types.Action)
+	SetAction(rt.Action, int, bool)
+	ConsumeDynamicActions() []rt.Action
+	ConsumeDynamicStages() []rt.Stage
+	SetActionList([]rt.Action)
 	SetDisabledMaps(map[string]bool, map[string]bool)
 	DisabledMaps() (map[string]bool, map[string]bool)
 	ConsumeRemovedAction(stageID, actionName string) (bool, string)
@@ -21,5 +21,5 @@ type ExecutionContext interface {
 
 // Factory builds an execution context for a given workflow.
 type Factory interface {
-	New(types.Workflow, types.BrokerCall) ExecutionContext
+	New(rt.Workflow, rt.Broker) ExecutionContext
 }

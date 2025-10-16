@@ -3,19 +3,23 @@ package local
 import (
 	"testing"
 
-	"github.com/davidroman0O/gostage/v3/types"
-	"github.com/davidroman0O/gostage/v3/types/defaults"
+	"github.com/davidroman0O/gostage/v3/registry"
+	rt "github.com/davidroman0O/gostage/v3/runtime"
+	"github.com/davidroman0O/gostage/v3/workflow"
 )
 
 func registerNoop(name string) {
-	defaults.MustRegisterAction(name, "", func(types.Context) error { return nil })
+	if err := registry.Default().RegisterAction(name, func(rt.Context) error { return nil }, registry.ActionMetadata{}); err != nil {
+		panic(err)
+	}
 }
 
 func TestActionMutationRuntimeRecording(t *testing.T) {
-	wf := defaults.NewWorkflow("wf", "Workflow", "")
-	stage := defaults.NewStage("stage-1", "Stage", "")
+	registry.SetDefault(registry.NewSafeRegistry())
+	wf := workflow.NewRuntimeWorkflow("wf", "Workflow", "")
+	stage := workflow.NewRuntimeStage("stage-1", "Stage", "")
 	registerNoop("seed")
-	seed := defaults.NewAction("seed")
+	seed := workflow.MustRuntimeAction("seed")
 	stage.AddActions(seed)
 	wf.AddStage(stage)
 
@@ -25,7 +29,7 @@ func TestActionMutationRuntimeRecording(t *testing.T) {
 
 	mutation := newActionMutation(ctx)
 	registerNoop("dyn")
-	dyn := defaults.NewAction("dyn")
+	dyn := workflow.MustRuntimeAction("dyn")
 	mutation.Add(dyn)
 	mutation.Disable("seed")
 	mutation.Enable("seed")
@@ -54,10 +58,11 @@ func TestActionMutationRuntimeRecording(t *testing.T) {
 }
 
 func TestStageMutationRuntimeRecording(t *testing.T) {
-	wf := defaults.NewWorkflow("wf", "Workflow", "")
-	stage := defaults.NewStage("stage-1", "Stage", "")
+	registry.SetDefault(registry.NewSafeRegistry())
+	wf := workflow.NewRuntimeWorkflow("wf", "Workflow", "")
+	stage := workflow.NewRuntimeStage("stage-1", "Stage", "")
 	registerNoop("seed")
-	seed := defaults.NewAction("seed")
+	seed := workflow.MustRuntimeAction("seed")
 	stage.AddActions(seed)
 	wf.AddStage(stage)
 
@@ -66,7 +71,7 @@ func TestStageMutationRuntimeRecording(t *testing.T) {
 	ctx.setAction(seed, 0, true)
 
 	stageMutation := newStageMutation(ctx)
-	dynStage := defaults.NewStage("stage-2", "Dynamic", "")
+	dynStage := workflow.NewRuntimeStage("stage-2", "Dynamic", "")
 	stageMutation.Add(dynStage)
 	stageMutation.Disable("stage-1")
 	stageMutation.Disable("stage-2")

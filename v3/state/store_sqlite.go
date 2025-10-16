@@ -7,7 +7,6 @@ import (
 	"errors"
 
 	"github.com/davidroman0O/gostage/v3/state/sqlc"
-	"github.com/davidroman0O/gostage/v3/workflow"
 	deadlock "github.com/sasha-s/go-deadlock"
 )
 
@@ -34,6 +33,23 @@ func NewSQLiteStore(db *sql.DB) (*SQLiteStore, error) {
 }
 
 func (s *SQLiteStore) RecordWorkflow(ctx context.Context, rec WorkflowRecord) error {
+	return s.upsertWorkflow(ctx, rec)
+}
+
+func (s *SQLiteStore) UpdateWorkflowStatus(ctx context.Context, update WorkflowStatusUpdate) error {
+	params := sqlc.UpdateWorkflowStatusParams{
+		ID:          string(update.ID),
+		State:       string(update.Status),
+		StartedAt:   toNullTime(update.StartedAt),
+		CompletedAt: toNullTime(update.CompletedAt),
+		Duration:    toOptionalNullDuration(update.Duration),
+		Success:     toOptionalNullBool(update.Success),
+		Error:       toOptionalNullString(update.Error),
+	}
+	return s.queries.UpdateWorkflowStatus(ctx, params)
+}
+
+func (s *SQLiteStore) upsertWorkflow(ctx context.Context, rec WorkflowRecord) error {
 	tags, err := json.Marshal(rec.Tags)
 	if err != nil {
 		return err
@@ -60,7 +76,22 @@ func (s *SQLiteStore) RecordWorkflow(ctx context.Context, rec WorkflowRecord) er
 	return s.queries.UpsertWorkflowRun(ctx, params)
 }
 
-func (s *SQLiteStore) RecordStage(ctx context.Context, workflowID WorkflowID, stage workflow.Stage, dynamic bool, createdBy string, state WorkflowState) error {
+func (s *SQLiteStore) RecordStage(ctx context.Context, workflowID WorkflowID, stage StageRecord) error {
+	return s.upsertStage(ctx, workflowID, stage)
+}
+
+func (s *SQLiteStore) UpdateStageStatus(ctx context.Context, update StageStatusUpdate) error {
+	params := sqlc.UpdateStageStatusParams{
+		WorkflowID:  string(update.WorkflowID),
+		StageID:     update.StageID,
+		State:       string(update.Status),
+		StartedAt:   toNullTime(update.StartedAt),
+		CompletedAt: toNullTime(update.CompletedAt),
+	}
+	return s.queries.UpdateStageStatus(ctx, params)
+}
+
+func (s *SQLiteStore) upsertStage(ctx context.Context, workflowID WorkflowID, stage StageRecord) error {
 	tags, err := json.Marshal(stage.Tags)
 	if err != nil {
 		return err
@@ -70,16 +101,32 @@ func (s *SQLiteStore) RecordStage(ctx context.Context, workflowID WorkflowID, st
 		StageID:     stage.ID,
 		Name:        toNullString(stage.Name),
 		Tags:        tags,
-		Dynamic:     boolToInt64(dynamic),
-		CreatedBy:   toNullString(createdBy),
-		State:       string(state),
+		Dynamic:     boolToInt64(stage.Dynamic),
+		CreatedBy:   toNullString(stage.CreatedBy),
+		State:       string(stage.Status),
 		StartedAt:   sql.NullTime{},
 		CompletedAt: sql.NullTime{},
 	}
 	return s.queries.InsertStageRun(ctx, params)
 }
 
-func (s *SQLiteStore) RecordAction(ctx context.Context, workflowID WorkflowID, stageID string, action workflow.Action, dynamic bool, createdBy string, state WorkflowState) error {
+func (s *SQLiteStore) RecordAction(ctx context.Context, workflowID WorkflowID, stageID string, action ActionRecord) error {
+	return s.upsertAction(ctx, workflowID, stageID, action)
+}
+
+func (s *SQLiteStore) UpdateActionStatus(ctx context.Context, update ActionStatusUpdate) error {
+	params := sqlc.UpdateActionStatusParams{
+		WorkflowID:  string(update.WorkflowID),
+		StageID:     update.StageID,
+		ActionID:    update.ActionID,
+		State:       string(update.Status),
+		StartedAt:   toNullTime(update.StartedAt),
+		CompletedAt: toNullTime(update.CompletedAt),
+	}
+	return s.queries.UpdateActionStatus(ctx, params)
+}
+
+func (s *SQLiteStore) upsertAction(ctx context.Context, workflowID WorkflowID, stageID string, action ActionRecord) error {
 	tags, err := json.Marshal(action.Tags)
 	if err != nil {
 		return err
@@ -87,12 +134,12 @@ func (s *SQLiteStore) RecordAction(ctx context.Context, workflowID WorkflowID, s
 	params := sqlc.InsertActionRunParams{
 		WorkflowID:  string(workflowID),
 		StageID:     stageID,
-		ActionID:    action.ID,
+		ActionID:    action.Name,
 		Ref:         toNullString(action.Ref),
 		Tags:        tags,
-		Dynamic:     boolToInt64(dynamic),
-		CreatedBy:   toNullString(createdBy),
-		State:       string(state),
+		Dynamic:     boolToInt64(action.Dynamic),
+		CreatedBy:   toNullString(action.CreatedBy),
+		State:       string(action.Status),
 		StartedAt:   sql.NullTime{},
 		CompletedAt: sql.NullTime{},
 	}

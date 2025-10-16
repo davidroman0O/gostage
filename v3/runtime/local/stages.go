@@ -1,17 +1,31 @@
 package local
 
-import "github.com/davidroman0O/gostage/v3/types"
+import (
+	"fmt"
+
+	rt "github.com/davidroman0O/gostage/v3/runtime"
+)
 
 type stageMutationContext struct {
 	*actionContext
 }
 
-func newStageMutation(ctx *actionContext) types.StageActionMutation {
+func newStageMutation(ctx *actionContext) rt.StageMutation {
 	return &stageMutationContext{actionContext: ctx}
 }
 
-func (s *stageMutationContext) Add(entity types.Stage) {
+func (s *stageMutationContext) Add(entity rt.Stage) string {
+	if entity == nil {
+		return ""
+	}
+	id := entity.ID()
+	if id == "" {
+		counter := s.actionContext.nextStageCounter()
+		id = fmt.Sprintf("dyn-stage-%d", counter)
+		entity = stageWithOverrideID{Stage: entity, id: id}
+	}
 	s.addDynamicStage(entity)
+	return id
 }
 
 func (s *stageMutationContext) Remove(entityID string) bool {
@@ -32,7 +46,7 @@ func (s *stageMutationContext) Remove(entityID string) bool {
 			currentAction := s.currentAction
 			s.mu.Unlock()
 			createdBy := mutationSource(currentStage, currentAction)
-			if recorder, ok := workflow.(types.RuntimeWorkflowRecorder); ok {
+			if recorder, ok := workflow.(rt.RuntimeWorkflowRecorder); ok {
 				recorder.RecordStageRemoved(entityID, createdBy)
 			}
 			s.actionContext.markStageRemoved(entityID, createdBy)
@@ -71,7 +85,7 @@ func (s *stageMutationContext) RemoveByTags(tags []string) int {
 
 	for _, id := range removedIDs {
 		createdBy := mutationSource(currentStage, currentAction)
-		if recorder, ok := workflow.(types.RuntimeWorkflowRecorder); ok {
+		if recorder, ok := workflow.(rt.RuntimeWorkflowRecorder); ok {
 			recorder.RecordStageRemoved(id, createdBy)
 		}
 		s.actionContext.markStageRemoved(id, createdBy)
@@ -127,4 +141,35 @@ func hasAny(values, targets []string) bool {
 		}
 	}
 	return false
+}
+
+type stageWithOverrideID struct {
+	rt.Stage
+	id string
+}
+
+func (s stageWithOverrideID) ID() string { return s.id }
+
+func (s stageWithOverrideID) RecordDynamicAction(action rt.Action, createdBy string) {
+	if recorder, ok := s.Stage.(rt.RuntimeStageRecorder); ok {
+		recorder.RecordDynamicAction(action, createdBy)
+	}
+}
+
+func (s stageWithOverrideID) RecordActionDisabled(id, createdBy string) {
+	if recorder, ok := s.Stage.(rt.RuntimeStageRecorder); ok {
+		recorder.RecordActionDisabled(id, createdBy)
+	}
+}
+
+func (s stageWithOverrideID) RecordActionEnabled(id, createdBy string) {
+	if recorder, ok := s.Stage.(rt.RuntimeStageRecorder); ok {
+		recorder.RecordActionEnabled(id, createdBy)
+	}
+}
+
+func (s stageWithOverrideID) RecordActionRemoved(id, createdBy string) {
+	if recorder, ok := s.Stage.(rt.RuntimeStageRecorder); ok {
+		recorder.RecordActionRemoved(id, createdBy)
+	}
 }

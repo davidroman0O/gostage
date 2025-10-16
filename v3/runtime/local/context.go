@@ -1,11 +1,12 @@
 package local
 
 import (
+	"sync"
 	"time"
 
-	"github.com/davidroman0O/gostage/store"
+	rt "github.com/davidroman0O/gostage/v3/runtime"
 	"github.com/davidroman0O/gostage/v3/runtime/core"
-	"github.com/davidroman0O/gostage/v3/types"
+	store "github.com/davidroman0O/gostage/v3/store"
 	deadlock "github.com/sasha-s/go-deadlock"
 )
 
@@ -13,7 +14,7 @@ import (
 type Factory struct{}
 
 // New creates a new execution context for the provided workflow.
-func (Factory) New(workflow types.Workflow, broker types.BrokerCall) core.ExecutionContext {
+func (Factory) New(workflow rt.Workflow, broker rt.Broker) core.ExecutionContext {
 	actionCtx := newActionContext(workflow)
 	actionCtx.setBroker(broker)
 	return &contextImpl{
@@ -29,7 +30,7 @@ var _ core.ExecutionContext = (*contextImpl)(nil)
 // contextImpl expands the standard execution context with local state management hooks.
 type contextImpl struct {
 	*actionContext
-	broker types.BrokerCall
+	broker rt.Broker
 
 	valueMu deadlock.RWMutex
 
@@ -38,6 +39,7 @@ type contextImpl struct {
 	done        chan struct{}
 	err         error
 	values      map[interface{}]interface{}
+	cancelOnce  sync.Once
 }
 
 func (c *contextImpl) Deadline() (deadline time.Time, ok bool) {
@@ -60,12 +62,12 @@ func (c *contextImpl) Value(key any) any {
 	return c.values[key]
 }
 
-func (c *contextImpl) Stages() types.StageActionMutation { return newStageMutation(c.actionContext) }
-func (c *contextImpl) Actions() types.ActionMutation     { return newActionMutation(c.actionContext) }
-func (c *contextImpl) Broker() types.BrokerCall          { return c.broker }
-func (c *contextImpl) Workflow() types.Workflow          { return c.actionContext.workflow }
-func (c *contextImpl) Stage() types.Stage                { return c.actionContext.getStage() }
-func (c *contextImpl) Action() types.Action {
+func (c *contextImpl) Stages() rt.StageMutation   { return newStageMutation(c.actionContext) }
+func (c *contextImpl) Actions() rt.ActionMutation { return newActionMutation(c.actionContext) }
+func (c *contextImpl) Broker() rt.Broker          { return c.broker }
+func (c *contextImpl) Workflow() rt.Workflow      { return c.actionContext.workflow }
+func (c *contextImpl) Stage() rt.Stage            { return c.actionContext.getStage() }
+func (c *contextImpl) Action() rt.Action {
 	action, _, _ := c.actionContext.getAction()
 	return action
 }
@@ -77,27 +79,27 @@ func (c *contextImpl) IsLastAction() bool {
 	_, _, last := c.actionContext.getAction()
 	return last
 }
-func (c *contextImpl) Store() *store.KVStore {
+func (c *contextImpl) Store() store.Handle {
 	if c.actionContext.workflow == nil {
-		return nil
+		return store.Handle{}
 	}
 	return c.actionContext.workflow.Store()
 }
-func (c *contextImpl) Logger() types.Logger { return c.actionContext.getLogger() }
+func (c *contextImpl) Logger() rt.Logger { return c.actionContext.getLogger() }
 
-func (c *contextImpl) SetLogger(logger types.Logger) { c.actionContext.setLogger(logger) }
-func (c *contextImpl) SetStage(stage types.Stage)    { c.actionContext.setStage(stage) }
-func (c *contextImpl) ClearStage()                   { c.actionContext.clearStage() }
-func (c *contextImpl) SetAction(action types.Action, index int, isLast bool) {
+func (c *contextImpl) SetLogger(logger rt.Logger) { c.actionContext.setLogger(logger) }
+func (c *contextImpl) SetStage(stage rt.Stage)    { c.actionContext.setStage(stage) }
+func (c *contextImpl) ClearStage()                { c.actionContext.clearStage() }
+func (c *contextImpl) SetAction(action rt.Action, index int, isLast bool) {
 	c.actionContext.setAction(action, index, isLast)
 }
-func (c *contextImpl) ConsumeDynamicActions() []types.Action {
+func (c *contextImpl) ConsumeDynamicActions() []rt.Action {
 	return c.actionContext.consumeDynamicActions()
 }
-func (c *contextImpl) ConsumeDynamicStages() []types.Stage {
+func (c *contextImpl) ConsumeDynamicStages() []rt.Stage {
 	return c.actionContext.consumeDynamicStages()
 }
-func (c *contextImpl) SetActionList(actions []types.Action) { c.actionContext.populateActions(actions) }
+func (c *contextImpl) SetActionList(actions []rt.Action) { c.actionContext.populateActions(actions) }
 func (c *contextImpl) SetDisabledMaps(actions, stages map[string]bool) {
 	c.actionContext.setDisabledMaps(actions, stages)
 }
@@ -120,15 +122,17 @@ func (c *contextImpl) SetDeadline(deadline time.Time) {
 	c.hasDeadline = true
 }
 
+func (c *contextImpl) Cancel(err error) {
+	c.cancelOnce.Do(func() {
+		c.valueMu.Lock()
+		c.err = err
+		c.valueMu.Unlock()
+		close(c.done)
+	})
+}
+
 func (c *contextImpl) SetValue(key, value interface{}) {
 	c.valueMu.Lock()
 	defer c.valueMu.Unlock()
 	c.values[key] = value
-}
-
-func (c *contextImpl) Cancel(err error) {
-	c.valueMu.Lock()
-	defer c.valueMu.Unlock()
-	c.err = err
-	close(c.done)
 }

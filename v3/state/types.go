@@ -113,6 +113,8 @@ type ActionHistoryRecord struct {
 	State       WorkflowState
 	StartedAt   *time.Time
 	CompletedAt *time.Time
+	Progress    int
+	Message     string
 }
 
 type SubWorkflowDef struct {
@@ -138,6 +140,7 @@ type StageRecord struct {
 }
 
 type ActionRecord struct {
+	Ref         string
 	Name        string
 	Description string
 	Tags        []string
@@ -159,6 +162,7 @@ type ExecutionReport struct {
 	CompletedAt  time.Time
 	Duration     time.Duration
 	FinalStore   map[string]any
+	Attempt      int
 
 	Stages          []StageSummary
 	DisabledStages  map[string]bool
@@ -196,6 +200,36 @@ type ActionSummary struct {
 	EndedAt     time.Time
 }
 
+// WorkflowStatusUpdate describes a targeted workflow status mutation.
+type WorkflowStatusUpdate struct {
+	ID          WorkflowID
+	Status      WorkflowState
+	StartedAt   *time.Time
+	CompletedAt *time.Time
+	Duration    *time.Duration
+	Success     *bool
+	Error       *string
+}
+
+// StageStatusUpdate describes a stage state change.
+type StageStatusUpdate struct {
+	WorkflowID  WorkflowID
+	StageID     string
+	Status      WorkflowState
+	StartedAt   *time.Time
+	CompletedAt *time.Time
+}
+
+// ActionStatusUpdate describes an action state change.
+type ActionStatusUpdate struct {
+	WorkflowID  WorkflowID
+	StageID     string
+	ActionID    string
+	Status      WorkflowState
+	StartedAt   *time.Time
+	CompletedAt *time.Time
+}
+
 type Manager interface {
 	WorkflowRegistered(ctx context.Context, wf WorkflowRecord) error
 	WorkflowStatus(ctx context.Context, workflowID string, status WorkflowState) error
@@ -204,6 +238,7 @@ type Manager interface {
 	ActionRegistered(ctx context.Context, workflowID, stageID string, action ActionRecord) error
 	ActionStatus(ctx context.Context, workflowID, stageID, actionName string, status WorkflowState) error
 	ActionProgress(ctx context.Context, workflowID, stageID, actionName string, progress int, message string) error
+	ActionEvent(ctx context.Context, workflowID, stageID, actionName, kind, message string, metadata map[string]any) error
 	ActionRemoved(ctx context.Context, workflowID, stageID, actionName, createdBy string) error
 	StageRemoved(ctx context.Context, workflowID, stageID, createdBy string) error
 	StoreExecutionSummary(ctx context.Context, workflowID string, report ExecutionReport) error

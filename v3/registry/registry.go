@@ -3,12 +3,12 @@ package registry
 import (
 	"fmt"
 
-	"github.com/davidroman0O/gostage/v3/types"
+	rt "github.com/davidroman0O/gostage/v3/runtime"
 	"github.com/sasha-s/go-deadlock"
 )
 
 // ActionFactory defines the function signature used to execute a registered action.
-type ActionFactory func(types.Context) error
+type ActionFactory func(rt.Context) error
 
 // ActionMetadata describes a registered action.
 type ActionMetadata struct {

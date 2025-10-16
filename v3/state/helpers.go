@@ -33,11 +33,35 @@ func toNullDuration(d time.Duration) sql.NullInt64 {
 	return sql.NullInt64{Int64: int64(d), Valid: true}
 }
 
+func toOptionalNullDuration(d *time.Duration) sql.NullInt64 {
+	if d == nil || *d <= 0 {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: int64(*d), Valid: true}
+}
+
 func boolToInt64(b bool) int64 {
 	if b {
 		return 1
 	}
 	return 0
+}
+
+func toOptionalNullBool(b *bool) sql.NullInt64 {
+	if b == nil {
+		return sql.NullInt64{}
+	}
+	if *b {
+		return sql.NullInt64{Int64: 1, Valid: true}
+	}
+	return sql.NullInt64{Int64: 0, Valid: true}
+}
+
+func toOptionalNullString(val *string) sql.NullString {
+	if val == nil {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: *val, Valid: true}
 }
 
 func cloneAnyMap(src map[string]any) map[string]any {

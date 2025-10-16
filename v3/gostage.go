@@ -21,18 +21,33 @@ import (
 // ErrNodeClosed signals the node has already been shut down.
 var ErrNodeClosed = errors.New("gostage: node closed")
 
-// Node is the public handle returned by Run.
-type Node interface {
-	Submit(ctx context.Context, ref WorkflowReference, opts ...SubmitOption) (state.WorkflowID, error)
-	Wait(ctx context.Context, id state.WorkflowID) (Result, error)
-	Cancel(ctx context.Context, id state.WorkflowID) error
-	Stats(ctx context.Context) (Snapshot, error)
-	StreamTelemetry(ctx context.Context, fn TelemetryHandler) CancelFunc
-	StreamHealth(ctx context.Context, fn HealthHandler) CancelFunc
-	State() state.StateReader
-	Close() error
+// Node is the public handle returned by Run. It embeds the runtime behaviour
+// while exposing the read-only State facade as a field for ergonomic access.
+type Node struct {
+	*parentNode
+	State state.StateReader
 }
 
+// Stats returns scheduler metrics using a background context.
+func (n *Node) Stats() (Snapshot, error) {
+	if n == nil || n.parentNode == nil {
+		return Snapshot{}, fmt.Errorf("gostage: node not initialised")
+	}
+	return n.parentNode.stats(context.Background())
+}
+
+// StatsWithContext collects scheduler metrics using the provided context.
+func (n *Node) StatsWithContext(ctx context.Context) (Snapshot, error) {
+	if n == nil || n.parentNode == nil {
+		return Snapshot{}, fmt.Errorf("gostage: node not initialised")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return n.parentNode.stats(ctx)
+}
+
+// State exposes the read-only state facade for compatibility with earlier API.
 // ChildNode is the restricted interface handed to child handlers.
 type ChildNode interface {
 	Run(ctx context.Context) error
@@ -62,6 +77,7 @@ type Result struct {
 	Success         bool
 	Error           error
 	Duration        time.Duration
+	Attempt         int
 	Output          map[string]any
 	DisabledStages  map[string]bool
 	DisabledActions map[string]bool
@@ -75,15 +91,24 @@ type Snapshot struct {
 	UpdatedAt  time.Time
 	QueueDepth int
 	InFlight   int
+	Completed  int
+	Failed     int
+	Cancelled  int
 	Pools      []PoolSnapshot
 }
 
 // PoolSnapshot reports utilisation metrics for a pool.
 type PoolSnapshot struct {
-	Name      string
-	Slots     int
-	Busy      int
-	Available int
+	Name             string
+	Slots            int
+	Busy             int
+	Available        int
+	Pending          int
+	Healthy          bool
+	Status           node.HealthStatus
+	LastError        error
+	LastErrorAt      time.Time
+	LastHealthChange time.Time
 }
 
 // Selector matches workflows to pools by tag sets.
@@ -141,7 +166,7 @@ type SQLiteConfig struct {
 }
 
 // Run bootstraps the orchestrator in parent mode.
-func Run(ctx context.Context, opts ...Option) (Node, <-chan DiagnosticEvent, error) {
+func Run(ctx context.Context, opts ...Option) (*Node, <-chan DiagnosticEvent, error) {
 	if ctx == nil {
 		return nil, nil, fmt.Errorf("gostage: context is required")
 	}
@@ -159,28 +184,139 @@ func Run(ctx context.Context, opts ...Option) (Node, <-chan DiagnosticEvent, err
 	}
 
 	queue := cfg.queue
+	store := cfg.store
+	stateReader := cfg.stateReader
 	queueOwned := false
+	storeOwned := false
+
+	var (
+		sqliteDB    *sql.DB
+		sqliteOwned bool
+	)
+
+	if sqliteCfg := cfg.sqlite; sqliteCfg != nil {
+		var err error
+		sqliteDB = sqliteCfg.DB
+		if sqliteDB == nil {
+			if sqliteCfg.Path == "" {
+				return nil, nil, fmt.Errorf("gostage: sqlite path required when no *sql.DB supplied")
+			}
+			dsn := fmt.Sprintf("file:%s?_busy_timeout=5000&_foreign_keys=on", sqliteCfg.Path)
+			sqliteDB, err = sql.Open("sqlite", dsn)
+			if err != nil {
+				return nil, nil, fmt.Errorf("gostage: open sqlite: %w", err)
+			}
+			sqliteOwned = true
+		}
+		if _, err := sqliteDB.Exec("PRAGMA foreign_keys=ON"); err != nil {
+			if sqliteOwned {
+				_ = sqliteDB.Close()
+			}
+			return nil, nil, fmt.Errorf("gostage: enable foreign keys: %w", err)
+		}
+		if sqliteCfg.WAL {
+			if _, err := sqliteDB.Exec("PRAGMA journal_mode=WAL"); err != nil {
+				if sqliteOwned {
+					_ = sqliteDB.Close()
+				}
+				return nil, nil, fmt.Errorf("gostage: enable WAL: %w", err)
+			}
+		}
+		if sqliteCfg.ApplyMigrations {
+			if err := state.ApplyMigrations(sqliteDB); err != nil {
+				if sqliteOwned {
+					_ = sqliteDB.Close()
+				}
+				return nil, nil, fmt.Errorf("gostage: apply migrations: %w", err)
+			}
+		}
+		if queue == nil {
+			queue, err = state.NewSQLiteQueue(sqliteDB)
+			if err != nil {
+				if sqliteOwned {
+					_ = sqliteDB.Close()
+				}
+				return nil, nil, fmt.Errorf("gostage: sqlite queue: %w", err)
+			}
+			queueOwned = true
+		}
+		if store == nil {
+			store, err = state.NewSQLiteStore(sqliteDB)
+			if err != nil {
+				if sqliteOwned {
+					_ = sqliteDB.Close()
+				}
+				return nil, nil, fmt.Errorf("gostage: sqlite store: %w", err)
+			}
+			storeOwned = true
+		}
+		if stateReader == nil {
+			stateReader, err = state.NewSQLiteStateReader(sqliteDB)
+			if err != nil {
+				if sqliteOwned {
+					_ = sqliteDB.Close()
+				}
+				return nil, nil, fmt.Errorf("gostage: sqlite state reader: %w", err)
+			}
+		}
+		if sink, err := state.NewSQLiteTelemetrySink(sqliteDB); err != nil {
+			if sqliteOwned {
+				_ = sqliteDB.Close()
+			}
+			return nil, nil, fmt.Errorf("gostage: sqlite telemetry sink: %w", err)
+		} else {
+			cfg.telemetrySinks = append(cfg.telemetrySinks, sink)
+		}
+	}
+
 	if queue == nil {
 		queue = state.NewMemoryQueue()
 		queueOwned = true
 	}
 
-	store := cfg.store
-	storeOwned := false
 	if store == nil {
 		store = state.NewMemoryStore()
 		storeOwned = true
 	}
 
-	manager, err := state.NewStoreManager(store)
+	managerOpts := []state.ManagerOption{}
+	if len(cfg.observers) > 0 {
+		managerOpts = append(managerOpts, state.WithManagerObservers(cfg.observers...))
+	}
+
+	manager, err := state.NewStoreManager(store, managerOpts...)
 	if err != nil {
+		if sqliteOwned {
+			_ = sqliteDB.Close()
+		}
 		return nil, nil, fmt.Errorf("gostage: state manager: %w", err)
+	}
+	if stateReader == nil {
+		stateReader = state.NewManagerStateReader(manager)
 	}
 
 	base := node.New(ctx, cfg.telemetrySinks)
 	health := node.NewHealthDispatcher()
+	if diagWriter := base.DiagnosticsWriter(); diagWriter != nil {
+		_ = health.Subscribe(func(evt node.HealthEvent) {
+			if evt.Status == node.HealthDegraded || evt.Status == node.HealthUnavailable {
+				diagWriter.Write(diagnostics.Event{
+					OccurredAt: time.Now(),
+					Component:  "node.health",
+					Severity:   diagnostics.SeverityWarning,
+					Metadata: map[string]any{
+						"pool":   evt.Pool,
+						"status": evt.Status,
+						"detail": evt.Detail,
+					},
+				})
+			}
+		})
+	}
 
-	broker := broker.NewLocal(manager)
+	managerWithTelemetry := wrapWithTelemetry(manager, base.TelemetryDispatcher())
+
+	broker := broker.NewLocal(managerWithTelemetry)
 	runOpts := []runner.Option{runner.WithDefaultLogger(logger)}
 	r := runner.New(local.Factory{}, registry.Default(), broker, runOpts...)
 
@@ -190,22 +326,26 @@ func Run(ctx context.Context, opts ...Option) (Node, <-chan DiagnosticEvent, err
 		poolBindings = []*poolBinding{{pool: defaultPool}}
 	}
 
-	dispatcher := newDispatcher(ctx, queue, store, r, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, logger, cfg.dispatcher.ClaimInterval, cfg.dispatcher.Jitter, poolBindings)
+	dispatcher := newDispatcher(ctx, queue, store, managerWithTelemetry, r, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, logger, cfg.dispatcher.ClaimInterval, cfg.dispatcher.Jitter, cfg.dispatcher.MaxInFlight, cfg.failurePolicy, poolBindings)
 	dispatcher.start()
 
-	node := &parentNode{
-		base:        base,
-		dispatcher:  dispatcher,
-		queue:       queue,
-		queueOwned:  queueOwned,
-		store:       store,
-		storeOwned:  storeOwned,
-		stateReader: cfg.stateReader,
-		pools:       poolBindings,
-		logger:      logger,
+	impl := &parentNode{
+		base:       base,
+		dispatcher: dispatcher,
+		queue:      queue,
+		queueOwned: queueOwned,
+		store:      store,
+		storeOwned: storeOwned,
+		pools:      poolBindings,
+		logger:     logger,
+		sqliteDB:   sqliteDB,
+		dbOwned:    sqliteOwned,
 	}
 
-	return node, base.Diagnostics(), nil
+	return &Node{
+		parentNode: impl,
+		State:      stateReader,
+	}, base.Diagnostics(), nil
 }
 
 func buildPools(cfgs []PoolConfig) []*poolBinding {

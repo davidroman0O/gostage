@@ -17,6 +17,17 @@ ON CONFLICT(id) DO UPDATE SET
     completed_at = COALESCE(excluded.completed_at, workflow_runs.completed_at),
     duration = COALESCE(excluded.duration, workflow_runs.duration);
 
+-- name: UpdateWorkflowStatus :exec
+UPDATE workflow_runs
+SET
+    state = sqlc.arg(state),
+    started_at = COALESCE(sqlc.arg(started_at), workflow_runs.started_at),
+    completed_at = COALESCE(sqlc.arg(completed_at), workflow_runs.completed_at),
+    duration = COALESCE(sqlc.narg(duration), workflow_runs.duration),
+    success = COALESCE(sqlc.narg(success), workflow_runs.success),
+    error = COALESCE(sqlc.narg(error), workflow_runs.error)
+WHERE id = sqlc.arg(id);
+
 -- name: InsertStageRun :exec
 INSERT INTO stage_runs (
     workflow_id, stage_id, name, tags, dynamic, created_by, state, started_at, completed_at
@@ -32,6 +43,15 @@ ON CONFLICT(workflow_id, stage_id) DO UPDATE SET
     started_at = COALESCE(excluded.started_at, stage_runs.started_at),
     completed_at = COALESCE(excluded.completed_at, stage_runs.completed_at);
 
+-- name: UpdateStageStatus :exec
+UPDATE stage_runs
+SET
+    state = sqlc.arg(state),
+    started_at = COALESCE(sqlc.arg(started_at), stage_runs.started_at),
+    completed_at = COALESCE(sqlc.arg(completed_at), stage_runs.completed_at)
+WHERE workflow_id = sqlc.arg(workflow_id)
+  AND stage_id = sqlc.arg(stage_id);
+
 -- name: InsertActionRun :exec
 INSERT INTO action_runs (
     workflow_id, stage_id, action_id, ref, tags, dynamic, created_by, state, started_at, completed_at
@@ -46,6 +66,16 @@ ON CONFLICT(workflow_id, stage_id, action_id) DO UPDATE SET
     state = excluded.state,
     started_at = COALESCE(excluded.started_at, action_runs.started_at),
     completed_at = COALESCE(excluded.completed_at, action_runs.completed_at);
+
+-- name: UpdateActionStatus :exec
+UPDATE action_runs
+SET
+    state = sqlc.arg(state),
+    started_at = COALESCE(sqlc.arg(started_at), action_runs.started_at),
+    completed_at = COALESCE(sqlc.arg(completed_at), action_runs.completed_at)
+WHERE workflow_id = sqlc.arg(workflow_id)
+  AND stage_id = sqlc.arg(stage_id)
+  AND action_id = sqlc.arg(action_id);
 
 -- name: UpsertExecutionSummary :exec
 INSERT INTO execution_summaries (
@@ -65,10 +95,43 @@ SELECT id, name, description, type, tags, metadata, created_at, started_at, comp
 FROM workflow_runs
 WHERE id = ?;
 
--- name: ListAllWorkflows :many
+-- name: ListWorkflowsFiltered :many
 SELECT id, name, description, type, tags, metadata, created_at, started_at, completed_at, duration, state, success, error
 FROM workflow_runs
-ORDER BY created_at DESC;
+WHERE
+    (
+        sqlc.arg(states_json) IS NULL
+        OR EXISTS (
+            SELECT 1
+            FROM json_each(COALESCE(?1, '[]')) AS state_filter
+            WHERE workflow_runs.state = state_filter.value
+        )
+    )
+    AND (
+        sqlc.arg(type_json) IS NULL
+        OR EXISTS (
+            SELECT 1
+            FROM json_each(COALESCE(?2, '[]')) AS type_filter
+            WHERE workflow_runs.type = type_filter.value
+        )
+    )
+    AND (
+        sqlc.arg(tags_json) IS NULL
+        OR EXISTS (
+            SELECT 1
+            FROM json_each(COALESCE(?3, '[]')) AS tag_filter
+            WHERE EXISTS (
+                SELECT 1
+                FROM json_each(workflow_runs.tags) AS wf_tag
+                WHERE wf_tag.value = tag_filter.value
+            )
+        )
+    )
+    AND (sqlc.arg(from_time) IS NULL OR workflow_runs.created_at >= sqlc.arg(from_time))
+    AND (sqlc.arg(to_time) IS NULL OR workflow_runs.created_at <= sqlc.arg(to_time))
+ORDER BY created_at DESC
+LIMIT CASE WHEN sqlc.arg(limit_rows) IS NULL OR sqlc.arg(limit_rows) <= 0 THEN -1 ELSE sqlc.arg(limit_rows) END
+OFFSET COALESCE(sqlc.arg(offset_rows), 0);
 
 -- name: ListActionsByWorkflow :many
 SELECT action_id, stage_id, ref, tags, dynamic, created_by, state, started_at, completed_at

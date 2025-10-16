@@ -6,13 +6,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/davidroman0O/gostage/v3/types"
+	rt "github.com/davidroman0O/gostage/v3/runtime"
 )
 
 // WorkflowLogger logs start/completion of each stage within a workflow, including duration.
-func WorkflowLogger() types.WorkflowMiddleware {
-	return func(next types.WorkflowStageRunnerFunc) types.WorkflowStageRunnerFunc {
-		return func(ctx context.Context, stage types.Stage, workflow types.Workflow, logger types.Logger) error {
+func WorkflowLogger() rt.WorkflowMiddleware {
+	return func(next rt.WorkflowStageRunnerFunc) rt.WorkflowStageRunnerFunc {
+		return func(ctx context.Context, stage rt.Stage, workflow rt.Workflow, logger rt.Logger) error {
 			safeInfo(logger, "workflow %s stage %s starting", workflow.Name(), stage.Name())
 			started := time.Now()
 			err := next(ctx, stage, workflow, logger)
@@ -28,9 +28,9 @@ func WorkflowLogger() types.WorkflowMiddleware {
 }
 
 // StageTimer provides per-stage timing logs when attached via Stage.Use.
-func StageTimer() types.StageMiddleware {
-	return func(next types.StageRunnerFunc) types.StageRunnerFunc {
-		return func(ctx context.Context, stage types.Stage, workflow types.Workflow, logger types.Logger) error {
+func StageTimer() rt.StageMiddleware {
+	return func(next rt.StageRunnerFunc) rt.StageRunnerFunc {
+		return func(ctx context.Context, stage rt.Stage, workflow rt.Workflow, logger rt.Logger) error {
 			planned := actionNames(stage.ActionList())
 			safeInfo(logger, "stage %s entering with actions: %s", stage.Name(), strings.Join(planned, ", "))
 			started := time.Now()
@@ -51,9 +51,9 @@ func StageTimer() types.StageMiddleware {
 }
 
 // ActionProgress reports percentage progress through the current stage using the ctx broker.
-func ActionProgress() types.ActionMiddleware {
-	return func(next types.ActionRunnerFunc) types.ActionRunnerFunc {
-		return func(ctx types.Context, action types.Action, index int, isLast bool) error {
+func ActionProgress() rt.ActionMiddleware {
+	return func(next rt.ActionRunnerFunc) rt.ActionRunnerFunc {
+		return func(ctx rt.Context, action rt.Action, index int, isLast bool) error {
 			stage := ctx.Stage()
 			total := 0
 			if stage != nil {
@@ -64,14 +64,16 @@ func ActionProgress() types.ActionMiddleware {
 
 			broker := ctx.Broker()
 			status := statusFromError(err, isLast)
-			if broker != nil && stage != nil {
-				total := len(stage.ActionList())
-				if total == 0 {
-					total = index + 1
+			if broker != nil {
+				total := index + 1
+				if stage != nil {
+					if n := len(stage.ActionList()); n > 0 {
+						total = n
+					}
 				}
 				percent := int(float64(index+1) / float64(total) * 100)
 				msg := fmt.Sprintf("%s:%s", action.Name(), status)
-				_ = broker.ProgressCause(msg, percent)
+				_ = broker.Progress(percent, msg)
 			}
 			safeInfo(ctx.Logger(), "action %s finished status %s", action.Name(), status)
 			return err
@@ -89,19 +91,19 @@ func statusFromError(err error, isLast bool) string {
 	return "running"
 }
 
-func safeInfo(logger types.Logger, format string, args ...interface{}) {
+func safeInfo(logger rt.Logger, format string, args ...interface{}) {
 	if logger != nil {
 		logger.Info(format, args...)
 	}
 }
 
-func safeError(logger types.Logger, format string, args ...interface{}) {
+func safeError(logger rt.Logger, format string, args ...interface{}) {
 	if logger != nil {
 		logger.Error(format, args...)
 	}
 }
 
-func actionNames(actions []types.Action) []string {
+func actionNames(actions []rt.Action) []string {
 	names := make([]string, 0, len(actions))
 	for _, act := range actions {
 		names = append(names, act.Name())

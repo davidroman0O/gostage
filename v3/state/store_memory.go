@@ -2,8 +2,8 @@ package state
 
 import (
 	"context"
+	"time"
 
-	"github.com/davidroman0O/gostage/v3/workflow"
 	deadlock "github.com/sasha-s/go-deadlock"
 )
 
@@ -11,8 +11,8 @@ import (
 type MemoryStore struct {
 	mu        deadlock.Mutex
 	workflows map[WorkflowID]WorkflowRecord
-	stages    map[WorkflowID]map[string]workflow.Stage
-	actions   map[WorkflowID]map[string]workflow.Action
+	stages    map[WorkflowID]map[string]*StageRecord
+	actions   map[WorkflowID]map[string]map[string]*ActionRecord
 	summaries map[WorkflowID]ResultSummary
 	waiters   map[WorkflowID][]chan ResultSummary
 }
@@ -20,8 +20,8 @@ type MemoryStore struct {
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		workflows: make(map[WorkflowID]WorkflowRecord),
-		stages:    make(map[WorkflowID]map[string]workflow.Stage),
-		actions:   make(map[WorkflowID]map[string]workflow.Action),
+		stages:    make(map[WorkflowID]map[string]*StageRecord),
+		actions:   make(map[WorkflowID]map[string]map[string]*ActionRecord),
 		summaries: make(map[WorkflowID]ResultSummary),
 		waiters:   make(map[WorkflowID][]chan ResultSummary),
 	}
@@ -30,27 +30,113 @@ func NewMemoryStore() *MemoryStore {
 func (s *MemoryStore) RecordWorkflow(ctx context.Context, rec WorkflowRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.workflows[rec.ID] = rec
+	s.workflows[rec.ID] = cloneWorkflowRecord(rec)
 	return nil
 }
 
-func (s *MemoryStore) RecordStage(ctx context.Context, workflowID WorkflowID, stage workflow.Stage, dynamic bool, createdBy string, state WorkflowState) error {
+func (s *MemoryStore) UpdateWorkflowStatus(ctx context.Context, update WorkflowStatusUpdate) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec := s.workflows[update.ID]
+	if rec.ID == "" {
+		rec.ID = update.ID
+	}
+	rec.State = update.Status
+	if update.StartedAt != nil {
+		rec.StartedAt = cloneTimePtr(update.StartedAt)
+	}
+	if update.CompletedAt != nil {
+		rec.CompletedAt = cloneTimePtr(update.CompletedAt)
+	}
+	if update.Duration != nil {
+		rec.Duration = *update.Duration
+	}
+	if update.Success != nil {
+		rec.Success = *update.Success
+	}
+	if update.Error != nil {
+		rec.Error = *update.Error
+	}
+	s.workflows[update.ID] = rec
+	return nil
+}
+
+func (s *MemoryStore) RecordStage(ctx context.Context, workflowID WorkflowID, stage StageRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.stages[workflowID] == nil {
-		s.stages[workflowID] = make(map[string]workflow.Stage)
+		s.stages[workflowID] = make(map[string]*StageRecord)
 	}
-	s.stages[workflowID][stage.ID] = stage
+	stageClone := cloneStageRecord(stage)
+	stageClone.Actions = make(map[string]*ActionRecord)
+	s.stages[workflowID][stage.ID] = &stageClone
 	return nil
 }
 
-func (s *MemoryStore) RecordAction(ctx context.Context, workflowID WorkflowID, stageID string, action workflow.Action, dynamic bool, createdBy string, state WorkflowState) error {
+func (s *MemoryStore) UpdateStageStatus(ctx context.Context, update StageStatusUpdate) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stages[update.WorkflowID] == nil {
+		s.stages[update.WorkflowID] = make(map[string]*StageRecord)
+	}
+	var stageClone StageRecord
+	if existing := s.stages[update.WorkflowID][update.StageID]; existing != nil {
+		stageClone = cloneStageRecord(*existing)
+	} else {
+		stageClone = StageRecord{ID: update.StageID, Actions: make(map[string]*ActionRecord)}
+	}
+	stageClone.Status = update.Status
+	s.stages[update.WorkflowID][update.StageID] = &stageClone
+	return nil
+}
+
+func (s *MemoryStore) RecordAction(ctx context.Context, workflowID WorkflowID, stageID string, action ActionRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.actions[workflowID] == nil {
-		s.actions[workflowID] = make(map[string]workflow.Action)
+		s.actions[workflowID] = make(map[string]map[string]*ActionRecord)
 	}
-	s.actions[workflowID][action.ID] = action
+	if s.actions[workflowID][stageID] == nil {
+		s.actions[workflowID][stageID] = make(map[string]*ActionRecord)
+	}
+	actionClone := cloneActionRecord(action)
+	s.actions[workflowID][stageID][action.Name] = &actionClone
+	if s.stages[workflowID] != nil {
+		if stage := s.stages[workflowID][stageID]; stage != nil {
+			if stage.Actions == nil {
+				stage.Actions = make(map[string]*ActionRecord)
+			}
+			stage.Actions[action.Name] = &actionClone
+		}
+	}
+	return nil
+}
+
+func (s *MemoryStore) UpdateActionStatus(ctx context.Context, update ActionStatusUpdate) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.actions[update.WorkflowID] == nil {
+		s.actions[update.WorkflowID] = make(map[string]map[string]*ActionRecord)
+	}
+	if s.actions[update.WorkflowID][update.StageID] == nil {
+		s.actions[update.WorkflowID][update.StageID] = make(map[string]*ActionRecord)
+	}
+	var actionClone ActionRecord
+	if existing := s.actions[update.WorkflowID][update.StageID][update.ActionID]; existing != nil {
+		actionClone = cloneActionRecord(*existing)
+	} else {
+		actionClone = ActionRecord{Name: update.ActionID}
+	}
+	actionClone.Status = update.Status
+	s.actions[update.WorkflowID][update.StageID][update.ActionID] = &actionClone
+	if s.stages[update.WorkflowID] != nil {
+		if stage := s.stages[update.WorkflowID][update.StageID]; stage != nil {
+			if stage.Actions == nil {
+				stage.Actions = make(map[string]*ActionRecord)
+			}
+			stage.Actions[update.ActionID] = &actionClone
+		}
+	}
 	return nil
 }
 
@@ -94,4 +180,12 @@ func (s *MemoryStore) WaitResult(ctx context.Context, id WorkflowID) (ResultSumm
 
 func (s *MemoryStore) Close() error {
 	return nil
+}
+
+func cloneTimePtr(ts *time.Time) *time.Time {
+	if ts == nil {
+		return nil
+	}
+	v := *ts
+	return &v
 }

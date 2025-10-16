@@ -27,7 +27,7 @@ func New(ctx context.Context, sinks []telemetry.Sink) *Node {
 	diagHub := NewDiagnosticsHub()
 	teleDispatcher := NewTelemetryDispatcher(ctx, diagHub)
 	for _, sink := range sinks {
-		teleDispatcher.Register(sink)
+		_ = teleDispatcher.Register(sink)
 	}
 	diagCh := diagHub.Subscribe()
 	return &Node{

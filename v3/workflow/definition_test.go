@@ -41,6 +41,72 @@ func TestDefinitionJSONRoundTrip(t *testing.T) {
 	}
 }
 
+type noopRuntimeAction struct {
+	name string
+	tags []string
+}
+
+func (n noopRuntimeAction) Name() string             { return n.name }
+func (n noopRuntimeAction) Description() string      { return "" }
+func (n noopRuntimeAction) Tags() []string           { return append([]string(nil), n.tags...) }
+func (n noopRuntimeAction) Execute(rt.Context) error { return nil }
+
+func TestRuntimeStageActionMutationToggles(t *testing.T) {
+	stage := NewRuntimeStage("stage-1", "Stage", "")
+	stage.AddActions(
+		noopRuntimeAction{name: "action-1", tags: []string{"grp"}},
+		noopRuntimeAction{name: "action-2", tags: []string{"grp"}},
+		noopRuntimeAction{name: "action-3", tags: []string{"other"}},
+	)
+
+	mutation := stage.Actions()
+	if !mutation.IsEnabled("action-1") {
+		t.Fatalf("expected action-1 enabled by default")
+	}
+
+	mutation.Disable("action-1")
+	if mutation.IsEnabled("action-1") {
+		t.Fatalf("expected action-1 disabled")
+	}
+
+	state := stage.RuntimeState()
+	if _, ok := state.Disabled["action-1"]; !ok {
+		t.Fatalf("expected runtime state to record disabled action")
+	}
+
+	wf := NewRuntimeWorkflow("wf-runtime", "wf", "")
+	wf.AddStage(stage)
+
+	if actions, _ := wf.DisabledSnapshot(); actions == nil || !actions["action-1"] {
+		t.Fatalf("expected workflow snapshot to include disabled action")
+	}
+
+	mutation.Enable("action-1")
+	if !mutation.IsEnabled("action-1") {
+		t.Fatalf("expected action-1 re-enabled")
+	}
+
+	if actions, _ := wf.DisabledSnapshot(); actions != nil {
+		if actions["action-1"] {
+			t.Fatalf("expected workflow snapshot not to include action-1 after enable")
+		}
+	}
+
+	if disabled := mutation.DisableByTags([]string{"grp"}); disabled != 2 {
+		t.Fatalf("expected two actions disabled by tag, got %d", disabled)
+	}
+	if !mutation.IsEnabled("action-3") {
+		t.Fatalf("expected action-3 to remain enabled")
+	}
+
+	if enabled := mutation.EnableByTags([]string{"grp"}); enabled != 2 {
+		t.Fatalf("expected two actions re-enabled by tag, got %d", enabled)
+	}
+	if !mutation.IsEnabled("action-2") {
+		t.Fatalf("expected action-2 re-enabled")
+	}
+}
+
 func TestMaterializeFailsForUnknownMiddleware(t *testing.T) {
 	resetMiddlewareRegistries()
 	defer resetMiddlewareRegistries()
@@ -205,5 +271,58 @@ func TestEnsureIDsGeneratesMissingValues(t *testing.T) {
 	}
 	if assignment.Stages[1].Actions[1].Generated {
 		t.Fatalf("expected custom action id to be marked as provided")
+	}
+}
+
+func TestEnsureIDsDeterministic(t *testing.T) {
+	def := Definition{
+		Stages: []Stage{
+			{
+				Name: "prep",
+				Actions: []Action{
+					{Ref: "noop"},
+					{Ref: "noop"},
+				},
+			},
+			{
+				Name: "run",
+				Actions: []Action{
+					{Ref: "noop"},
+				},
+			},
+		},
+	}
+
+	first, assign1, err := EnsureIDs(def)
+	if err != nil {
+		t.Fatalf("ensure ids (first): %v", err)
+	}
+	second, assign2, err := EnsureIDs(def)
+	if err != nil {
+		t.Fatalf("ensure ids (second): %v", err)
+	}
+
+	if len(first.Stages) != len(second.Stages) {
+		t.Fatalf("stage length mismatch: %d vs %d", len(first.Stages), len(second.Stages))
+	}
+	for i := range first.Stages {
+		if first.Stages[i].ID != second.Stages[i].ID {
+			t.Fatalf("stage %d id mismatch: %s vs %s", i, first.Stages[i].ID, second.Stages[i].ID)
+		}
+		for j := range first.Stages[i].Actions {
+			if first.Stages[i].Actions[j].ID != second.Stages[i].Actions[j].ID {
+				t.Fatalf("action id mismatch at stage %d action %d: %s vs %s",
+					i, j, first.Stages[i].Actions[j].ID, second.Stages[i].Actions[j].ID)
+			}
+		}
+		if assign1.Stages[i].ID != assign2.Stages[i].ID {
+			t.Fatalf("assignment stage id mismatch: %s vs %s", assign1.Stages[i].ID, assign2.Stages[i].ID)
+		}
+		for j := range assign1.Stages[i].Actions {
+			if assign1.Stages[i].Actions[j].ID != assign2.Stages[i].Actions[j].ID {
+				t.Fatalf("assignment action id mismatch at stage %d action %d: %s vs %s",
+					i, j, assign1.Stages[i].Actions[j].ID, assign2.Stages[i].Actions[j].ID)
+			}
+		}
 	}
 }

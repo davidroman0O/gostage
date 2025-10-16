@@ -3,8 +3,8 @@ package local
 import (
 	"testing"
 
-	"github.com/davidroman0O/gostage/store"
-	"github.com/davidroman0O/gostage/v3/types"
+	rt "github.com/davidroman0O/gostage/v3/runtime"
+	store "github.com/davidroman0O/gostage/v3/store"
 )
 
 type mockStage struct {
@@ -12,17 +12,20 @@ type mockStage struct {
 	tags []string
 }
 
-func (m *mockStage) ID() string                           { return m.id }
-func (m *mockStage) Name() string                         { return m.id }
-func (m *mockStage) Description() string                  { return m.id }
-func (m *mockStage) Actions() types.ActionMutation        { return nil }
-func (m *mockStage) ActionList() []types.Action           { return nil }
-func (m *mockStage) Tags() []string                       { return m.tags }
-func (m *mockStage) InitialStore() *store.KVStore         { return store.NewKVStore() }
-func (m *mockStage) Middlewares() []types.StageMiddleware { return nil }
+func (m *mockStage) ID() string                        { return m.id }
+func (m *mockStage) Name() string                      { return m.id }
+func (m *mockStage) Description() string               { return m.id }
+func (m *mockStage) Actions() rt.ActionMutation        { return nil }
+func (m *mockStage) ActionList() []rt.Action           { return nil }
+func (m *mockStage) Tags() []string                    { return m.tags }
+func (m *mockStage) InitialStore() store.Handle        { return store.New() }
+func (m *mockStage) Middlewares() []rt.StageMiddleware { return nil }
+func (m *mockStage) ActionMiddlewares() []rt.ActionMiddleware {
+	return nil
+}
 
 func TestStageMutation_AddDynamic(t *testing.T) {
-	workflow := &mockWorkflow{stages: []types.Stage{}}
+	workflow := &mockWorkflow{stages: []rt.Stage{}}
 	ctx := newActionContext(workflow)
 	mutation := newStageMutation(ctx)
 
@@ -35,7 +38,7 @@ func TestStageMutation_AddDynamic(t *testing.T) {
 
 func TestStageMutation_DisableEnable(t *testing.T) {
 	stage := &mockStage{id: "stage1", tags: []string{"test"}}
-	workflow := &mockWorkflow{stages: []types.Stage{stage}}
+	workflow := &mockWorkflow{stages: []rt.Stage{stage}}
 	ctx := newActionContext(workflow)
 	mutation := newStageMutation(ctx)
 

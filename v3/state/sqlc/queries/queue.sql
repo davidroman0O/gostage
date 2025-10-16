@@ -4,21 +4,9 @@ INSERT INTO queue_entries (
 ) VALUES (
     ?, ?, ?, ?
 );
-
--- name: ClaimNextWorkflow :one
-UPDATE queue_entries
-SET state = 'claimed',
-    claimed_by = ?,
-    claimed_at = CURRENT_TIMESTAMP,
-    lease_id = ?,
-    attempts = attempts + 1
-WHERE id = (
-    SELECT id FROM queue_entries
-    WHERE state = 'pending'
-    ORDER BY priority DESC, created_at ASC
-    LIMIT 1
-)
-RETURNING id, definition, priority, created_at, attempts, claimed_by, claimed_at, lease_id, metadata;
+-- name: InsertQueueTags :exec
+INSERT INTO queue_entry_tags (entry_id, tag)
+VALUES (@entry_id, @tag);
 
 -- name: ReleaseWorkflow :exec
 UPDATE queue_entries

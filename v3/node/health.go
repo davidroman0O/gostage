@@ -27,25 +27,36 @@ type HealthEvent struct {
 // HealthDispatcher manages subscriptions for health events.
 type HealthDispatcher struct {
 	mu   deadlock.RWMutex
-	subs []func(HealthEvent)
+	subs map[int64]func(HealthEvent)
+	next int64
 }
 
 func NewHealthDispatcher() *HealthDispatcher {
-	return &HealthDispatcher{subs: make([]func(HealthEvent), 0)}
+	return &HealthDispatcher{subs: make(map[int64]func(HealthEvent))}
 }
 
-func (h *HealthDispatcher) Subscribe(fn func(HealthEvent)) {
+func (h *HealthDispatcher) Subscribe(fn func(HealthEvent)) func() {
 	if fn == nil {
-		return
+		return func() {}
 	}
 	h.mu.Lock()
-	h.subs = append(h.subs, fn)
+	id := h.next
+	h.next++
+	h.subs[id] = fn
 	h.mu.Unlock()
+	return func() {
+		h.mu.Lock()
+		delete(h.subs, id)
+		h.mu.Unlock()
+	}
 }
 
 func (h *HealthDispatcher) Publish(evt HealthEvent) {
 	h.mu.RLock()
-	subs := append([]func(HealthEvent){}, h.subs...)
+	subs := make([]func(HealthEvent), 0, len(h.subs))
+	for _, fn := range h.subs {
+		subs = append(subs, fn)
+	}
 	h.mu.RUnlock()
 	for _, fn := range subs {
 		fn(evt)

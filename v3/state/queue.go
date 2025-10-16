@@ -13,5 +13,6 @@ type Queue interface {
 	Ack(ctx context.Context, id WorkflowID, summary ResultSummary) error
 	Cancel(ctx context.Context, id WorkflowID) error
 	Stats(ctx context.Context) (QueueStats, error)
+	PendingCount(ctx context.Context, sel Selector) (int, error)
 	Close() error
 }

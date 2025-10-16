@@ -46,6 +46,58 @@ func (q *Queries) InsertTelemetryEvent(ctx context.Context, arg InsertTelemetryE
 	return err
 }
 
+const listLatestActionProgress = `-- name: ListLatestActionProgress :many
+SELECT te.stage_id, te.action_id, te.metadata, te.message
+FROM telemetry_events te
+JOIN (
+    SELECT stage_id, action_id, MAX(id) AS max_id
+    FROM telemetry_events tp
+    WHERE tp.workflow_id = ? AND tp.kind = 'action.progress'
+    GROUP BY tp.stage_id, tp.action_id
+) latest ON te.stage_id = latest.stage_id AND te.action_id = latest.action_id AND te.id = latest.max_id
+WHERE te.workflow_id = ? AND te.kind = 'action.progress'
+`
+
+type ListLatestActionProgressParams struct {
+	WorkflowID   sql.NullString `json:"workflow_id"`
+	WorkflowID_2 sql.NullString `json:"workflow_id_2"`
+}
+
+type ListLatestActionProgressRow struct {
+	StageID  sql.NullString `json:"stage_id"`
+	ActionID sql.NullString `json:"action_id"`
+	Metadata []byte         `json:"metadata"`
+	Message  sql.NullString `json:"message"`
+}
+
+func (q *Queries) ListLatestActionProgress(ctx context.Context, arg ListLatestActionProgressParams) ([]ListLatestActionProgressRow, error) {
+	rows, err := q.query(ctx, q.listLatestActionProgressStmt, listLatestActionProgress, arg.WorkflowID, arg.WorkflowID_2)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListLatestActionProgressRow
+	for rows.Next() {
+		var i ListLatestActionProgressRow
+		if err := rows.Scan(
+			&i.StageID,
+			&i.ActionID,
+			&i.Metadata,
+			&i.Message,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTelemetryByWorkflow = `-- name: ListTelemetryByWorkflow :many
 SELECT workflow_id, stage_id, action_id, kind, attempt, occurred_at, message, metadata, error
 FROM telemetry_events

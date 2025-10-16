@@ -33,50 +33,75 @@ func TestSQLiteStoreWaitResult(t *testing.T) {
 		t.Fatalf("record workflow: %v", err)
 	}
 
-	stage := workflow.Stage{ID: "stage-1", Name: "Prepare"}
-	if err := store.RecordStage(ctx, wfID, stage, false, "", WorkflowRunning); err != nil {
+	stageDef := workflow.Stage{
+		Name:    "Prepare",
+		Actions: []workflow.Action{{Ref: "prepare.ref"}},
+	}
+	stageNormalized, _, err := workflow.EnsureIDs(workflow.Definition{Stages: []workflow.Stage{stageDef}})
+	if err != nil {
+		t.Fatalf("ensure ids: %v", err)
+	}
+	stage := stageNormalized.Stages[0]
+	action := stage.Actions[0]
+	stageRecord := StageRecord{
+		ID:        stage.ID,
+		Name:      stage.Name,
+		Tags:      append([]string(nil), stage.Tags...),
+		Dynamic:   false,
+		CreatedBy: "",
+		Status:    WorkflowRunning,
+	}
+	if err := store.RecordStage(ctx, wfID, stageRecord); err != nil {
 		t.Fatalf("record stage: %v", err)
 	}
-	action := workflow.Action{ID: "action-1", Ref: "prepare.ref"}
-	if err := store.RecordAction(ctx, wfID, stage.ID, action, false, "", WorkflowRunning); err != nil {
+	actionRecord := ActionRecord{
+		Name:      action.ID,
+		Ref:       action.Ref,
+		Tags:      append([]string(nil), action.Tags...),
+		Dynamic:   false,
+		CreatedBy: "",
+		Status:    WorkflowRunning,
+	}
+	if err := store.RecordAction(ctx, wfID, stage.ID, actionRecord); err != nil {
 		t.Fatalf("record action: %v", err)
 	}
-
-	done := make(chan ResultSummary, 1)
-	errCh := make(chan error, 1)
-	go func() {
-		res, err := store.WaitResult(ctx, wfID)
-		if err != nil {
-			errCh <- err
-			return
-		}
-		done <- res
-	}()
 
 	summary := ResultSummary{
 		Success:        true,
 		Output:         map[string]any{"status": "ok"},
-		DisabledStages: map[string]bool{"stage-1": false},
-	}
-	if err := store.StoreSummary(ctx, wfID, summary); err != nil {
-		t.Fatalf("store summary: %v", err)
+		DisabledStages: map[string]bool{stage.ID: false},
 	}
 
-	select {
-	case err := <-errCh:
-		t.Fatalf("wait result: %v", err)
-	case res := <-done:
-		if !res.Success || res.Output["status"] != "ok" {
-			t.Fatalf("summary mismatch: %#v", res)
+	go func() {
+		// Ensure the waiter has been registered before storing the summary to
+		// avoid racing with the synchronous fetch path.
+		time.Sleep(10 * time.Millisecond)
+		if err := store.StoreSummary(ctx, wfID, summary); err != nil {
+			t.Errorf("store summary: %v", err)
 		}
+	}()
+
+	res, err := store.WaitResult(ctx, wfID)
+	if err != nil {
+		t.Fatalf("wait result: %v", err)
+	}
+	if !res.Success || res.Output["status"] != "ok" {
+		t.Fatalf("summary mismatch: %#v", res)
 	}
 
 	// Update workflow state to completed.
-	rec.State = WorkflowCompleted
-	rec.Success = true
-	rec.CompletedAt = func() *time.Time { t := time.Now(); return &t }()
-	rec.Duration = time.Second
-	if err := store.RecordWorkflow(ctx, rec); err != nil {
+	completedAt := time.Now()
+	duration := time.Second
+	success := true
+	errorMsg := ""
+	if err := store.UpdateWorkflowStatus(ctx, WorkflowStatusUpdate{
+		ID:          wfID,
+		Status:      WorkflowCompleted,
+		CompletedAt: &completedAt,
+		Duration:    &duration,
+		Success:     &success,
+		Error:       &errorMsg,
+	}); err != nil {
 		t.Fatalf("record workflow update: %v", err)
 	}
 
@@ -92,7 +117,7 @@ func TestSQLiteStoreWaitResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("action history: %v", err)
 	}
-	if len(history) != 1 || history[0].ActionID != "action-1" {
+	if len(history) != 1 || history[0].ActionID != action.ID || history[0].StageID != stage.ID {
 		t.Fatalf("unexpected history: %#v", history)
 	}
 }

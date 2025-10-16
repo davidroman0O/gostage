@@ -14,7 +14,8 @@ import (
 type TelemetryDispatcher struct {
 	mu deadlock.RWMutex
 
-	sinks []telemetry.Sink
+	sinks  map[int64]telemetry.Sink
+	nextID int64
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -40,6 +41,7 @@ func NewTelemetryDispatcher(ctx context.Context, diag DiagnosticsWriter) *Teleme
 		cancel: cancel,
 		events: make(chan telemetry.Event, 256),
 		diag:   diag,
+		sinks:  make(map[int64]telemetry.Sink),
 	}
 	d.wg.Add(1)
 	go d.run()
@@ -54,7 +56,10 @@ func (d *TelemetryDispatcher) run() {
 			return
 		case evt := <-d.events:
 			d.mu.RLock()
-			sinks := append([]telemetry.Sink(nil), d.sinks...)
+			sinks := make([]telemetry.Sink, 0, len(d.sinks))
+			for _, sink := range d.sinks {
+				sinks = append(sinks, sink)
+			}
 			d.mu.RUnlock()
 			for _, sink := range sinks {
 				sink := sink
@@ -87,19 +92,26 @@ func (d *TelemetryDispatcher) Dispatch(evt telemetry.Event) {
 			Component: "telemetry.dispatcher",
 			Severity:  diagnostics.SeverityWarning,
 			Err:       fmt.Errorf("telemetry buffer full; dropping event"),
-			Metadata:  map[string]any{"kind": evt.Kind},
+			Metadata:  map[string]any{"kind": string(evt.Kind)},
 		})
 	}
 }
 
 // Register adds a sink (idempotent for nil values).
-func (d *TelemetryDispatcher) Register(sink telemetry.Sink) {
+func (d *TelemetryDispatcher) Register(sink telemetry.Sink) func() {
 	if sink == nil {
-		return
+		return func() {}
 	}
 	d.mu.Lock()
-	d.sinks = append(d.sinks, sink)
+	id := d.nextID
+	d.nextID++
+	d.sinks[id] = sink
 	d.mu.Unlock()
+	return func() {
+		d.mu.Lock()
+		delete(d.sinks, id)
+		d.mu.Unlock()
+	}
 }
 
 func (d *TelemetryDispatcher) Close() {

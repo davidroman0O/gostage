@@ -30,9 +30,6 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.cancelWorkflowStmt, err = db.PrepareContext(ctx, cancelWorkflow); err != nil {
 		return nil, fmt.Errorf("error preparing query CancelWorkflow: %w", err)
 	}
-	if q.claimNextWorkflowStmt, err = db.PrepareContext(ctx, claimNextWorkflow); err != nil {
-		return nil, fmt.Errorf("error preparing query ClaimNextWorkflow: %w", err)
-	}
 	if q.enqueueWorkflowStmt, err = db.PrepareContext(ctx, enqueueWorkflow); err != nil {
 		return nil, fmt.Errorf("error preparing query EnqueueWorkflow: %w", err)
 	}
@@ -45,6 +42,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.insertActionRunStmt, err = db.PrepareContext(ctx, insertActionRun); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertActionRun: %w", err)
 	}
+	if q.insertQueueTagsStmt, err = db.PrepareContext(ctx, insertQueueTags); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertQueueTags: %w", err)
+	}
 	if q.insertStageRunStmt, err = db.PrepareContext(ctx, insertStageRun); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertStageRun: %w", err)
 	}
@@ -54,17 +54,29 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listActionsByWorkflowStmt, err = db.PrepareContext(ctx, listActionsByWorkflow); err != nil {
 		return nil, fmt.Errorf("error preparing query ListActionsByWorkflow: %w", err)
 	}
-	if q.listAllWorkflowsStmt, err = db.PrepareContext(ctx, listAllWorkflows); err != nil {
-		return nil, fmt.Errorf("error preparing query ListAllWorkflows: %w", err)
+	if q.listLatestActionProgressStmt, err = db.PrepareContext(ctx, listLatestActionProgress); err != nil {
+		return nil, fmt.Errorf("error preparing query ListLatestActionProgress: %w", err)
 	}
 	if q.listTelemetryByWorkflowStmt, err = db.PrepareContext(ctx, listTelemetryByWorkflow); err != nil {
 		return nil, fmt.Errorf("error preparing query ListTelemetryByWorkflow: %w", err)
+	}
+	if q.listWorkflowsFilteredStmt, err = db.PrepareContext(ctx, listWorkflowsFiltered); err != nil {
+		return nil, fmt.Errorf("error preparing query ListWorkflowsFiltered: %w", err)
 	}
 	if q.queueStatsStmt, err = db.PrepareContext(ctx, queueStats); err != nil {
 		return nil, fmt.Errorf("error preparing query QueueStats: %w", err)
 	}
 	if q.releaseWorkflowStmt, err = db.PrepareContext(ctx, releaseWorkflow); err != nil {
 		return nil, fmt.Errorf("error preparing query ReleaseWorkflow: %w", err)
+	}
+	if q.updateActionStatusStmt, err = db.PrepareContext(ctx, updateActionStatus); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateActionStatus: %w", err)
+	}
+	if q.updateStageStatusStmt, err = db.PrepareContext(ctx, updateStageStatus); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateStageStatus: %w", err)
+	}
+	if q.updateWorkflowStatusStmt, err = db.PrepareContext(ctx, updateWorkflowStatus); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateWorkflowStatus: %w", err)
 	}
 	if q.upsertExecutionSummaryStmt, err = db.PrepareContext(ctx, upsertExecutionSummary); err != nil {
 		return nil, fmt.Errorf("error preparing query UpsertExecutionSummary: %w", err)
@@ -87,11 +99,6 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing cancelWorkflowStmt: %w", cerr)
 		}
 	}
-	if q.claimNextWorkflowStmt != nil {
-		if cerr := q.claimNextWorkflowStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing claimNextWorkflowStmt: %w", cerr)
-		}
-	}
 	if q.enqueueWorkflowStmt != nil {
 		if cerr := q.enqueueWorkflowStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing enqueueWorkflowStmt: %w", cerr)
@@ -112,6 +119,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing insertActionRunStmt: %w", cerr)
 		}
 	}
+	if q.insertQueueTagsStmt != nil {
+		if cerr := q.insertQueueTagsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertQueueTagsStmt: %w", cerr)
+		}
+	}
 	if q.insertStageRunStmt != nil {
 		if cerr := q.insertStageRunStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertStageRunStmt: %w", cerr)
@@ -127,14 +139,19 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listActionsByWorkflowStmt: %w", cerr)
 		}
 	}
-	if q.listAllWorkflowsStmt != nil {
-		if cerr := q.listAllWorkflowsStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing listAllWorkflowsStmt: %w", cerr)
+	if q.listLatestActionProgressStmt != nil {
+		if cerr := q.listLatestActionProgressStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listLatestActionProgressStmt: %w", cerr)
 		}
 	}
 	if q.listTelemetryByWorkflowStmt != nil {
 		if cerr := q.listTelemetryByWorkflowStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listTelemetryByWorkflowStmt: %w", cerr)
+		}
+	}
+	if q.listWorkflowsFilteredStmt != nil {
+		if cerr := q.listWorkflowsFilteredStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listWorkflowsFilteredStmt: %w", cerr)
 		}
 	}
 	if q.queueStatsStmt != nil {
@@ -145,6 +162,21 @@ func (q *Queries) Close() error {
 	if q.releaseWorkflowStmt != nil {
 		if cerr := q.releaseWorkflowStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing releaseWorkflowStmt: %w", cerr)
+		}
+	}
+	if q.updateActionStatusStmt != nil {
+		if cerr := q.updateActionStatusStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateActionStatusStmt: %w", cerr)
+		}
+	}
+	if q.updateStageStatusStmt != nil {
+		if cerr := q.updateStageStatusStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateStageStatusStmt: %w", cerr)
+		}
+	}
+	if q.updateWorkflowStatusStmt != nil {
+		if cerr := q.updateWorkflowStatusStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateWorkflowStatusStmt: %w", cerr)
 		}
 	}
 	if q.upsertExecutionSummaryStmt != nil {
@@ -194,45 +226,53 @@ func (q *Queries) queryRow(ctx context.Context, stmt *sql.Stmt, query string, ar
 }
 
 type Queries struct {
-	db                          DBTX
-	tx                          *sql.Tx
-	ackWorkflowStmt             *sql.Stmt
-	cancelWorkflowStmt          *sql.Stmt
-	claimNextWorkflowStmt       *sql.Stmt
-	enqueueWorkflowStmt         *sql.Stmt
-	getExecutionSummaryStmt     *sql.Stmt
-	getWorkflowSummaryStmt      *sql.Stmt
-	insertActionRunStmt         *sql.Stmt
-	insertStageRunStmt          *sql.Stmt
-	insertTelemetryEventStmt    *sql.Stmt
-	listActionsByWorkflowStmt   *sql.Stmt
-	listAllWorkflowsStmt        *sql.Stmt
-	listTelemetryByWorkflowStmt *sql.Stmt
-	queueStatsStmt              *sql.Stmt
-	releaseWorkflowStmt         *sql.Stmt
-	upsertExecutionSummaryStmt  *sql.Stmt
-	upsertWorkflowRunStmt       *sql.Stmt
+	db                           DBTX
+	tx                           *sql.Tx
+	ackWorkflowStmt              *sql.Stmt
+	cancelWorkflowStmt           *sql.Stmt
+	enqueueWorkflowStmt          *sql.Stmt
+	getExecutionSummaryStmt      *sql.Stmt
+	getWorkflowSummaryStmt       *sql.Stmt
+	insertActionRunStmt          *sql.Stmt
+	insertQueueTagsStmt          *sql.Stmt
+	insertStageRunStmt           *sql.Stmt
+	insertTelemetryEventStmt     *sql.Stmt
+	listActionsByWorkflowStmt    *sql.Stmt
+	listLatestActionProgressStmt *sql.Stmt
+	listTelemetryByWorkflowStmt  *sql.Stmt
+	listWorkflowsFilteredStmt    *sql.Stmt
+	queueStatsStmt               *sql.Stmt
+	releaseWorkflowStmt          *sql.Stmt
+	updateActionStatusStmt       *sql.Stmt
+	updateStageStatusStmt        *sql.Stmt
+	updateWorkflowStatusStmt     *sql.Stmt
+	upsertExecutionSummaryStmt   *sql.Stmt
+	upsertWorkflowRunStmt        *sql.Stmt
 }
 
 func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 	return &Queries{
-		db:                          tx,
-		tx:                          tx,
-		ackWorkflowStmt:             q.ackWorkflowStmt,
-		cancelWorkflowStmt:          q.cancelWorkflowStmt,
-		claimNextWorkflowStmt:       q.claimNextWorkflowStmt,
-		enqueueWorkflowStmt:         q.enqueueWorkflowStmt,
-		getExecutionSummaryStmt:     q.getExecutionSummaryStmt,
-		getWorkflowSummaryStmt:      q.getWorkflowSummaryStmt,
-		insertActionRunStmt:         q.insertActionRunStmt,
-		insertStageRunStmt:          q.insertStageRunStmt,
-		insertTelemetryEventStmt:    q.insertTelemetryEventStmt,
-		listActionsByWorkflowStmt:   q.listActionsByWorkflowStmt,
-		listAllWorkflowsStmt:        q.listAllWorkflowsStmt,
-		listTelemetryByWorkflowStmt: q.listTelemetryByWorkflowStmt,
-		queueStatsStmt:              q.queueStatsStmt,
-		releaseWorkflowStmt:         q.releaseWorkflowStmt,
-		upsertExecutionSummaryStmt:  q.upsertExecutionSummaryStmt,
-		upsertWorkflowRunStmt:       q.upsertWorkflowRunStmt,
+		db:                           tx,
+		tx:                           tx,
+		ackWorkflowStmt:              q.ackWorkflowStmt,
+		cancelWorkflowStmt:           q.cancelWorkflowStmt,
+		enqueueWorkflowStmt:          q.enqueueWorkflowStmt,
+		getExecutionSummaryStmt:      q.getExecutionSummaryStmt,
+		getWorkflowSummaryStmt:       q.getWorkflowSummaryStmt,
+		insertActionRunStmt:          q.insertActionRunStmt,
+		insertQueueTagsStmt:          q.insertQueueTagsStmt,
+		insertStageRunStmt:           q.insertStageRunStmt,
+		insertTelemetryEventStmt:     q.insertTelemetryEventStmt,
+		listActionsByWorkflowStmt:    q.listActionsByWorkflowStmt,
+		listLatestActionProgressStmt: q.listLatestActionProgressStmt,
+		listTelemetryByWorkflowStmt:  q.listTelemetryByWorkflowStmt,
+		listWorkflowsFilteredStmt:    q.listWorkflowsFilteredStmt,
+		queueStatsStmt:               q.queueStatsStmt,
+		releaseWorkflowStmt:          q.releaseWorkflowStmt,
+		updateActionStatusStmt:       q.updateActionStatusStmt,
+		updateStageStatusStmt:        q.updateStageStatusStmt,
+		updateWorkflowStatusStmt:     q.updateWorkflowStatusStmt,
+		upsertExecutionSummaryStmt:   q.upsertExecutionSummaryStmt,
+		upsertWorkflowRunStmt:        q.upsertWorkflowRunStmt,
 	}
 }

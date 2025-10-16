@@ -4,13 +4,14 @@ import (
 	"fmt"
 
 	"github.com/davidroman0O/gostage/v3/registry"
-	"github.com/davidroman0O/gostage/v3/types"
+	rt "github.com/davidroman0O/gostage/v3/runtime"
 	"github.com/davidroman0O/gostage/v3/workflow"
+	"github.com/google/uuid"
 	deadlock "github.com/sasha-s/go-deadlock"
 )
 
 // ActionFunc is the callable executed for a registered action.
-type ActionFunc func(types.Context) error
+type ActionFunc func(rt.Context) error
 
 // ActionFactory constructs an ActionFunc instance per invocation.
 type ActionFactory func() ActionFunc
@@ -67,7 +68,7 @@ func RegisterAction(name string, factory ActionFactory, opts ...ActionOption) er
 			opt(&meta)
 		}
 	}
-	run := func(ctx types.Context) error {
+	run := func(ctx rt.Context) error {
 		fn := factory()
 		if fn == nil {
 			return fmt.Errorf("gostage: action %s factory returned nil", name)
@@ -78,26 +79,38 @@ func RegisterAction(name string, factory ActionFactory, opts ...ActionOption) er
 }
 
 var (
-	workflowsMu deadlock.RWMutex
-	workflows   = make(map[string]workflow.Definition)
+	workflowsMu         deadlock.RWMutex
+	workflows           = make(map[string]workflow.Definition)
+	workflowAssignments = make(map[string]workflow.IDAssignment)
 )
 
 // MustRegisterWorkflow stores a workflow definition for later submission.
-func MustRegisterWorkflow(def workflow.Definition) {
-	if err := RegisterWorkflow(def); err != nil {
+// It returns the workflow ID alongside the generated identifier mapping.
+func MustRegisterWorkflow(def workflow.Definition) (string, workflow.IDAssignment) {
+	id, assignment, err := RegisterWorkflow(def)
+	if err != nil {
 		panic(err)
 	}
+	return id, assignment
 }
 
 // RegisterWorkflow stores the workflow definition; successive registrations overwrite the previous copy.
-func RegisterWorkflow(def workflow.Definition) error {
-	if def.ID == "" {
-		return fmt.Errorf("gostage: workflow id required")
+// The returned assignment details the identifiers associated with each stage and action.
+func RegisterWorkflow(def workflow.Definition) (string, workflow.IDAssignment, error) {
+	id := def.ID
+	if id == "" {
+		id = generateWorkflowID()
 	}
+	clone, assignment, err := workflow.EnsureIDs(def)
+	if err != nil {
+		return "", workflow.IDAssignment{}, err
+	}
+	clone.ID = id
 	workflowsMu.Lock()
-	workflows[def.ID] = def.Clone()
+	workflows[id] = clone
+	workflowAssignments[id] = assignment
 	workflowsMu.Unlock()
-	return nil
+	return id, cloneAssignment(assignment), nil
 }
 
 // WorkflowRef resolves a workflow definition by ID at submission time.
@@ -107,7 +120,15 @@ func WorkflowRef(id string) WorkflowReference {
 
 // WorkflowDefinition wraps an inline definition as a submission reference.
 func WorkflowDefinition(def workflow.Definition) WorkflowReference {
-	return workflowInlineRef{def: def.Clone()}
+	clone, assignment, err := workflow.EnsureIDs(def)
+	if err != nil {
+		// Defer error propagation to submission time by storing the failure.
+		return workflowErrorRef{err: err}
+	}
+	if clone.ID == "" {
+		clone.ID = generateWorkflowID()
+	}
+	return workflowInlineRef{def: clone, assignment: assignment}
 }
 
 // WorkflowReference resolves a workflow definition lazily during submission.
@@ -133,14 +154,20 @@ func (r workflowIDRef) resolve() (workflow.Definition, error) {
 }
 
 type workflowInlineRef struct {
-	def workflow.Definition
+	def        workflow.Definition
+	assignment workflow.IDAssignment
 }
 
 func (r workflowInlineRef) resolve() (workflow.Definition, error) {
-	if r.def.ID == "" {
-		return workflow.Definition{}, fmt.Errorf("gostage: workflow id required")
-	}
 	return r.def.Clone(), nil
+}
+
+type workflowErrorRef struct {
+	err error
+}
+
+func (r workflowErrorRef) resolve() (workflow.Definition, error) {
+	return workflow.Definition{}, r.err
 }
 
 // ResolveWorkflow exposes registered definitions (primarily for tests).
@@ -154,6 +181,33 @@ func ResolveWorkflow(id string) (workflow.Definition, bool) {
 	return def.Clone(), true
 }
 
+// WorkflowIDs returns the identifier assignment associated with a registered workflow.
+func WorkflowIDs(id string) (workflow.IDAssignment, bool) {
+	workflowsMu.RLock()
+	assignment, ok := workflowAssignments[id]
+	workflowsMu.RUnlock()
+	if !ok {
+		return workflow.IDAssignment{}, false
+	}
+	return cloneAssignment(assignment), true
+}
+
+// WorkflowReferenceIDs attempts to resolve the identifier assignment for the provided reference.
+// For registered workflows, it delegates to WorkflowIDs; for inline definitions it returns the
+// mapping captured during WorkflowDefinition.
+func WorkflowReferenceIDs(ref WorkflowReference) (workflow.IDAssignment, bool) {
+	switch v := ref.(type) {
+	case workflowIDRef:
+		return WorkflowIDs(v.id)
+	case workflowInlineRef:
+		return cloneAssignment(v.assignment), true
+	case workflowErrorRef:
+		return workflow.IDAssignment{}, false
+	default:
+		return workflow.IDAssignment{}, false
+	}
+}
+
 // RegisteredWorkflows returns the list of workflow IDs currently registered.
 func RegisteredWorkflows() []string {
 	workflowsMu.RLock()
@@ -163,4 +217,20 @@ func RegisteredWorkflows() []string {
 	}
 	workflowsMu.RUnlock()
 	return ids
+}
+
+func generateWorkflowID() string {
+	return uuid.NewString()
+}
+
+func cloneAssignment(in workflow.IDAssignment) workflow.IDAssignment {
+	out := workflow.IDAssignment{Stages: make([]workflow.StageIDAssignment, len(in.Stages))}
+	for i, stage := range in.Stages {
+		stageCopy := stage
+		if len(stage.Actions) > 0 {
+			stageCopy.Actions = append([]workflow.ActionIDAssignment(nil), stage.Actions...)
+		}
+		out.Stages[i] = stageCopy
+	}
+	return out
 }

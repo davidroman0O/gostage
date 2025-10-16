@@ -36,7 +36,30 @@ func (r *SQLiteStateReader) WorkflowSummary(ctx context.Context, id WorkflowID) 
 }
 
 func (r *SQLiteStateReader) ListWorkflows(ctx context.Context, filter StateFilter) ([]WorkflowSummary, error) {
-	rows, err := r.queries.ListAllWorkflows(ctx)
+	stateJSON, err := encodeStringArray(workflowStatesToStrings(filter.States))
+	if err != nil {
+		return nil, err
+	}
+	typeJSON, err := encodeStringArray(filter.Type)
+	if err != nil {
+		return nil, err
+	}
+	tagJSON, err := encodeStringArray(filter.Tags)
+	if err != nil {
+		return nil, err
+	}
+
+	params := sqlc.ListWorkflowsFilteredParams{
+		StatesJson: stateJSON,
+		TypeJson:   typeJSON,
+		TagsJson:   tagJSON,
+		FromTime:   filter.From,
+		ToTime:     filter.To,
+		OffsetRows: int64(filter.Offset),
+		LimitRows:  int64(filter.Limit),
+	}
+
+	rows, err := r.queries.ListWorkflowsFiltered(ctx, params)
 	if err != nil {
 		return nil, err
 	}
@@ -46,13 +69,7 @@ func (r *SQLiteStateReader) ListWorkflows(ctx context.Context, filter StateFilte
 		if err != nil {
 			return nil, err
 		}
-		if !matchesFilter(summary, filter) {
-			continue
-		}
 		out = append(out, summary)
-	}
-	if filter.Limit > 0 && len(out) > filter.Limit {
-		out = out[:filter.Limit]
 	}
 	return out, nil
 }
@@ -61,6 +78,47 @@ func (r *SQLiteStateReader) ActionHistory(ctx context.Context, id WorkflowID) ([
 	rows, err := r.queries.ListActionsByWorkflow(ctx, string(id))
 	if err != nil {
 		return nil, err
+	}
+
+	progressMap := make(map[string]struct {
+		progress int
+		message  string
+	})
+	progressRows, err := r.queries.ListLatestActionProgress(ctx, sqlc.ListLatestActionProgressParams{
+		WorkflowID:   sql.NullString{String: string(id), Valid: true},
+		WorkflowID_2: sql.NullString{String: string(id), Valid: true},
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range progressRows {
+		if !row.StageID.Valid || !row.ActionID.Valid {
+			continue
+		}
+		var meta map[string]any
+		if len(row.Metadata) > 0 {
+			_ = json.Unmarshal(row.Metadata, &meta)
+		}
+		progress := 0
+		if val, ok := meta["progress"]; ok {
+			switch v := val.(type) {
+			case float64:
+				progress = int(v)
+			case int:
+				progress = v
+			case int64:
+				progress = int(v)
+			}
+		}
+		msg := ""
+		if row.Message.Valid {
+			msg = row.Message.String
+		}
+		key := row.StageID.String + "::" + row.ActionID.String
+		progressMap[key] = struct {
+			progress int
+			message  string
+		}{progress: progress, message: msg}
 	}
 	history := make([]ActionHistoryRecord, 0, len(rows))
 	for _, row := range rows {
@@ -84,6 +142,11 @@ func (r *SQLiteStateReader) ActionHistory(ctx context.Context, id WorkflowID) ([
 		if row.CompletedAt.Valid {
 			t := row.CompletedAt.Time
 			record.CompletedAt = &t
+		}
+		key := record.StageID + "::" + record.ActionID
+		if entry, ok := progressMap[key]; ok {
+			record.Progress = entry.progress
+			record.Message = entry.message
 		}
 		history = append(history, record)
 	}
@@ -133,54 +196,24 @@ func convertWorkflowRow(row sqlc.WorkflowRun) (WorkflowSummary, error) {
 	return summary, nil
 }
 
-func matchesFilter(summary WorkflowSummary, filter StateFilter) bool {
-	if len(filter.States) > 0 {
-		match := false
-		for _, st := range filter.States {
-			if summary.State == st {
-				match = true
-				break
-			}
-		}
-		if !match {
-			return false
-		}
+func encodeStringArray(values []string) (interface{}, error) {
+	if len(values) == 0 {
+		return nil, nil
 	}
-	if len(filter.Tags) > 0 {
-		if !hasAll(summary.Tags, filter.Tags) {
-			return false
-		}
+	data, err := json.Marshal(values)
+	if err != nil {
+		return nil, err
 	}
-	if len(filter.Type) > 0 {
-		match := false
-		for _, t := range filter.Type {
-			if summary.Type == t {
-				match = true
-				break
-			}
-		}
-		if !match {
-			return false
-		}
-	}
-	if filter.From != nil && summary.CreatedAt.Before(*filter.From) {
-		return false
-	}
-	if filter.To != nil && summary.CreatedAt.After(*filter.To) {
-		return false
-	}
-	return true
+	return string(data), nil
 }
 
-func hasAll(values []string, required []string) bool {
-	set := make(map[string]struct{}, len(values))
-	for _, v := range values {
-		set[v] = struct{}{}
+func workflowStatesToStrings(states []WorkflowState) []string {
+	if len(states) == 0 {
+		return nil
 	}
-	for _, r := range required {
-		if _, ok := set[r]; !ok {
-			return false
-		}
+	out := make([]string, len(states))
+	for i, st := range states {
+		out[i] = string(st)
 	}
-	return true
+	return out
 }

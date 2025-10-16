@@ -204,14 +204,65 @@ func (q *Queries) ListActionsByWorkflow(ctx context.Context, workflowID string) 
 	return items, nil
 }
 
-const listAllWorkflows = `-- name: ListAllWorkflows :many
+const listWorkflowsFiltered = `-- name: ListWorkflowsFiltered :many
 SELECT id, name, description, type, tags, metadata, created_at, started_at, completed_at, duration, state, success, error
 FROM workflow_runs
+WHERE
+    (
+        ?1 IS NULL
+        OR EXISTS (
+            SELECT 1
+            FROM json_each(COALESCE(?1, '[]')) AS state_filter
+            WHERE workflow_runs.state = state_filter.value
+        )
+    )
+    AND (
+        ?2 IS NULL
+        OR EXISTS (
+            SELECT 1
+            FROM json_each(COALESCE(?2, '[]')) AS type_filter
+            WHERE workflow_runs.type = type_filter.value
+        )
+    )
+    AND (
+        ?3 IS NULL
+        OR EXISTS (
+            SELECT 1
+            FROM json_each(COALESCE(?3, '[]')) AS tag_filter
+            WHERE EXISTS (
+                SELECT 1
+                FROM json_each(workflow_runs.tags) AS wf_tag
+                WHERE wf_tag.value = tag_filter.value
+            )
+        )
+    )
+    AND (?4 IS NULL OR workflow_runs.created_at >= ?4)
+    AND (?5 IS NULL OR workflow_runs.created_at <= ?5)
 ORDER BY created_at DESC
+LIMIT CASE WHEN ?7 IS NULL OR ?7 <= 0 THEN -1 ELSE ?7 END
+OFFSET COALESCE(?6, 0)
 `
 
-func (q *Queries) ListAllWorkflows(ctx context.Context) ([]WorkflowRun, error) {
-	rows, err := q.query(ctx, q.listAllWorkflowsStmt, listAllWorkflows)
+type ListWorkflowsFilteredParams struct {
+	StatesJson interface{} `json:"states_json"`
+	TypeJson   interface{} `json:"type_json"`
+	TagsJson   interface{} `json:"tags_json"`
+	FromTime   interface{} `json:"from_time"`
+	ToTime     interface{} `json:"to_time"`
+	OffsetRows interface{} `json:"offset_rows"`
+	LimitRows  interface{} `json:"limit_rows"`
+}
+
+func (q *Queries) ListWorkflowsFiltered(ctx context.Context, arg ListWorkflowsFilteredParams) ([]WorkflowRun, error) {
+	rows, err := q.query(ctx, q.listWorkflowsFilteredStmt, listWorkflowsFiltered,
+		arg.StatesJson,
+		arg.TypeJson,
+		arg.TagsJson,
+		arg.FromTime,
+		arg.ToTime,
+		arg.OffsetRows,
+		arg.LimitRows,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -245,6 +296,102 @@ func (q *Queries) ListAllWorkflows(ctx context.Context) ([]WorkflowRun, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+const updateActionStatus = `-- name: UpdateActionStatus :exec
+UPDATE action_runs
+SET
+    state = ?1,
+    started_at = COALESCE(?2, action_runs.started_at),
+    completed_at = COALESCE(?3, action_runs.completed_at)
+WHERE workflow_id = ?4
+  AND stage_id = ?5
+  AND action_id = ?6
+`
+
+type UpdateActionStatusParams struct {
+	State       string       `json:"state"`
+	StartedAt   sql.NullTime `json:"started_at"`
+	CompletedAt sql.NullTime `json:"completed_at"`
+	WorkflowID  string       `json:"workflow_id"`
+	StageID     string       `json:"stage_id"`
+	ActionID    string       `json:"action_id"`
+}
+
+func (q *Queries) UpdateActionStatus(ctx context.Context, arg UpdateActionStatusParams) error {
+	_, err := q.exec(ctx, q.updateActionStatusStmt, updateActionStatus,
+		arg.State,
+		arg.StartedAt,
+		arg.CompletedAt,
+		arg.WorkflowID,
+		arg.StageID,
+		arg.ActionID,
+	)
+	return err
+}
+
+const updateStageStatus = `-- name: UpdateStageStatus :exec
+UPDATE stage_runs
+SET
+    state = ?1,
+    started_at = COALESCE(?2, stage_runs.started_at),
+    completed_at = COALESCE(?3, stage_runs.completed_at)
+WHERE workflow_id = ?4
+  AND stage_id = ?5
+`
+
+type UpdateStageStatusParams struct {
+	State       string       `json:"state"`
+	StartedAt   sql.NullTime `json:"started_at"`
+	CompletedAt sql.NullTime `json:"completed_at"`
+	WorkflowID  string       `json:"workflow_id"`
+	StageID     string       `json:"stage_id"`
+}
+
+func (q *Queries) UpdateStageStatus(ctx context.Context, arg UpdateStageStatusParams) error {
+	_, err := q.exec(ctx, q.updateStageStatusStmt, updateStageStatus,
+		arg.State,
+		arg.StartedAt,
+		arg.CompletedAt,
+		arg.WorkflowID,
+		arg.StageID,
+	)
+	return err
+}
+
+const updateWorkflowStatus = `-- name: UpdateWorkflowStatus :exec
+UPDATE workflow_runs
+SET
+    state = ?1,
+    started_at = COALESCE(?2, workflow_runs.started_at),
+    completed_at = COALESCE(?3, workflow_runs.completed_at),
+    duration = COALESCE(?4, workflow_runs.duration),
+    success = COALESCE(?5, workflow_runs.success),
+    error = COALESCE(?6, workflow_runs.error)
+WHERE id = ?7
+`
+
+type UpdateWorkflowStatusParams struct {
+	State       string         `json:"state"`
+	StartedAt   sql.NullTime   `json:"started_at"`
+	CompletedAt sql.NullTime   `json:"completed_at"`
+	Duration    sql.NullInt64  `json:"duration"`
+	Success     sql.NullInt64  `json:"success"`
+	Error       sql.NullString `json:"error"`
+	ID          string         `json:"id"`
+}
+
+func (q *Queries) UpdateWorkflowStatus(ctx context.Context, arg UpdateWorkflowStatusParams) error {
+	_, err := q.exec(ctx, q.updateWorkflowStatusStmt, updateWorkflowStatus,
+		arg.State,
+		arg.StartedAt,
+		arg.CompletedAt,
+		arg.Duration,
+		arg.Success,
+		arg.Error,
+		arg.ID,
+	)
+	return err
 }
 
 const upsertExecutionSummary = `-- name: UpsertExecutionSummary :exec

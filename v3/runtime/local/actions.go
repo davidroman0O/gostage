@@ -1,7 +1,7 @@
 package local
 
 import (
-	"github.com/davidroman0O/gostage/v3/types"
+	rt "github.com/davidroman0O/gostage/v3/runtime"
 	deadlock "github.com/sasha-s/go-deadlock"
 )
 
@@ -10,58 +10,61 @@ const globalStageID = "*"
 type actionContext struct {
 	mu deadlock.RWMutex
 
-	workflow types.Workflow
-	logger   types.Logger
-	broker   types.BrokerCall
+	workflow rt.Workflow
+	logger   rt.Logger
+	broker   rt.Broker
 
-	currentStage  types.Stage
-	currentAction types.Action
+	currentStage  rt.Stage
+	currentAction rt.Action
 	actionIndex   int
 	isLastAction  bool
 
-	dynamicActions []types.Action
-	dynamicStages  []types.Stage
+	dynamicActions []rt.Action
+	dynamicStages  []rt.Stage
 
 	disabledActions map[string]bool
 	disabledStages  map[string]bool
 	removedActions  map[string]map[string]string // stageID -> actionName -> createdBy
 	removedStages   map[string]string            // stageID -> createdBy
 
-	allActions []types.Action
+	allActions []rt.Action
+
+	dynamicStageCounter   int
+	dynamicActionCounters map[string]int
 }
 
-func newActionContext(workflow types.Workflow) *actionContext {
+func newActionContext(workflow rt.Workflow) *actionContext {
 	return &actionContext{
 		workflow:        workflow,
-		dynamicActions:  make([]types.Action, 0),
-		dynamicStages:   make([]types.Stage, 0),
+		dynamicActions:  make([]rt.Action, 0),
+		dynamicStages:   make([]rt.Stage, 0),
 		disabledActions: make(map[string]bool),
 		disabledStages:  make(map[string]bool),
 		removedActions:  make(map[string]map[string]string),
 		removedStages:   make(map[string]string),
-		allActions:      make([]types.Action, 0),
+		allActions:      make([]rt.Action, 0),
 	}
 }
 
-func (ctx *actionContext) setBroker(b types.BrokerCall) {
+func (ctx *actionContext) setBroker(b rt.Broker) {
 	ctx.mu.Lock()
 	defer ctx.mu.Unlock()
 	ctx.broker = b
 }
 
-func (ctx *actionContext) getBroker() types.BrokerCall {
+func (ctx *actionContext) getBroker() rt.Broker {
 	ctx.mu.RLock()
 	defer ctx.mu.RUnlock()
 	return ctx.broker
 }
 
-func (ctx *actionContext) setWorkflow(workflow types.Workflow) {
+func (ctx *actionContext) setWorkflow(workflow rt.Workflow) {
 	ctx.mu.Lock()
 	defer ctx.mu.Unlock()
 	ctx.workflow = workflow
 }
 
-func (ctx *actionContext) setStage(stage types.Stage) {
+func (ctx *actionContext) setStage(stage rt.Stage) {
 	ctx.mu.Lock()
 	defer ctx.mu.Unlock()
 	ctx.currentStage = stage
@@ -80,17 +83,17 @@ func (ctx *actionContext) clearStage() {
 	ctx.allActions = nil
 }
 
-func (ctx *actionContext) refreshActionsLocked(stage types.Stage) {
+func (ctx *actionContext) refreshActionsLocked(stage rt.Stage) {
 	if stage == nil {
 		ctx.allActions = nil
 		return
 	}
 	actions := stage.ActionList()
-	ctx.allActions = make([]types.Action, len(actions))
+	ctx.allActions = make([]rt.Action, len(actions))
 	copy(ctx.allActions, actions)
 }
 
-func (ctx *actionContext) setAction(action types.Action, index int, isLast bool) {
+func (ctx *actionContext) setAction(action rt.Action, index int, isLast bool) {
 	ctx.mu.Lock()
 	defer ctx.mu.Unlock()
 	ctx.currentAction = action
@@ -98,31 +101,31 @@ func (ctx *actionContext) setAction(action types.Action, index int, isLast bool)
 	ctx.isLastAction = isLast
 }
 
-func (ctx *actionContext) setLogger(logger types.Logger) {
+func (ctx *actionContext) setLogger(logger rt.Logger) {
 	ctx.mu.Lock()
 	defer ctx.mu.Unlock()
 	ctx.logger = logger
 }
 
-func (ctx *actionContext) getLogger() types.Logger {
+func (ctx *actionContext) getLogger() rt.Logger {
 	ctx.mu.RLock()
 	defer ctx.mu.RUnlock()
 	return ctx.logger
 }
 
-func (ctx *actionContext) getStage() types.Stage {
+func (ctx *actionContext) getStage() rt.Stage {
 	ctx.mu.RLock()
 	defer ctx.mu.RUnlock()
 	return ctx.currentStage
 }
 
-func (ctx *actionContext) getAction() (types.Action, int, bool) {
+func (ctx *actionContext) getAction() (rt.Action, int, bool) {
 	ctx.mu.RLock()
 	defer ctx.mu.RUnlock()
 	return ctx.currentAction, ctx.actionIndex, ctx.isLastAction
 }
 
-func (ctx *actionContext) consumeDynamicActions() []types.Action {
+func (ctx *actionContext) consumeDynamicActions() []rt.Action {
 	ctx.mu.Lock()
 	defer ctx.mu.Unlock()
 	actions := ctx.dynamicActions
@@ -130,7 +133,7 @@ func (ctx *actionContext) consumeDynamicActions() []types.Action {
 	return actions
 }
 
-func (ctx *actionContext) consumeDynamicStages() []types.Stage {
+func (ctx *actionContext) consumeDynamicStages() []rt.Stage {
 	ctx.mu.Lock()
 	defer ctx.mu.Unlock()
 	stages := ctx.dynamicStages
@@ -155,27 +158,27 @@ func (ctx *actionContext) disabledMaps() (map[string]bool, map[string]bool) {
 	return ctx.disabledActions, ctx.disabledStages
 }
 
-func (ctx *actionContext) populateActions(actions []types.Action) {
+func (ctx *actionContext) populateActions(actions []rt.Action) {
 	ctx.mu.Lock()
 	defer ctx.mu.Unlock()
 
-	ctx.allActions = make([]types.Action, len(actions))
+	ctx.allActions = make([]rt.Action, len(actions))
 	copy(ctx.allActions, actions)
 }
 
-func (ctx *actionContext) addDynamicAction(action types.Action) {
+func (ctx *actionContext) addDynamicAction(action rt.Action) {
 	ctx.mu.Lock()
 	stage := ctx.currentStage
 	currentAction := ctx.currentAction
 	ctx.dynamicActions = append(ctx.dynamicActions, action)
 	ctx.mu.Unlock()
 
-	if recorder, ok := stage.(types.RuntimeStageRecorder); ok {
+	if recorder, ok := stage.(rt.RuntimeStageRecorder); ok {
 		recorder.RecordDynamicAction(action, mutationSource(stage, currentAction))
 	}
 }
 
-func (ctx *actionContext) addDynamicStage(stage types.Stage) {
+func (ctx *actionContext) addDynamicStage(stage rt.Stage) {
 	ctx.mu.Lock()
 	currentStage := ctx.currentStage
 	currentAction := ctx.currentAction
@@ -183,7 +186,7 @@ func (ctx *actionContext) addDynamicStage(stage types.Stage) {
 	ctx.dynamicStages = append(ctx.dynamicStages, stage)
 	ctx.mu.Unlock()
 
-	if recorder, ok := workflow.(types.RuntimeWorkflowRecorder); ok {
+	if recorder, ok := workflow.(rt.RuntimeWorkflowRecorder); ok {
 		recorder.RecordDynamicStage(stage, mutationSource(currentStage, currentAction))
 	}
 }
@@ -202,7 +205,7 @@ func (ctx *actionContext) disableAction(id string) bool {
 	currentAction := ctx.currentAction
 	ctx.mu.Unlock()
 
-	if recorder, ok := stage.(types.RuntimeStageRecorder); ok {
+	if recorder, ok := stage.(rt.RuntimeStageRecorder); ok {
 		recorder.RecordActionDisabled(id, mutationSource(stage, currentAction))
 	}
 	return true
@@ -223,7 +226,7 @@ func (ctx *actionContext) enableAction(id string) bool {
 	currentAction := ctx.currentAction
 	ctx.mu.Unlock()
 
-	if recorder, ok := stage.(types.RuntimeStageRecorder); ok {
+	if recorder, ok := stage.(rt.RuntimeStageRecorder); ok {
 		recorder.RecordActionEnabled(id, mutationSource(stage, currentAction))
 	}
 	return true
@@ -244,7 +247,7 @@ func (ctx *actionContext) disableStage(id string) bool {
 	currentAction := ctx.currentAction
 	ctx.mu.Unlock()
 
-	if recorder, ok := workflow.(types.RuntimeWorkflowRecorder); ok {
+	if recorder, ok := workflow.(rt.RuntimeWorkflowRecorder); ok {
 		recorder.RecordStageDisabled(id, mutationSource(currentStage, currentAction))
 	}
 	return true
@@ -266,7 +269,7 @@ func (ctx *actionContext) enableStage(id string) bool {
 	currentAction := ctx.currentAction
 	ctx.mu.Unlock()
 
-	if recorder, ok := workflow.(types.RuntimeWorkflowRecorder); ok {
+	if recorder, ok := workflow.(rt.RuntimeWorkflowRecorder); ok {
 		recorder.RecordStageEnabled(id, mutationSource(currentStage, currentAction))
 	}
 	return true
@@ -339,7 +342,24 @@ func (ctx *actionContext) consumeRemovedStages() map[string]string {
 	return result
 }
 
-func mutationSource(stage types.Stage, action types.Action) string {
+func (ctx *actionContext) nextStageCounter() int {
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+	ctx.dynamicStageCounter++
+	return ctx.dynamicStageCounter
+}
+
+func (ctx *actionContext) nextActionCounter(stageID string) int {
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+	if ctx.dynamicActionCounters == nil {
+		ctx.dynamicActionCounters = make(map[string]int)
+	}
+	ctx.dynamicActionCounters[stageID]++
+	return ctx.dynamicActionCounters[stageID]
+}
+
+func mutationSource(stage rt.Stage, action rt.Action) string {
 	var stageID, actionName string
 	if stage != nil {
 		stageID = stage.ID()

@@ -45,6 +45,11 @@ type QueueEntry struct {
 	Metadata   []byte         `json:"metadata"`
 }
 
+type QueueEntryTag struct {
+	EntryID string `json:"entry_id"`
+	Tag     string `json:"tag"`
+}
+
 type StageRun struct {
 	WorkflowID  string         `json:"workflow_id"`
 	StageID     string         `json:"stage_id"`

@@ -2,14 +2,16 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/davidroman0O/gostage/v3/broker"
 	"github.com/davidroman0O/gostage/v3/registry"
+	rt "github.com/davidroman0O/gostage/v3/runtime"
 	"github.com/davidroman0O/gostage/v3/runtime/core"
 	"github.com/davidroman0O/gostage/v3/state"
-	"github.com/davidroman0O/gostage/v3/types"
+	storepkg "github.com/davidroman0O/gostage/v3/store"
 )
 
 // ExecutionStatus represents the lifecycle state of a stage or action.
@@ -22,6 +24,7 @@ const (
 	StatusFailed    ExecutionStatus = "failed"
 	StatusSkipped   ExecutionStatus = "skipped"
 	StatusRemoved   ExecutionStatus = "removed"
+	StatusCancelled ExecutionStatus = "cancelled"
 )
 
 // StageStatus captures lifecycle details for a stage.
@@ -48,14 +51,14 @@ type ActionStatus struct {
 
 // DynamicStage describes a stage generated during execution.
 type DynamicStage struct {
-	Stage     types.Stage
+	Stage     rt.Stage
 	CreatedBy string
 }
 
 // DynamicAction describes an action generated during execution.
 type DynamicAction struct {
 	StageID   string
-	Action    types.Action
+	Action    rt.Action
 	CreatedBy string
 }
 
@@ -66,6 +69,7 @@ type RunResult struct {
 	Error      error
 	Duration   time.Duration
 	FinalStore map[string]interface{}
+	Attempt    int
 
 	Stages  []StageStatus
 	Actions []ActionStatus
@@ -82,16 +86,17 @@ type RunResult struct {
 // RunOptions configures Run behaviour.
 type RunOptions struct {
 	Context      context.Context
-	Logger       types.Logger
+	Logger       rt.Logger
 	IgnoreErrors bool
 	InitialStore map[string]interface{}
+	Attempt      int
 }
 
 // Runner executes workflows using a supplied execution context factory.
 type Runner struct {
 	factory       core.Factory
-	workflowMW    []types.WorkflowMiddleware
-	defaultLogger types.Logger
+	workflowMW    []rt.WorkflowMiddleware
+	defaultLogger rt.Logger
 	broker        broker.Broker
 	registry      registry.Registry
 }
@@ -100,7 +105,7 @@ type Runner struct {
 type Option func(*Runner)
 
 // WithWorkflowMiddleware appends workflow-level middleware to the runner.
-func WithWorkflowMiddleware(mw ...types.WorkflowMiddleware) Option {
+func WithWorkflowMiddleware(mw ...rt.WorkflowMiddleware) Option {
 	return func(r *Runner) {
 		r.workflowMW = append(r.workflowMW, mw...)
 	}
@@ -116,7 +121,7 @@ func WithContextFactory(factory core.Factory) Option {
 }
 
 // WithDefaultLogger overrides the default logger used when none is provided.
-func WithDefaultLogger(logger types.Logger) Option {
+func WithDefaultLogger(logger rt.Logger) Option {
 	return func(r *Runner) {
 		if logger != nil {
 			r.defaultLogger = logger
@@ -137,7 +142,7 @@ func New(factory core.Factory, reg registry.Registry, br broker.Broker, options 
 	}
 	r := &Runner{
 		factory:       factory,
-		workflowMW:    make([]types.WorkflowMiddleware, 0),
+		workflowMW:    make([]rt.WorkflowMiddleware, 0),
 		defaultLogger: noopLogger{},
 		registry:      reg,
 		broker:        br,
@@ -156,7 +161,7 @@ func (noopLogger) Warn(string, ...interface{})  {}
 func (noopLogger) Error(string, ...interface{}) {}
 
 // Run executes the workflow using the configured factory and returns execution telemetry.
-func (r *Runner) Run(workflow types.Workflow, options RunOptions) RunResult {
+func (r *Runner) Run(workflow rt.Workflow, options RunOptions) RunResult {
 	logger := options.Logger
 	if logger == nil {
 		logger = r.defaultLogger
@@ -176,22 +181,42 @@ func (r *Runner) Run(workflow types.Workflow, options RunOptions) RunResult {
 	}
 
 	var brokerProxy *runnerBrokerProxy
-	var brokerCall types.BrokerCall
+	var runtimeBroker rt.Broker
 	if r.broker != nil {
 		brokerProxy = r.newBrokerProxy(runCtx, workflow, logger)
-		brokerCall = brokerProxy
+		runtimeBroker = brokerProxy
 	}
 
-	execContext := r.factory.New(workflow, brokerCall)
+	execContext := r.factory.New(workflow, runtimeBroker)
 	if brokerProxy != nil {
 		brokerProxy.attach(execContext)
 	}
 	execContext.SetLogger(logger)
-	execContext.SetDisabledMaps(make(map[string]bool), make(map[string]bool))
+	var initialActions map[string]bool
+	var initialStages map[string]bool
+	if provider, ok := workflow.(rt.DisableSnapshotProvider); ok {
+		if actions, stages := provider.DisabledSnapshot(); actions != nil || stages != nil {
+			if actions != nil {
+				initialActions = copyBoolMap(actions)
+			}
+			if stages != nil {
+				initialStages = copyBoolMap(stages)
+			}
+		}
+	}
+	execContext.SetDisabledMaps(initialActions, initialStages)
 
-	if store := workflow.Store(); store != nil && options.InitialStore != nil {
+	if cancelable, ok := execContext.(interface{ Cancel(error) }); ok && runCtx != nil {
+		ctxDone := runCtx.Done()
+		go func() {
+			<-ctxDone
+			cancelable.Cancel(runCtx.Err())
+		}()
+	}
+
+	if wfStore := workflow.Store(); !wfStore.IsZero() && options.InitialStore != nil {
 		for key, value := range options.InitialStore {
-			_ = store.Put(key, value)
+			_ = storepkg.Put(wfStore, key, value)
 		}
 	}
 
@@ -216,9 +241,12 @@ func (r *Runner) Run(workflow types.Workflow, options RunOptions) RunResult {
 		DynamicStages:  tele.dynamicStages,
 		DynamicActions: tele.dynamicActions,
 	}
+	if options.Attempt > 0 {
+		result.Attempt = options.Attempt
+	}
 
-	if store := workflow.Store(); store != nil {
-		result.FinalStore = store.ExportAll()
+	if wfStore := workflow.Store(); !wfStore.IsZero() {
+		result.FinalStore = storepkg.ExportAll(wfStore)
 	}
 
 	if actions, stages := execContext.DisabledMaps(); actions != nil || stages != nil {
@@ -241,25 +269,28 @@ func (r *Runner) Run(workflow types.Workflow, options RunOptions) RunResult {
 	if r.broker != nil {
 		workflowState := StatusCompleted
 		if !result.Success {
-			workflowState = StatusFailed
+			if errors.Is(err, context.Canceled) {
+				workflowState = StatusCancelled
+			} else {
+				workflowState = StatusFailed
+			}
 		}
 		r.flushStageStatuses(runCtx, workflow, tele, logger)
 		r.flushActionStatuses(runCtx, workflow, tele, logger)
 		r.notifyWorkflowStatus(runCtx, logger, workflow.ID(), workflowState)
-		r.emitExecutionSummary(runCtx, workflow, result, start, workflowState, logger)
 	}
 
 	return result
 }
 
-func (r *Runner) executeWorkflow(ctx context.Context, workflow types.Workflow, execCtx core.ExecutionContext, logger types.Logger, tele *telemetry) error {
-	stages := append([]types.Stage(nil), workflow.Stages()...)
-	combinedMW := append([]types.WorkflowMiddleware{}, r.workflowMW...)
+func (r *Runner) executeWorkflow(ctx context.Context, workflow rt.Workflow, execCtx core.ExecutionContext, logger rt.Logger, tele *telemetry) error {
+	stages := append([]rt.Stage(nil), workflow.Stages()...)
+	combinedMW := append([]rt.WorkflowMiddleware{}, r.workflowMW...)
 	if mw := workflow.Middlewares(); len(mw) > 0 {
 		combinedMW = append(combinedMW, mw...)
 	}
 
-	stageRunner := func(runCtx context.Context, stage types.Stage, wf types.Workflow, log types.Logger) error {
+	stageRunner := func(runCtx context.Context, stage rt.Stage, wf rt.Workflow, log rt.Logger) error {
 		return r.executeStage(runCtx, wf, stage, execCtx, log, tele)
 	}
 
@@ -300,17 +331,17 @@ func (r *Runner) executeWorkflow(ctx context.Context, workflow types.Workflow, e
 	return nil
 }
 
-func (r *Runner) executeStage(ctx context.Context, workflow types.Workflow, stage types.Stage, execCtx core.ExecutionContext, logger types.Logger, tele *telemetry) error {
+func (r *Runner) executeStage(ctx context.Context, workflow rt.Workflow, stage rt.Stage, execCtx core.ExecutionContext, logger rt.Logger, tele *telemetry) error {
 	if err := mergeStageInitialStore(workflow, stage); err != nil {
 		return err
 	}
 
-	stageActions := append([]types.Action(nil), stage.ActionList()...)
+	stageActions := append([]rt.Action(nil), stage.ActionList()...)
 	execCtx.SetStage(stage)
 	execCtx.SetActionList(stageActions)
 	defer execCtx.ClearStage()
 
-	stageRunner := func(runCtx context.Context, st types.Stage, wf types.Workflow, log types.Logger) error {
+	stageRunner := func(runCtx context.Context, st rt.Stage, wf rt.Workflow, log rt.Logger) error {
 		return r.runActions(runCtx, wf, st, execCtx, logger, tele)
 	}
 
@@ -323,18 +354,18 @@ func (r *Runner) executeStage(ctx context.Context, workflow types.Workflow, stag
 	return stageRunner(ctx, stage, workflow, logger)
 }
 
-func (r *Runner) runActions(ctx context.Context, workflow types.Workflow, stage types.Stage, execCtx core.ExecutionContext, logger types.Logger, tele *telemetry) error {
-	actionList := append([]types.Action(nil), stage.ActionList()...)
+func (r *Runner) runActions(ctx context.Context, workflow rt.Workflow, stage rt.Stage, execCtx core.ExecutionContext, logger rt.Logger, tele *telemetry) error {
+	actionList := append([]rt.Action(nil), stage.ActionList()...)
 	execCtx.SetActionList(actionList)
 	disabledActions, _ := execCtx.DisabledMaps()
-	actionMW := collectActionMiddleware(stage)
+	stageMW := collectActionMiddleware(stage)
 
 	for i := 0; i < len(actionList); i++ {
 		action := actionList[i]
 		actionKey := actionKey(stage.ID(), action.Name())
 		actionStatus := tele.action(stage.ID(), action.Name(), action.Description(), action.Tags(), false, "")
 
-		if err := r.ensureActionRegistered(action.Name()); err != nil {
+		if err := r.ensureActionRegistered(action); err != nil {
 			actionStatus.Status = StatusFailed
 			r.notifyActionStatus(ctx, workflow.ID(), stage.ID(), action.Name(), StatusFailed, logger)
 			return err
@@ -357,12 +388,19 @@ func (r *Runner) runActions(ctx context.Context, workflow types.Workflow, stage 
 		execCtx.SetAction(action, i, i == len(actionList)-1)
 		r.notifyActionStatus(ctx, workflow.ID(), stage.ID(), action.Name(), StatusRunning, logger)
 
-		runnerFn := func(ctx types.Context, act types.Action, index int, isLast bool) error {
+		runnerFn := func(ctx rt.Context, act rt.Action, index int, isLast bool) error {
 			return act.Execute(ctx)
 		}
-		if len(actionMW) > 0 {
-			for idx := len(actionMW) - 1; idx >= 0; idx-- {
-				runnerFn = actionMW[idx](runnerFn)
+		if chainProvider, ok := action.(actionMiddlewareChain); ok {
+			if chain := chainProvider.MiddlewareChain(); len(chain) > 0 {
+				for idx := len(chain) - 1; idx >= 0; idx-- {
+					runnerFn = chain[idx](runnerFn)
+				}
+			}
+		}
+		if len(stageMW) > 0 {
+			for idx := len(stageMW) - 1; idx >= 0; idx-- {
+				runnerFn = stageMW[idx](runnerFn)
 			}
 		}
 
@@ -410,11 +448,11 @@ func (r *Runner) runActions(ctx context.Context, workflow types.Workflow, stage 
 	return nil
 }
 
-func insertActions(actions []types.Action, additions []types.Action, index int) []types.Action {
+func insertActions(actions []rt.Action, additions []rt.Action, index int) []rt.Action {
 	if index >= len(actions) {
 		return append(actions, additions...)
 	}
-	result := make([]types.Action, 0, len(actions)+len(additions))
+	result := make([]rt.Action, 0, len(actions)+len(additions))
 	result = append(result, actions[:index]...)
 	result = append(result, additions...)
 	result = append(result, actions[index:]...)
@@ -423,24 +461,28 @@ func insertActions(actions []types.Action, additions []types.Action, index int) 
 
 func actionKey(stageID, actionName string) string { return stageID + "::" + actionName }
 
-func mergeStageInitialStore(workflow types.Workflow, stage types.Stage) error {
+func mergeStageInitialStore(workflow rt.Workflow, stage rt.Stage) error {
 	wfStore := workflow.Store()
-	if wfStore == nil {
+	if wfStore.IsZero() {
 		return nil
 	}
 	initial := stage.InitialStore()
-	if initial == nil {
+	if initial.IsZero() {
 		return nil
 	}
-	_, _, err := wfStore.CopyFromWithOverwrite(initial)
+	_, _, err := storepkg.CopyFromWithOverwrite(wfStore, initial)
 	return err
 }
 
 type actionMiddlewareProvider interface {
-	ActionMiddlewares() []types.ActionMiddleware
+	ActionMiddlewares() []rt.ActionMiddleware
 }
 
-func collectActionMiddleware(stage types.Stage) []types.ActionMiddleware {
+type actionMiddlewareChain interface {
+	MiddlewareChain() []rt.ActionMiddleware
+}
+
+func collectActionMiddleware(stage rt.Stage) []rt.ActionMiddleware {
 	if provider, ok := stage.(actionMiddlewareProvider); ok {
 		return provider.ActionMiddlewares()
 	}
@@ -481,7 +523,7 @@ func groupActionsByStage(actions []ActionStatus) map[string][]ActionStatus {
 	return grouped
 }
 
-func (result RunResult) toExecutionReport(workflow types.Workflow, finalState ExecutionStatus, started time.Time) state.ExecutionReport {
+func (result RunResult) ToExecutionReport(workflow rt.Workflow, finalState ExecutionStatus, started time.Time) state.ExecutionReport {
 	report := state.ExecutionReport{
 		WorkflowID:      result.WorkflowID,
 		Status:          toWorkflowState(finalState),
@@ -492,6 +534,7 @@ func (result RunResult) toExecutionReport(workflow types.Workflow, finalState Ex
 		DisabledActions: copyBoolMap(result.DisabledActions),
 		RemovedStages:   copyStringMap(result.RemovedStages),
 		RemovedActions:  copyStringMap(result.RemovedActions),
+		Attempt:         result.Attempt,
 	}
 	if !started.IsZero() {
 		report.StartedAt = started
@@ -511,7 +554,7 @@ func (result RunResult) toExecutionReport(workflow types.Workflow, finalState Ex
 		report.WorkflowName = workflow.Name()
 		report.Description = workflow.Description()
 		report.WorkflowTags = copyStrings(workflow.Tags())
-		if typed, ok := workflow.(types.TypedWorkflow); ok {
+		if typed, ok := workflow.(rt.TypedWorkflow); ok {
 			report.WorkflowType = typed.WorkflowType()
 		}
 	}
@@ -570,17 +613,7 @@ func buildActionSummariesForStage(stageID string, actions []ActionStatus, result
 	return summaries
 }
 
-func (r *Runner) emitExecutionSummary(ctx context.Context, workflow types.Workflow, result RunResult, started time.Time, finalState ExecutionStatus, logger types.Logger) {
-	if r.broker == nil {
-		return
-	}
-	report := result.toExecutionReport(workflow, finalState, started)
-	if err := r.broker.ExecutionSummary(ctx, result.WorkflowID, report); err != nil && logger != nil {
-		logger.Warn("runner: failed to persist execution summary: %v", err)
-	}
-}
-
-func (r *Runner) registerWorkflow(ctx context.Context, workflow types.Workflow, logger types.Logger) {
+func (r *Runner) registerWorkflow(ctx context.Context, workflow rt.Workflow, logger rt.Logger) {
 	if r.broker == nil || workflow == nil {
 		return
 	}
@@ -602,7 +635,7 @@ func (r *Runner) registerWorkflow(ctx context.Context, workflow types.Workflow, 
 		Priority:  state.PriorityDefault,
 		CreatedAt: time.Now(),
 	}
-	if typed, ok := workflow.(types.TypedWorkflow); ok {
+	if typed, ok := workflow.(rt.TypedWorkflow); ok {
 		definition.Type = typed.WorkflowType()
 		definition.Payload = copyMetadata(typed.WorkflowPayload())
 	}
@@ -623,7 +656,7 @@ func (r *Runner) registerWorkflow(ctx context.Context, workflow types.Workflow, 
 	}
 }
 
-func (r *Runner) registerStage(ctx context.Context, workflow types.Workflow, stage types.Stage, dynamic bool, createdBy string, logger types.Logger) {
+func (r *Runner) registerStage(ctx context.Context, workflow rt.Workflow, stage rt.Stage, dynamic bool, createdBy string, logger rt.Logger) {
 	if r.broker == nil || workflow == nil || stage == nil {
 		return
 	}
@@ -636,7 +669,7 @@ func (r *Runner) registerStage(ctx context.Context, workflow types.Workflow, sta
 	}
 }
 
-func (r *Runner) registerAction(ctx context.Context, logger types.Logger, workflowID, stageID string, action types.Action, dynamic bool, createdBy string) {
+func (r *Runner) registerAction(ctx context.Context, logger rt.Logger, workflowID, stageID string, action rt.Action, dynamic bool, createdBy string) {
 	if r.broker == nil || action == nil {
 		return
 	}
@@ -646,7 +679,7 @@ func (r *Runner) registerAction(ctx context.Context, logger types.Logger, workfl
 	})
 }
 
-func (r *Runner) flushStageStatuses(ctx context.Context, workflow types.Workflow, tele *telemetry, logger types.Logger) {
+func (r *Runner) flushStageStatuses(ctx context.Context, workflow rt.Workflow, tele *telemetry, logger rt.Logger) {
 	if r.broker == nil || workflow == nil || tele == nil {
 		return
 	}
@@ -655,7 +688,7 @@ func (r *Runner) flushStageStatuses(ctx context.Context, workflow types.Workflow
 	}
 }
 
-func (r *Runner) flushActionStatuses(ctx context.Context, workflow types.Workflow, tele *telemetry, logger types.Logger) {
+func (r *Runner) flushActionStatuses(ctx context.Context, workflow rt.Workflow, tele *telemetry, logger rt.Logger) {
 	if r.broker == nil || workflow == nil || tele == nil {
 		return
 	}
@@ -664,7 +697,7 @@ func (r *Runner) flushActionStatuses(ctx context.Context, workflow types.Workflo
 	}
 }
 
-func (r *Runner) notifyWorkflowStatus(ctx context.Context, logger types.Logger, workflowID string, status ExecutionStatus) {
+func (r *Runner) notifyWorkflowStatus(ctx context.Context, logger rt.Logger, workflowID string, status ExecutionStatus) {
 	if r.broker == nil {
 		return
 	}
@@ -674,7 +707,7 @@ func (r *Runner) notifyWorkflowStatus(ctx context.Context, logger types.Logger, 
 	})
 }
 
-func (r *Runner) notifyStageStatus(ctx context.Context, workflowID, stageID string, status ExecutionStatus, logger types.Logger) {
+func (r *Runner) notifyStageStatus(ctx context.Context, workflowID, stageID string, status ExecutionStatus, logger rt.Logger) {
 	if r.broker == nil {
 		return
 	}
@@ -684,7 +717,7 @@ func (r *Runner) notifyStageStatus(ctx context.Context, workflowID, stageID stri
 	})
 }
 
-func (r *Runner) notifyActionStatus(ctx context.Context, workflowID, stageID, actionName string, status ExecutionStatus, logger types.Logger) {
+func (r *Runner) notifyActionStatus(ctx context.Context, workflowID, stageID, actionName string, status ExecutionStatus, logger rt.Logger) {
 	if r.broker == nil {
 		return
 	}
@@ -694,7 +727,7 @@ func (r *Runner) notifyActionStatus(ctx context.Context, workflowID, stageID, ac
 	})
 }
 
-func (r *Runner) notifyActionProgress(ctx context.Context, workflowID, stageID, actionName string, progress int, message string, logger types.Logger) {
+func (r *Runner) notifyActionProgress(ctx context.Context, workflowID, stageID, actionName string, progress int, message string, logger rt.Logger) {
 	if r.broker == nil {
 		return
 	}
@@ -703,7 +736,23 @@ func (r *Runner) notifyActionProgress(ctx context.Context, workflowID, stageID, 
 	})
 }
 
-func (r *Runner) notifyActionRemoved(ctx context.Context, workflowID, stageID, actionName, createdBy string, logger types.Logger) {
+func (r *Runner) notifyActionEvent(ctx context.Context, workflowID, stageID, actionName, kind, message string, metadata map[string]any, logger rt.Logger) {
+	if r.broker == nil {
+		return
+	}
+	var metaCopy map[string]any
+	if len(metadata) > 0 {
+		metaCopy = make(map[string]any, len(metadata))
+		for k, v := range metadata {
+			metaCopy[k] = v
+		}
+	}
+	r.safeBrokerCall(logger, "ActionEvent", func() error {
+		return r.broker.ActionEvent(ctx, workflowID, stageID, actionName, kind, message, metaCopy)
+	})
+}
+
+func (r *Runner) notifyActionRemoved(ctx context.Context, workflowID, stageID, actionName, createdBy string, logger rt.Logger) {
 	r.notifyActionStatus(ctx, workflowID, stageID, actionName, StatusRemoved, logger)
 	if r.broker != nil {
 		r.safeBrokerCall(logger, "ActionRemoved", func() error {
@@ -712,7 +761,7 @@ func (r *Runner) notifyActionRemoved(ctx context.Context, workflowID, stageID, a
 	}
 }
 
-func (r *Runner) notifyStageRemoved(ctx context.Context, workflowID, stageID, createdBy string, logger types.Logger) {
+func (r *Runner) notifyStageRemoved(ctx context.Context, workflowID, stageID, createdBy string, logger rt.Logger) {
 	r.notifyStageStatus(ctx, workflowID, stageID, StatusRemoved, logger)
 	if r.broker != nil {
 		r.safeBrokerCall(logger, "StageRemoved", func() error {
@@ -721,7 +770,7 @@ func (r *Runner) notifyStageRemoved(ctx context.Context, workflowID, stageID, cr
 	}
 }
 
-func (r *Runner) drainRemovedStages(execCtx core.ExecutionContext, tele *telemetry, ctx context.Context, workflow types.Workflow, logger types.Logger) {
+func (r *Runner) drainRemovedStages(execCtx core.ExecutionContext, tele *telemetry, ctx context.Context, workflow rt.Workflow, logger rt.Logger) {
 	if execCtx == nil || workflow == nil {
 		return
 	}
@@ -735,7 +784,7 @@ func (r *Runner) drainRemovedStages(execCtx core.ExecutionContext, tele *telemet
 	}
 }
 
-func (r *Runner) safeBrokerCall(logger types.Logger, op string, fn func() error) {
+func (r *Runner) safeBrokerCall(logger rt.Logger, op string, fn func() error) {
 	if err := fn(); err != nil {
 		if logger != nil {
 			logger.Warn("runner broker %s failed: %v", op, err)
@@ -743,7 +792,7 @@ func (r *Runner) safeBrokerCall(logger types.Logger, op string, fn func() error)
 	}
 }
 
-func (r *Runner) newBrokerProxy(ctx context.Context, workflow types.Workflow, logger types.Logger) *runnerBrokerProxy {
+func (r *Runner) newBrokerProxy(ctx context.Context, workflow rt.Workflow, logger rt.Logger) *runnerBrokerProxy {
 	return &runnerBrokerProxy{
 		runner:   r,
 		workflow: workflow,
@@ -754,44 +803,40 @@ func (r *Runner) newBrokerProxy(ctx context.Context, workflow types.Workflow, lo
 
 type runnerBrokerProxy struct {
 	runner   *Runner
-	workflow types.Workflow
+	workflow rt.Workflow
 	exec     core.ExecutionContext
 	runCtx   context.Context
-	logger   types.Logger
+	logger   rt.Logger
 }
 
 func (p *runnerBrokerProxy) attach(exec core.ExecutionContext) {
 	p.exec = exec
 }
 
-func (p *runnerBrokerProxy) Call(types.MessageType, []byte) error { return nil }
-
-func (p *runnerBrokerProxy) Publish(string, []byte, map[string]interface{}) error { return nil }
-
-func (p *runnerBrokerProxy) Progress(percent int) error {
-	return p.reportProgress(percent, "")
-}
-
-func (p *runnerBrokerProxy) ProgressCause(message string, percent int) error {
-	return p.reportProgress(percent, message)
-}
-
-func (p *runnerBrokerProxy) Log(types.LogLevel, string, ...types.LogField) error { return nil }
-
-func (p *runnerBrokerProxy) reportProgress(percent int, message string) error {
-	if p == nil || p.runner == nil || p.exec == nil {
+func (p *runnerBrokerProxy) Progress(percent int, message string) error {
+	if p == nil || p.runner == nil {
 		return nil
 	}
-	stage := p.exec.Stage()
-	action := p.exec.Action()
-	if stage == nil || action == nil {
+
+	var stageID, actionID string
+	if p.exec != nil {
+		if stage := p.exec.Stage(); stage != nil {
+			stageID = stage.ID()
+		}
+		if action := p.exec.Action(); action != nil {
+			actionID = action.Name()
+		}
+	}
+
+	if p.workflow == nil || stageID == "" || actionID == "" {
 		return nil
 	}
+
 	p.runner.notifyActionProgress(
 		p.runCtx,
 		p.workflow.ID(),
-		stage.ID(),
-		action.Name(),
+		stageID,
+		actionID,
 		percent,
 		message,
 		p.logger,
@@ -799,7 +844,33 @@ func (p *runnerBrokerProxy) reportProgress(percent int, message string) error {
 	return nil
 }
 
-func (r *Runner) validateWorkflowRegistration(workflow types.Workflow) error {
+func (p *runnerBrokerProxy) Event(kind, message string, metadata map[string]any) error {
+	if p == nil || p.runner == nil || p.workflow == nil {
+		return nil
+	}
+	stageID, actionID := "", ""
+	if p.exec != nil {
+		if stage := p.exec.Stage(); stage != nil {
+			stageID = stage.ID()
+		}
+		if action := p.exec.Action(); action != nil {
+			actionID = action.Name()
+		}
+	}
+	p.runner.notifyActionEvent(
+		p.runCtx,
+		p.workflow.ID(),
+		stageID,
+		actionID,
+		kind,
+		message,
+		metadata,
+		p.logger,
+	)
+	return nil
+}
+
+func (r *Runner) validateWorkflowRegistration(workflow rt.Workflow) error {
 	if workflow == nil {
 		return fmt.Errorf("runner: workflow is nil")
 	}
@@ -808,7 +879,7 @@ func (r *Runner) validateWorkflowRegistration(workflow types.Workflow) error {
 			continue
 		}
 		for _, action := range stage.ActionList() {
-			if err := r.ensureActionRegistered(action.Name()); err != nil {
+			if err := r.ensureActionRegistered(action); err != nil {
 				return err
 			}
 		}
@@ -816,15 +887,28 @@ func (r *Runner) validateWorkflowRegistration(workflow types.Workflow) error {
 	return nil
 }
 
-func (r *Runner) ensureActionRegistered(id string) error {
+type actionWithRef interface {
+	Ref() string
+}
+
+func (r *Runner) ensureActionRegistered(action rt.Action) error {
 	if r.registry == nil {
 		return fmt.Errorf("runner: registry is nil")
 	}
+	if action == nil {
+		return fmt.Errorf("runner: action is nil")
+	}
+	id := action.Name()
 	if id == "" {
 		return fmt.Errorf("runner: empty action id")
 	}
 	if r.registry.HasAction(id) {
 		return nil
+	}
+	if withRef, ok := action.(actionWithRef); ok {
+		if ref := withRef.Ref(); ref != "" && r.registry.HasAction(ref) {
+			return nil
+		}
 	}
 	return fmt.Errorf("runner: action %s not registered", id)
 }
@@ -847,7 +931,7 @@ func (r *Runner) updateStageTelemetryRemoval(tele *telemetry, stageID, createdBy
 	tele.removedStageMap[stageID] = createdBy
 }
 
-func makeStageRecord(stage types.Stage, dynamic bool, createdBy string) state.StageRecord {
+func makeStageRecord(stage rt.Stage, dynamic bool, createdBy string) state.StageRecord {
 	record := state.StageRecord{
 		ID:          stage.ID(),
 		Name:        stage.Name(),
@@ -866,8 +950,9 @@ func makeStageRecord(stage types.Stage, dynamic bool, createdBy string) state.St
 	return record
 }
 
-func makeActionRecord(action types.Action, dynamic bool, createdBy string) state.ActionRecord {
+func makeActionRecord(action rt.Action, dynamic bool, createdBy string) state.ActionRecord {
 	return state.ActionRecord{
+		Ref:         action.Name(),
 		Name:        action.Name(),
 		Description: action.Description(),
 		Tags:        copyStrings(action.Tags()),
@@ -911,6 +996,8 @@ func toWorkflowState(status ExecutionStatus) state.WorkflowState {
 		return state.WorkflowSkipped
 	case StatusRemoved:
 		return state.WorkflowRemoved
+	case StatusCancelled:
+		return state.WorkflowCancelled
 	default:
 		return state.WorkflowPending
 	}
@@ -928,11 +1015,11 @@ type telemetry struct {
 }
 
 type pendingStage struct {
-	stage     types.Stage
+	stage     rt.Stage
 	createdBy string
 }
 
-func newTelemetry(workflow types.Workflow) *telemetry {
+func newTelemetry(workflow rt.Workflow) *telemetry {
 	t := &telemetry{
 		stages:                 make(map[string]*StageStatus),
 		actions:                make(map[string]*ActionStatus),
@@ -1056,12 +1143,12 @@ func (t *telemetry) removedActions() map[string]string {
 	return copyMap
 }
 
-func (t *telemetry) insertPendingStages(existing []types.Stage, index int) []types.Stage {
+func (t *telemetry) insertPendingStages(existing []rt.Stage, index int) []rt.Stage {
 	if len(t.pendingStageInsertions) == 0 {
 		return existing
 	}
 
-	stages := make([]types.Stage, 0, len(existing)+len(t.pendingStageInsertions))
+	stages := make([]rt.Stage, 0, len(existing)+len(t.pendingStageInsertions))
 	stages = append(stages, existing[:index]...)
 	for _, pending := range t.pendingStageInsertions {
 		stages = append(stages, pending.stage)

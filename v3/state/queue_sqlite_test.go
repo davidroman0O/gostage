@@ -69,3 +69,34 @@ func TestSQLiteQueueSelectorMiss(t *testing.T) {
 		t.Fatalf("expected errNoPending, got %v", err)
 	}
 }
+
+func TestSQLiteQueueSelectorAnyNone(t *testing.T) {
+	db := openTestDB(t)
+	queue, err := NewSQLiteQueue(db)
+	if err != nil {
+		t.Fatalf("new sqlite queue: %v", err)
+	}
+
+	ctx := context.Background()
+	blocked := workflow.Definition{ID: "wf-blocked", Tags: []string{"alpha"}}
+	target := workflow.Definition{ID: "wf-target", Tags: []string{"beta"}}
+
+	if _, err := queue.Enqueue(ctx, blocked, PriorityHigh, nil); err != nil {
+		t.Fatalf("enqueue blocked: %v", err)
+	}
+	if _, err := queue.Enqueue(ctx, target, PriorityDefault, nil); err != nil {
+		t.Fatalf("enqueue target: %v", err)
+	}
+
+	claimed, err := queue.Claim(ctx, Selector{Any: []string{"beta"}, None: []string{"alpha"}}, "worker")
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if claimed.Definition.ID != "wf-target" {
+		t.Fatalf("expected selector to skip blocked workflow, got %s", claimed.Definition.ID)
+	}
+
+	if _, err := queue.Claim(ctx, Selector{Any: []string{"gamma"}}, "worker"); !errors.Is(err, ErrNoPending) {
+		t.Fatalf("expected ErrNoPending for unmatched Any selector, got %v", err)
+	}
+}

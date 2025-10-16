@@ -14,6 +14,15 @@ CREATE TABLE IF NOT EXISTS queue_entries (
 
 CREATE INDEX IF NOT EXISTS idx_queue_state_priority ON queue_entries(state, priority DESC, created_at);
 
+CREATE TABLE IF NOT EXISTS queue_entry_tags (
+    entry_id TEXT NOT NULL,
+    tag TEXT NOT NULL,
+    PRIMARY KEY (entry_id, tag),
+    FOREIGN KEY (entry_id) REFERENCES queue_entries(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_queue_entry_tags_tag ON queue_entry_tags(tag);
+
 CREATE TABLE IF NOT EXISTS workflow_runs (
     id TEXT PRIMARY KEY,
     name TEXT,

@@ -26,9 +26,9 @@ func TestTelemetryDispatcherFanOut(t *testing.T) {
 	d := NewTelemetryDispatcher(context.Background(), diag)
 	cs1 := telemetry.NewChannelSink(4)
 	cs2 := telemetry.NewChannelSink(4)
-	d.Register(cs1)
-	d.Register(cs2)
-	evt := telemetry.Event{Kind: "workflow_started", WorkflowID: "wf", Timestamp: time.Now()}
+	cancel1 := d.Register(cs1)
+	cancel2 := d.Register(cs2)
+	evt := telemetry.Event{Kind: telemetry.EventWorkflowStarted, WorkflowID: "wf", Timestamp: time.Now()}
 	d.Dispatch(evt)
 
 	select {
@@ -47,6 +47,8 @@ func TestTelemetryDispatcherFanOut(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 		t.Fatalf("sink2 did not receive event")
 	}
+	cancel1()
+	cancel2()
 	d.Close()
 	if len(diag.events) != 0 {
 		t.Fatalf("unexpected diagnostics: %#v", diag.events)
@@ -56,9 +58,9 @@ func TestTelemetryDispatcherFanOut(t *testing.T) {
 func TestTelemetryDispatcherSinkPanicReported(t *testing.T) {
 	diag := &recorderDiag{}
 	d := NewTelemetryDispatcher(context.Background(), diag)
-	d.Register(telemetry.SinkFunc(func(telemetry.Event) {}))
-	d.Register(telemetry.SinkFunc(func(telemetry.Event) { panic("boom") }))
-	d.Dispatch(telemetry.Event{Kind: "test"})
+	_ = d.Register(telemetry.SinkFunc(func(telemetry.Event) {}))
+	_ = d.Register(telemetry.SinkFunc(func(telemetry.Event) { panic("boom") }))
+	d.Dispatch(telemetry.Event{Kind: telemetry.EventKind("test")})
 	time.Sleep(20 * time.Millisecond)
 	d.Close()
 	if len(diag.events) == 0 {
@@ -72,10 +74,29 @@ func TestTelemetryDispatcherSinkPanicReported(t *testing.T) {
 func TestHealthDispatcher(t *testing.T) {
 	h := NewHealthDispatcher()
 	var events []HealthEvent
-	h.Subscribe(func(evt HealthEvent) { events = append(events, evt) })
+	cancel := h.Subscribe(func(evt HealthEvent) { events = append(events, evt) })
 	input := HealthEvent{Pool: "local", Status: HealthHealthy, Timestamp: time.Now()}
 	h.Publish(input)
 	if len(events) != 1 || events[0].Pool != "local" {
 		t.Fatalf("failed to publish health event: %#v", events)
 	}
+	cancel()
+	h.Publish(HealthEvent{Pool: "local", Status: HealthDegraded})
+	if len(events) != 1 {
+		t.Fatalf("expected no events after cancel")
+	}
+}
+
+func TestTelemetryDispatcherCancelStopsEvents(t *testing.T) {
+	d := NewTelemetryDispatcher(context.Background(), nil)
+	cs := telemetry.NewChannelSink(1)
+	cancel := d.Register(cs)
+	cancel()
+	d.Dispatch(telemetry.Event{Kind: telemetry.EventKind("late")})
+	select {
+	case <-cs.C():
+		t.Fatalf("expected no events after cancel")
+	case <-time.After(50 * time.Millisecond):
+	}
+	d.Close()
 }

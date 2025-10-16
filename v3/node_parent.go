@@ -2,6 +2,7 @@ package gostage
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -22,10 +23,11 @@ type parentNode struct {
 	store      state.Store
 	storeOwned bool
 
-	stateReader state.StateReader
-
 	pools  []*poolBinding
 	logger telemetry.Logger
+
+	sqliteDB *sql.DB
+	dbOwned  bool
 
 	closeOnce sync.Once
 	closed    atomic.Bool
@@ -85,10 +87,19 @@ func (n *parentNode) Cancel(ctx context.Context, id state.WorkflowID) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return n.queue.Cancel(ctx, id)
+	if n.dispatcher != nil {
+		n.dispatcher.cancelWorkflow(id)
+	}
+	if n.queue == nil {
+		return nil
+	}
+	if err := n.queue.Cancel(ctx, id); err != nil && !errors.Is(err, state.ErrNoPending) {
+		return err
+	}
+	return nil
 }
 
-func (n *parentNode) Stats(ctx context.Context) (Snapshot, error) {
+func (n *parentNode) stats(ctx context.Context) (Snapshot, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -96,19 +107,45 @@ func (n *parentNode) Stats(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
+	completed, failed, cancelled := n.dispatcher.statsCounters()
 	snapshot := Snapshot{
 		UpdatedAt:  time.Now(),
 		QueueDepth: stats.Pending,
 		InFlight:   int(n.dispatcher.inflight.Load()),
+		Completed:  completed,
+		Failed:     failed,
+		Cancelled:  cancelled,
 		Pools:      make([]PoolSnapshot, 0, len(n.pools)),
 	}
 	for _, binding := range n.pools {
 		pool := binding.pool
+		status, detail, lastChange, lastErrDetail, lastErrAt := n.dispatcher.healthInfo(pool.Name())
+		var lastErr error
+		switch {
+		case detail != "" && status != node.HealthHealthy:
+			lastErr = errors.New(detail)
+		case lastErrDetail != "":
+			lastErr = errors.New(lastErrDetail)
+		}
+		pending := 0
+		if n.queue != nil {
+			count, perr := n.queue.PendingCount(ctx, pool.Selector())
+			if perr != nil {
+				return Snapshot{}, perr
+			}
+			pending = count
+		}
 		snapshot.Pools = append(snapshot.Pools, PoolSnapshot{
-			Name:      pool.Name(),
-			Slots:     pool.Slots(),
-			Busy:      pool.Busy(),
-			Available: pool.Available(),
+			Name:             pool.Name(),
+			Slots:            pool.Slots(),
+			Busy:             pool.Busy(),
+			Available:        pool.Available(),
+			Pending:          pending,
+			Healthy:          status == node.HealthHealthy,
+			Status:           status,
+			LastError:        lastErr,
+			LastErrorAt:      lastErrAt,
+			LastHealthChange: lastChange,
 		})
 	}
 	return snapshot, nil
@@ -120,6 +157,9 @@ func (n *parentNode) StreamTelemetry(ctx context.Context, fn TelemetryHandler) C
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if n.dispatcher == nil || n.dispatcher.health == nil {
+		return func() {}
 	}
 	var canceled atomic.Bool
 	sink := telemetry.SinkFunc(func(evt telemetry.Event) {
@@ -133,8 +173,12 @@ func (n *parentNode) StreamTelemetry(ctx context.Context, fn TelemetryHandler) C
 		}
 		fn(evt)
 	})
-	n.base.TelemetryDispatcher().Register(sink)
-	return func() { canceled.Store(true) }
+	unregister := n.base.TelemetryDispatcher().Register(sink)
+	return func() {
+		if canceled.CompareAndSwap(false, true) {
+			unregister()
+		}
+	}
 }
 
 func (n *parentNode) StreamHealth(ctx context.Context, fn HealthHandler) CancelFunc {
@@ -145,7 +189,7 @@ func (n *parentNode) StreamHealth(ctx context.Context, fn HealthHandler) CancelF
 		ctx = context.Background()
 	}
 	var canceled atomic.Bool
-	n.dispatcher.health.Subscribe(func(evt HealthEvent) {
+	unregister := n.dispatcher.health.Subscribe(func(evt HealthEvent) {
 		if canceled.Load() {
 			return
 		}
@@ -156,11 +200,11 @@ func (n *parentNode) StreamHealth(ctx context.Context, fn HealthHandler) CancelF
 		}
 		fn(evt)
 	})
-	return func() { canceled.Store(true) }
-}
-
-func (n *parentNode) State() state.StateReader {
-	return n.stateReader
+	return func() {
+		if canceled.CompareAndSwap(false, true) {
+			unregister()
+		}
+	}
 }
 
 func (n *parentNode) Close() error {
@@ -183,6 +227,11 @@ func (n *parentNode) Close() error {
 				closeErr = errors.Join(closeErr, err)
 			}
 		}
+		if n.dbOwned && n.sqliteDB != nil {
+			if err := n.sqliteDB.Close(); err != nil {
+				closeErr = errors.Join(closeErr, err)
+			}
+		}
 	})
 	return closeErr
 }
@@ -192,6 +241,7 @@ func resultFromSummary(id state.WorkflowID, summary state.ResultSummary) Result 
 		WorkflowID:      id,
 		Success:         summary.Success,
 		Duration:        summary.Duration,
+		Attempt:         summary.Attempt,
 		Output:          copyMap(summary.Output),
 		DisabledStages:  copyBoolMap(summary.DisabledStages),
 		DisabledActions: copyBoolMap(summary.DisabledActions),

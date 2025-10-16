@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -27,6 +28,77 @@ func NewSQLiteQueue(db *sql.DB) (*SQLiteQueue, error) {
 	return &SQLiteQueue{db: db, queries: sqlc.New(db)}, nil
 }
 
+const claimNextWorkflowSQL = `
+UPDATE queue_entries
+SET state = 'claimed',
+    claimed_by = @claimed_by,
+    claimed_at = CURRENT_TIMESTAMP,
+    lease_id = @lease_id,
+    attempts = attempts + 1
+WHERE id = (
+    SELECT qe.id
+    FROM queue_entries qe
+    WHERE qe.state = 'pending'
+      AND NOT EXISTS (
+          SELECT 1
+          FROM json_each(@required_tags) rt
+          WHERE NOT EXISTS (
+              SELECT 1
+              FROM queue_entry_tags t
+              WHERE t.entry_id = qe.id AND t.tag = rt.value
+          )
+      )
+      AND (
+          NOT EXISTS (SELECT 1 FROM json_each(@any_tags))
+          OR EXISTS (
+              SELECT 1
+              FROM queue_entry_tags t
+              JOIN json_each(@any_tags) at ON at.value = t.tag
+              WHERE t.entry_id = qe.id
+          )
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM queue_entry_tags t
+          JOIN json_each(@none_tags) nt ON nt.value = t.tag
+          WHERE t.entry_id = qe.id
+      )
+    ORDER BY qe.priority DESC, qe.created_at ASC
+    LIMIT 1
+)
+RETURNING id, definition, priority, created_at, attempts, claimed_by, claimed_at, lease_id, metadata;
+`
+
+const pendingCountSQL = `
+SELECT COUNT(*) AS pending
+FROM queue_entries qe
+WHERE qe.state = 'pending'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM json_each(@required_tags) rt
+      WHERE NOT EXISTS (
+          SELECT 1
+          FROM queue_entry_tags t
+          WHERE t.entry_id = qe.id AND t.tag = rt.value
+      )
+  )
+  AND (
+      NOT EXISTS (SELECT 1 FROM json_each(@any_tags))
+      OR EXISTS (
+          SELECT 1
+          FROM queue_entry_tags t
+          JOIN json_each(@any_tags) at ON at.value = t.tag
+          WHERE t.entry_id = qe.id
+      )
+  )
+  AND NOT EXISTS (
+      SELECT 1
+      FROM queue_entry_tags t
+      JOIN json_each(@none_tags) nt ON nt.value = t.tag
+      WHERE t.entry_id = qe.id
+  );
+`
+
 func (q *SQLiteQueue) Enqueue(ctx context.Context, def workflow.Definition, priority Priority, metadata map[string]any) (WorkflowID, error) {
 	id := WorkflowID(uuid.NewString())
 	payload, err := json.Marshal(def)
@@ -37,12 +109,33 @@ func (q *SQLiteQueue) Enqueue(ctx context.Context, def workflow.Definition, prio
 	if err != nil {
 		return "", err
 	}
-	if err := q.queries.EnqueueWorkflow(ctx, sqlc.EnqueueWorkflowParams{
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	qtx := q.queries.WithTx(tx)
+	if err := qtx.EnqueueWorkflow(ctx, sqlc.EnqueueWorkflowParams{
 		ID:         string(id),
 		Definition: payload,
 		Priority:   int64(priority),
 		Metadata:   metaBytes,
 	}); err != nil {
+		_ = tx.Rollback()
+		return "", err
+	}
+	for _, tag := range def.Tags {
+		if tag == "" {
+			continue
+		}
+		if err := qtx.InsertQueueTags(ctx, sqlc.InsertQueueTagsParams{
+			EntryID: string(id),
+			Tag:     tag,
+		}); err != nil {
+			_ = tx.Rollback()
+			return "", err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return "", err
 	}
 	return id, nil
@@ -52,51 +145,67 @@ func (q *SQLiteQueue) Claim(ctx context.Context, sel Selector, workerID string) 
 	leaseID := uuid.NewString()
 	worker := sql.NullString{String: workerID, Valid: workerID != ""}
 	lease := sql.NullString{String: leaseID, Valid: true}
-	for attempts := 0; attempts < 10; attempts++ {
-		row, err := q.queries.ClaimNextWorkflow(ctx, sqlc.ClaimNextWorkflowParams{
-			ClaimedBy: worker,
-			LeaseID:   lease,
-		})
+
+	params := []any{
+		sql.Named("required_tags", string(encodeStringSlice(sel.All))),
+		sql.Named("any_tags", string(encodeStringSlice(sel.Any))),
+		sql.Named("none_tags", string(encodeStringSlice(sel.None))),
+		sql.Named("claimed_by", worker),
+		sql.Named("lease_id", lease),
+	}
+
+	var (
+		id        string
+		defBytes  []byte
+		metaBytes []byte
+		priority  int64
+		createdAt time.Time
+		attempts  int64
+		claimedBy sql.NullString
+		claimedAt sql.NullTime
+		leaseVal  sql.NullString
+	)
+
+	row := q.db.QueryRowContext(ctx, claimNextWorkflowSQL, params...)
+	if err := row.Scan(&id, &defBytes, &priority, &createdAt, &attempts, &claimedBy, &claimedAt, &leaseVal, &metaBytes); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNoPending
 		}
-		if err != nil {
-			return nil, err
-		}
-		var def workflow.Definition
-		if err := json.Unmarshal(row.Definition, &def); err != nil {
-			_ = q.queries.ReleaseWorkflow(ctx, row.ID)
-			return nil, err
-		}
-		if matchesSelector(def.Tags, sel) {
-			meta := map[string]any{}
-			if len(row.Metadata) > 0 {
-				_ = json.Unmarshal(row.Metadata, &meta)
-			}
-			claimed := &ClaimedWorkflow{
-				QueuedWorkflow: QueuedWorkflow{
-					ID:         WorkflowID(row.ID),
-					Definition: def,
-					Priority:   Priority(row.Priority),
-					CreatedAt:  row.CreatedAt,
-					Attempt:    int(row.Attempts),
-					Metadata:   meta,
-				},
-				LeaseID:  leaseID,
-				WorkerID: workerID,
-			}
-			if row.ClaimedAt.Valid {
-				claimed.ClaimedAt = row.ClaimedAt.Time
-			}
-			if row.LeaseID.Valid {
-				claimed.LeaseID = row.LeaseID.String
-			}
-			return claimed, nil
-		}
-		// Not a selector match; release and try again.
-		_ = q.queries.ReleaseWorkflow(ctx, row.ID)
+		return nil, err
 	}
-	return nil, ErrNoPending
+
+	var def workflow.Definition
+	if err := json.Unmarshal(defBytes, &def); err != nil {
+		_ = q.queries.ReleaseWorkflow(ctx, id)
+		return nil, err
+	}
+	meta := map[string]any{}
+	if len(metaBytes) > 0 {
+		_ = json.Unmarshal(metaBytes, &meta)
+	}
+
+	claimed := &ClaimedWorkflow{
+		QueuedWorkflow: QueuedWorkflow{
+			ID:         WorkflowID(id),
+			Definition: def,
+			Priority:   Priority(priority),
+			CreatedAt:  createdAt,
+			Attempt:    int(attempts),
+			Metadata:   meta,
+		},
+		LeaseID:  leaseID,
+		WorkerID: workerID,
+	}
+	if claimedAt.Valid {
+		claimed.ClaimedAt = claimedAt.Time
+	}
+	if leaseVal.Valid {
+		claimed.LeaseID = leaseVal.String
+	}
+	if claimedBy.Valid {
+		claimed.WorkerID = claimedBy.String
+	}
+	return claimed, nil
 }
 
 func (q *SQLiteQueue) Release(ctx context.Context, id WorkflowID) error {
@@ -121,6 +230,20 @@ func (q *SQLiteQueue) Stats(ctx context.Context) (QueueStats, error) {
 		Claimed:   int(stats.Claimed),
 		Cancelled: int(stats.Cancelled),
 	}, nil
+}
+
+func (q *SQLiteQueue) PendingCount(ctx context.Context, sel Selector) (int, error) {
+	params := []any{
+		sql.Named("required_tags", string(encodeStringSlice(sel.All))),
+		sql.Named("any_tags", string(encodeStringSlice(sel.Any))),
+		sql.Named("none_tags", string(encodeStringSlice(sel.None))),
+	}
+	row := q.db.QueryRowContext(ctx, pendingCountSQL, params...)
+	var count int
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (q *SQLiteQueue) Close() error {
@@ -158,4 +281,15 @@ func matchesSelector(tags []string, sel Selector) bool {
 		}
 	}
 	return true
+}
+
+func encodeStringSlice(values []string) []byte {
+	if len(values) == 0 {
+		return []byte("[]")
+	}
+	data, err := json.Marshal(values)
+	if err != nil {
+		return []byte("[]")
+	}
+	return data
 }

@@ -42,12 +42,29 @@ func TestMemoryStoreWait(t *testing.T) {
 	}
 
 	// Stage/action recording should not panic
-	stage := workflow.Stage{ID: "stage"}
-	if err := store.RecordStage(ctx, wfID, stage, false, "", WorkflowRunning); err != nil {
+	definition := workflow.Definition{Stages: []workflow.Stage{{Actions: []workflow.Action{{Ref: "ref"}}}}}
+	normalized, _, err := workflow.EnsureIDs(definition)
+	if err != nil {
+		t.Fatalf("ensure ids: %v", err)
+	}
+	stage := normalized.Stages[0]
+	action := stage.Actions[0]
+	stageRecord := StageRecord{
+		ID:     stage.ID,
+		Name:   stage.Name,
+		Tags:   append([]string(nil), stage.Tags...),
+		Status: WorkflowRunning,
+	}
+	if err := store.RecordStage(ctx, wfID, stageRecord); err != nil {
 		t.Fatalf("record stage: %v", err)
 	}
-	action := workflow.Action{ID: "action", Ref: "ref"}
-	if err := store.RecordAction(ctx, wfID, "stage", action, false, "", WorkflowRunning); err != nil {
+	actionRecord := ActionRecord{
+		Name:   action.ID,
+		Ref:    action.Ref,
+		Tags:   append([]string(nil), action.Tags...),
+		Status: WorkflowRunning,
+	}
+	if err := store.RecordAction(ctx, wfID, stage.ID, actionRecord); err != nil {
 		t.Fatalf("record action: %v", err)
 	}
 }

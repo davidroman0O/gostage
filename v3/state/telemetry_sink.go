@@ -22,7 +22,20 @@ func NewSQLiteTelemetrySink(db *sql.DB) (*SQLiteTelemetrySink, error) {
 }
 
 func (s *SQLiteTelemetrySink) Record(evt telemetry.Event) {
-	metadata, _ := json.Marshal(evt.Metadata)
+	meta := cloneMetadata(evt.Metadata)
+	if evt.Progress != nil {
+		progress := map[string]any{
+			"percent": evt.Progress.Percent,
+		}
+		if evt.Progress.Message != "" {
+			progress["message"] = evt.Progress.Message
+		}
+		if meta == nil {
+			meta = make(map[string]any, 1)
+		}
+		meta["progress"] = progress
+	}
+	metadata, _ := json.Marshal(meta)
 	workflowID := sql.NullString{}
 	if evt.WorkflowID != "" {
 		workflowID = sql.NullString{String: evt.WorkflowID, Valid: true}
@@ -44,18 +57,29 @@ func (s *SQLiteTelemetrySink) Record(evt telemetry.Event) {
 		attempt = sql.NullInt64{Int64: int64(evt.Attempt), Valid: true}
 	}
 	errMsg := sql.NullString{}
-	if evt.Err != nil {
-		errMsg = sql.NullString{String: evt.Err.Error(), Valid: true}
+	if evt.Error != "" {
+		errMsg = sql.NullString{String: evt.Error, Valid: true}
 	}
 	_ = s.queries.InsertTelemetryEvent(context.Background(), sqlc.InsertTelemetryEventParams{
 		WorkflowID: workflowID,
 		StageID:    stageID,
 		ActionID:   actionID,
-		Kind:       evt.Kind,
+		Kind:       string(evt.Kind),
 		Attempt:    attempt,
 		OccurredAt: evt.Timestamp,
 		Message:    message,
 		Metadata:   metadata,
 		Error:      errMsg,
 	})
+}
+
+func cloneMetadata(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]any, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }
