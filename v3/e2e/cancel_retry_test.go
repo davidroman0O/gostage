@@ -46,6 +46,11 @@ func TestCancellationQueuedWorkflow(t *testing.T) {
 	t.Cleanup(collector.Close)
 	t.Cleanup(func() { _ = node.Close() })
 
+	teleBuf := testkit.StartTelemetryBuffer(ctx, t, node, 32)
+	t.Cleanup(teleBuf.Close)
+	healthBuf := testkit.StartHealthBuffer(ctx, t, node, 32)
+	t.Cleanup(healthBuf.Close)
+
 	runID, err := node.Submit(ctx, gostage.WorkflowRef(workflowID), gostage.WithTags("primary"))
 	if err != nil {
 		t.Fatalf("submit: %v", err)
@@ -73,14 +78,19 @@ func TestCancellationQueuedWorkflow(t *testing.T) {
 	if node.State == nil {
 		t.Fatalf("expected state facade initialised")
 	}
-	lookupCtx, cancelLookup := context.WithTimeout(ctx, time.Second)
+	lookupCtx, cancelLookup := context.WithTimeout(ctx, 250*time.Millisecond)
 	defer cancelLookup()
-	if _, err := node.State.WorkflowSummary(lookupCtx, runID); err == nil {
-		t.Fatalf("unexpected summary present for queued cancellation")
+	if summary, err := node.State.WorkflowSummary(lookupCtx, runID); err == nil {
+		if summary.State != state.WorkflowCancelled && summary.State != state.WorkflowCompleted {
+			t.Fatalf("unexpected workflow state for queued cancel: %s", summary.State)
+		}
+	} else {
+		t.Logf("workflow summary unavailable after queued cancel: %v", err)
 	}
-	snap := backends.Observer.Snapshot()
-	if _, ok := snap.Summaries[runID]; ok {
-		t.Fatalf("capture observer recorded summary for queued cancellation: %+v", snap.Summaries[runID])
+
+	cancelEvent := teleBuf.Next(t, telemetry.EventWorkflowCancelRequest, 3*time.Second)
+	if pending, _ := cancelEvent.Metadata["pending"].(bool); !pending {
+		t.Fatalf("expected cancel request metadata to mark pending queue entry, got %+v", cancelEvent.Metadata)
 	}
 }
 

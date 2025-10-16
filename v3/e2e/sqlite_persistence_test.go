@@ -17,7 +17,7 @@ import (
 	"github.com/davidroman0O/gostage/v3/workflow"
 )
 
-func TestDraftUsageSQLitePersistence(t *testing.T) {
+func TestSQLitePersistenceEndToEnd(t *testing.T) {
 	testkit.ResetRegistry(t)
 
 	gostage.MustRegisterAction("sqlite.progress", func() gostage.ActionFunc {
@@ -33,20 +33,17 @@ func TestDraftUsageSQLitePersistence(t *testing.T) {
 	def := workflow.Definition{
 		Name: "SQLite Persistence",
 		Tags: []string{"sqlite"},
-		Stages: []workflow.Stage{
-			{
-				Name: "stage",
-				Actions: []workflow.Action{
-					{Ref: "sqlite.progress"},
-				},
-			},
-		},
+		Stages: []workflow.Stage{{
+			Name:    "stage",
+			Actions: []workflow.Action{{Ref: "sqlite.progress"}},
+		}},
 	}
 	workflowID, _ := gostage.MustRegisterWorkflow(def)
 
 	tempDir := t.TempDir()
 	dbPath := filepath.Join(tempDir, "state.db")
 	dsn := fmt.Sprintf("file:%s?_busy_timeout=15000&_foreign_keys=on&_journal_mode=WAL", dbPath)
+
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
@@ -70,19 +67,13 @@ func TestDraftUsageSQLitePersistence(t *testing.T) {
 	}
 
 	collector := testkit.StartDiagnosticsCollector(t, diag)
-	telemetryCh := make(chan telemetry.Event, 128)
-	teleCancel := node.StreamTelemetry(ctx, func(evt telemetry.Event) {
-		select {
-		case telemetryCh <- evt:
-		default:
-		}
-	})
+	t.Cleanup(collector.Close)
+	t.Cleanup(func() { _ = node.Close() })
 
-	defer func() {
-		teleCancel()
-		_ = node.Close()
-		collector.Close()
-	}()
+	teleBuf := testkit.StartTelemetryBuffer(ctx, t, node, 128)
+	t.Cleanup(teleBuf.Close)
+	healthBuf := testkit.StartHealthBuffer(ctx, t, node, 32)
+	t.Cleanup(healthBuf.Close)
 
 	runID, err := node.Submit(ctx,
 		gostage.WorkflowRef(workflowID),
@@ -100,45 +91,37 @@ func TestDraftUsageSQLitePersistence(t *testing.T) {
 		for _, evt := range collector.Events() {
 			t.Logf("diagnostic: component=%s severity=%s err=%v", evt.Component, evt.Severity, evt.Err)
 		}
-		for {
-			select {
-			case evt := <-telemetryCh:
-				t.Logf("telemetry: kind=%s workflow=%s stage=%s action=%s", evt.Kind, evt.WorkflowID, evt.StageID, evt.ActionID)
-			default:
-				goto telemetryLogged
-			}
-		}
-	telemetryLogged:
-		qCtx, cancelQuery := context.WithTimeout(ctx, time.Second)
-		rows, qerr := db.QueryContext(qCtx, "SELECT id, state, attempts FROM queue_entries")
-		if qerr == nil {
-			for rows.Next() {
-				var id string
-				var stateVal string
-				var attempts int
-				_ = rows.Scan(&id, &stateVal, &attempts)
-				t.Logf("queue_entry id=%s state=%s attempts=%d", id, stateVal, attempts)
-			}
-			rows.Close()
-		} else {
-			t.Logf("queue_entries query error: %v", qerr)
-		}
-		cancelQuery()
 		t.Fatalf("wait: %v", err)
 	}
 	if !result.Success {
 		t.Fatalf("expected success, got %+v", result)
 	}
 	if result.Output["result"] != "ok" {
-		t.Fatalf("expected store result, got %+v", result.Output)
+		t.Fatalf("expected store result 'ok', got %+v", result.Output)
 	}
+
+	progressEvt := teleBuf.Next(t, telemetry.EventActionProgressKind, 3*time.Second)
+	if progressEvt.Progress == nil || progressEvt.Progress.Percent != 100 {
+		t.Fatalf("expected progress 100, got %+v", progressEvt.Progress)
+	}
+	summaryEvt := teleBuf.Next(t, telemetry.EventWorkflowSummary, 3*time.Second)
+	if success, _ := summaryEvt.Metadata["success"].(bool); !success {
+		t.Fatalf("expected summary success, got %+v", summaryEvt.Metadata)
+	}
+
+	healthy := healthBuf.Next(t, "healthy", 3*time.Second)
+	if healthy.Pool != "sqlite" {
+		t.Fatalf("expected health pool 'sqlite', got %s", healthy.Pool)
+	}
+
 	if node.State == nil {
 		t.Fatalf("expected state reader to be initialised")
 	}
 	summary := testkit.AwaitWorkflowSummary(t, node.State, nil, ctx, runID)
 	if summary.State != state.WorkflowCompleted {
-		t.Fatalf("expected completed state, got %+v", summary)
+		t.Fatalf("expected completed state, got %+v", summary.State)
 	}
+
 	assertRowExists := func(query string, args ...any) {
 		deadline := time.Now().Add(5 * time.Second)
 		for {
