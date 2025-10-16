@@ -6,6 +6,7 @@ import (
 
 	"github.com/davidroman0O/gostage/v3/registry"
 	rt "github.com/davidroman0O/gostage/v3/runtime"
+	store "github.com/davidroman0O/gostage/v3/store"
 )
 
 // Materialize builds a runtime workflow instance from a declarative Definition.
@@ -83,7 +84,7 @@ func materializeStage(def Stage, reg registry.Registry) (*RuntimeStage, error) {
 	if len(def.InitialStore) > 0 {
 		initial := stage.InitialStore()
 		for key, value := range def.InitialStore {
-			_ = initial.Put(key, value)
+			_ = store.Put(initial, key, value)
 		}
 	}
 	for _, actionDef := range def.Actions {
@@ -124,12 +125,6 @@ func resolveAction(def Action, reg registry.Registry) (rt.Action, error) {
 	if err != nil {
 		return nil, err
 	}
-	if id != def.Ref {
-		aliasMeta := meta
-		_ = reg.RegisterAction(id, func(ctx rt.Context) error {
-			return factory(ctx)
-		}, aliasMeta)
-	}
 	desc := def.Description
 	if desc == "" {
 		desc = meta.Description
@@ -168,6 +163,7 @@ func resolveAction(def Action, reg registry.Registry) (rt.Action, error) {
 func (a *runtimeAction) Name() string        { return a.id }
 func (a *runtimeAction) Description() string { return a.description }
 func (a *runtimeAction) Tags() []string      { return append([]string(nil), a.tags...) }
+func (a *runtimeAction) Ref() string         { return a.ref }
 
 func (a *runtimeAction) Execute(ctx rt.Context) error {
 	if a.factory == nil {

@@ -3,12 +3,15 @@ package workflow
 import (
 	"time"
 
-	"github.com/davidroman0O/gostage/v3/internal/store"
+	internalstore "github.com/davidroman0O/gostage/v3/internal/store"
 	"github.com/davidroman0O/gostage/v3/registry"
 	rt "github.com/davidroman0O/gostage/v3/runtime"
+	store "github.com/davidroman0O/gostage/v3/store"
 	"github.com/google/uuid"
 	deadlock "github.com/sasha-s/go-deadlock"
 )
+
+const actionMutationSource = "runtime.ActionMutation"
 
 type RuntimeWorkflow struct {
 	id           string
@@ -16,7 +19,7 @@ type RuntimeWorkflow struct {
 	description  string
 	tags         []string
 	stages       []rt.Stage
-	store        *store.KVStore
+	store        *internalstore.KVStore
 	metadata     map[string]any
 	workflowType string
 	payload      map[string]any
@@ -62,7 +65,7 @@ func newRuntimeWorkflow(id, name, description string) *RuntimeWorkflow {
 		description: description,
 		tags:        make([]string, 0),
 		stages:      make([]rt.Stage, 0),
-		store:       store.NewKVStore(),
+		store:       internalstore.NewKVStore(),
 		metadata:    make(map[string]any),
 		middlewares: make([]rt.WorkflowMiddleware, 0),
 		runtime: workflowRuntime{
@@ -97,9 +100,9 @@ func (w *RuntimeWorkflow) Use(mw ...rt.WorkflowMiddleware) {
 
 func (w *RuntimeWorkflow) Metadata() map[string]any { return w.metadata }
 
-func (w *RuntimeWorkflow) Store() *store.KVStore { return w.store }
+func (w *RuntimeWorkflow) Store() store.Handle { return store.FromInternal(w.store) }
 
-func (w *RuntimeWorkflow) InitialStore() *store.KVStore { return w.store }
+func (w *RuntimeWorkflow) InitialStore() store.Handle { return store.FromInternal(w.store) }
 
 func (w *RuntimeWorkflow) ID() string          { return w.id }
 func (w *RuntimeWorkflow) Name() string        { return w.name }
@@ -123,6 +126,33 @@ func (w *RuntimeWorkflow) RuntimeState() WorkflowRuntimeSnapshot {
 		Enabled:       copyRuntimeToggleMap(w.runtime.enabled),
 		Removed:       copyRuntimeToggleMap(w.runtime.removed),
 	}
+}
+
+func (w *RuntimeWorkflow) DisabledSnapshot() (map[string]bool, map[string]bool) {
+	if len(w.stages) == 0 {
+		return nil, nil
+	}
+	actionDisabled := make(map[string]bool)
+	stageDisabled := make(map[string]bool)
+	for _, st := range w.stages {
+		if rs, ok := st.(*RuntimeStage); ok {
+			if snapshot := rs.disabledSnapshot(); snapshot != nil {
+				for id := range snapshot {
+					actionDisabled[id] = true
+				}
+			}
+			if rs.isStageDisabled() {
+				stageDisabled[rs.ID()] = true
+			}
+		}
+	}
+	if len(actionDisabled) == 0 {
+		actionDisabled = nil
+	}
+	if len(stageDisabled) == 0 {
+		stageDisabled = nil
+	}
+	return actionDisabled, stageDisabled
 }
 
 func (w *RuntimeWorkflow) RecordDynamicStage(stage rt.Stage, createdBy string) {
@@ -158,6 +188,7 @@ func (w *RuntimeWorkflow) recordStageToggle(target *map[string]RuntimeToggle, id
 
 var _ rt.Workflow = (*RuntimeWorkflow)(nil)
 var _ rt.RuntimeWorkflowRecorder = (*RuntimeWorkflow)(nil)
+var _ rt.DisableSnapshotProvider = (*RuntimeWorkflow)(nil)
 
 type RuntimeStage struct {
 	id          string
@@ -165,9 +196,10 @@ type RuntimeStage struct {
 	description string
 	tags        []string
 	actions     []rt.Action
-	initial     *store.KVStore
+	initial     *internalstore.KVStore
 	middlewares []rt.StageMiddleware
 	actionMW    []rt.ActionMiddleware
+	disabled    map[string]bool
 
 	runtime stageRuntime
 }
@@ -203,9 +235,10 @@ func newRuntimeStage(id, name, description string) *RuntimeStage {
 		description: description,
 		tags:        make([]string, 0),
 		actions:     make([]rt.Action, 0),
-		initial:     store.NewKVStore(),
+		initial:     internalstore.NewKVStore(),
 		middlewares: make([]rt.StageMiddleware, 0),
 		actionMW:    make([]rt.ActionMiddleware, 0),
+		disabled:    make(map[string]bool),
 		runtime: stageRuntime{
 			dynamicActions: make([]RuntimeActionAddition, 0),
 			disabled:       make(map[string]RuntimeToggle),
@@ -240,18 +273,18 @@ func (s *RuntimeStage) WithActionMiddleware(mw ...rt.ActionMiddleware) {
 	s.actionMW = append(s.actionMW, mw...)
 }
 
-func (s *RuntimeStage) SetInitialStore(st *store.KVStore) {
-	if st == nil {
-		st = store.NewKVStore()
+func (s *RuntimeStage) SetInitialStore(st store.Handle) {
+	if st.IsZero() {
+		st = store.New()
 	}
-	s.initial = st
+	s.initial = store.Unwrap(st)
 }
 
-func (s *RuntimeStage) ID() string                   { return s.id }
-func (s *RuntimeStage) Name() string                 { return s.name }
-func (s *RuntimeStage) Description() string          { return s.description }
-func (s *RuntimeStage) Tags() []string               { return append([]string(nil), s.tags...) }
-func (s *RuntimeStage) InitialStore() *store.KVStore { return s.initial }
+func (s *RuntimeStage) ID() string                 { return s.id }
+func (s *RuntimeStage) Name() string               { return s.name }
+func (s *RuntimeStage) Description() string        { return s.description }
+func (s *RuntimeStage) Tags() []string             { return append([]string(nil), s.tags...) }
+func (s *RuntimeStage) InitialStore() store.Handle { return store.FromInternal(s.initial) }
 func (s *RuntimeStage) Middlewares() []rt.StageMiddleware {
 	return append([]rt.StageMiddleware(nil), s.middlewares...)
 }
@@ -329,17 +362,22 @@ func (m *actionMutation) Add(action rt.Action) string {
 		action = runtimeActionWithOverrideName{Action: action, name: id}
 	}
 	m.stage.actions = append(m.stage.actions, action)
+	m.stage.RecordDynamicAction(action, actionMutationSource)
 	return id
 }
 
 func (m *actionMutation) Remove(id string) bool {
-	for i, action := range m.stage.actions {
-		if action.Name() == id {
-			m.stage.actions = append(m.stage.actions[:i], m.stage.actions[i+1:]...)
-			return true
-		}
+	if id == "" {
+		return false
 	}
-	return false
+	if _, idx := m.stage.actionByID(id); idx == -1 {
+		return false
+	} else {
+		m.stage.actions = append(m.stage.actions[:idx], m.stage.actions[idx+1:]...)
+	}
+	delete(m.stage.disabled, id)
+	m.stage.RecordActionRemoved(id, actionMutationSource)
+	return true
 }
 
 func (m *actionMutation) RemoveByTags(tags []string) int {
@@ -348,6 +386,8 @@ func (m *actionMutation) RemoveByTags(tags []string) int {
 	for _, action := range m.stage.actions {
 		if hasAny(action.Tags(), tags) {
 			removed++
+			delete(m.stage.disabled, action.Name())
+			m.stage.RecordActionRemoved(action.Name(), actionMutationSource)
 			continue
 		}
 		filtered = append(filtered, action)
@@ -356,15 +396,41 @@ func (m *actionMutation) RemoveByTags(tags []string) int {
 	return removed
 }
 
-func (m *actionMutation) Enable(string) {}
+func (m *actionMutation) Enable(id string) {
+	_ = m.stage.enableAction(id, actionMutationSource)
+}
 
-func (m *actionMutation) EnableByTags([]string) int { return 0 }
+func (m *actionMutation) EnableByTags(tags []string) int {
+	enabled := 0
+	for _, action := range m.stage.actions {
+		if hasAny(action.Tags(), tags) {
+			if m.stage.enableAction(action.Name(), actionMutationSource) {
+				enabled++
+			}
+		}
+	}
+	return enabled
+}
 
-func (m *actionMutation) Disable(string) {}
+func (m *actionMutation) Disable(id string) {
+	_ = m.stage.disableAction(id, actionMutationSource)
+}
 
-func (m *actionMutation) DisableByTags([]string) int { return 0 }
+func (m *actionMutation) DisableByTags(tags []string) int {
+	disabled := 0
+	for _, action := range m.stage.actions {
+		if hasAny(action.Tags(), tags) {
+			if m.stage.disableAction(action.Name(), actionMutationSource) {
+				disabled++
+			}
+		}
+	}
+	return disabled
+}
 
-func (m *actionMutation) IsEnabled(string) bool { return true }
+func (m *actionMutation) IsEnabled(id string) bool {
+	return m.stage.isActionEnabled(id)
+}
 
 type runtimeActionWithOverrideName struct {
 	rt.Action
@@ -381,6 +447,67 @@ func (a runtimeActionWithOverrideName) MiddlewareChain() []rt.ActionMiddleware {
 		return provider.MiddlewareChain()
 	}
 	return nil
+}
+
+func (s *RuntimeStage) actionByID(id string) (rt.Action, int) {
+	for idx, action := range s.actions {
+		if action.Name() == id {
+			return action, idx
+		}
+	}
+	return nil, -1
+}
+
+func (s *RuntimeStage) disableAction(id, createdBy string) bool {
+	if id == "" {
+		return false
+	}
+	if _, exists := s.disabled[id]; exists {
+		return false
+	}
+	if _, idx := s.actionByID(id); idx == -1 {
+		return false
+	}
+	s.disabled[id] = true
+	s.RecordActionDisabled(id, createdBy)
+	return true
+}
+
+func (s *RuntimeStage) enableAction(id, createdBy string) bool {
+	if id == "" {
+		return false
+	}
+	if _, exists := s.disabled[id]; !exists {
+		return false
+	}
+	delete(s.disabled, id)
+	s.RecordActionEnabled(id, createdBy)
+	return true
+}
+
+func (s *RuntimeStage) isActionEnabled(id string) bool {
+	if id == "" {
+		return false
+	}
+	return !s.disabled[id]
+}
+
+func (s *RuntimeStage) disabledSnapshot() map[string]bool {
+	if len(s.disabled) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(s.disabled))
+	for id, disabled := range s.disabled {
+		if disabled {
+			out[id] = true
+		}
+	}
+	return out
+}
+
+func (s *RuntimeStage) isStageDisabled() bool {
+	// stage-level disable tracking not yet defined; placeholder for future extension.
+	return false
 }
 
 func contains(values []string, target string) bool {
