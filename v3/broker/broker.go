@@ -15,6 +15,7 @@ type Broker interface {
 	ActionRegistered(ctx context.Context, workflowID, stageID string, action state.ActionRecord) error
 	ActionStatus(ctx context.Context, workflowID, stageID, actionName string, status state.WorkflowState) error
 	ActionProgress(ctx context.Context, workflowID, stageID, actionName string, progress int, message string) error
+	ActionEvent(ctx context.Context, workflowID, stageID, actionName, kind, message string, metadata map[string]any) error
 	ActionRemoved(ctx context.Context, workflowID, stageID, actionName, createdBy string) error
 	StageRemoved(ctx context.Context, workflowID, stageID, createdBy string) error
 	ExecutionSummary(ctx context.Context, workflowID string, report state.ExecutionReport) error
@@ -56,6 +57,10 @@ func (l *Local) ActionStatus(ctx context.Context, workflowID, stageID, actionNam
 
 func (l *Local) ActionProgress(ctx context.Context, workflowID, stageID, actionName string, progress int, message string) error {
 	return l.manager.ActionProgress(ctx, workflowID, stageID, actionName, progress, message)
+}
+
+func (l *Local) ActionEvent(ctx context.Context, workflowID, stageID, actionName, kind, message string, metadata map[string]any) error {
+	return l.manager.ActionEvent(ctx, workflowID, stageID, actionName, kind, message, metadata)
 }
 
 func (l *Local) ActionRemoved(ctx context.Context, workflowID, stageID, actionName, createdBy string) error {
