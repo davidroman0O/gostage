@@ -18,14 +18,51 @@ import (
 	"github.com/davidroman0O/gostage/v3/telemetry"
 )
 
-// ErrNodeClosed signals the node has already been shut down.
-var ErrNodeClosed = errors.New("gostage: node closed")
+// Public state aliases so callers don't reach into v3/state.
+type (
+	WorkflowID          = state.WorkflowID
+	StateReader         = state.StateReader
+	StateFilter         = state.StateFilter
+	WorkflowSummary     = state.WorkflowSummary
+	ActionHistoryRecord = state.ActionHistoryRecord
+	WorkflowState       = state.WorkflowState
+)
+
+const (
+	WorkflowPending   = state.WorkflowPending
+	WorkflowClaimed   = state.WorkflowClaimed
+	WorkflowRunning   = state.WorkflowRunning
+	WorkflowCompleted = state.WorkflowCompleted
+	WorkflowFailed    = state.WorkflowFailed
+	WorkflowCancelled = state.WorkflowCancelled
+	WorkflowSkipped   = state.WorkflowSkipped
+	WorkflowRemoved   = state.WorkflowRemoved
+)
+
+var (
+	// ErrNodeClosed signals the node has already been shut down.
+	ErrNodeClosed = errors.New("gostage: node closed")
+	// ErrNoMatchingPool indicates that no configured pool can accept a submission.
+	ErrNoMatchingPool = errors.New("gostage: no matching pool")
+	// ErrDuplicatePool indicates two pools share the same resolved name.
+	ErrDuplicatePool = errors.New("gostage: duplicate pool name")
+	// ErrInvalidPoolConfig indicates pool configuration is incomplete or invalid.
+	ErrInvalidPoolConfig = errors.New("gostage: invalid pool config")
+	// ErrDuplicateSpawner indicates two spawners share the same name.
+	ErrDuplicateSpawner = errors.New("gostage: duplicate spawner name")
+	// ErrUnknownSpawner indicates a pool references a spawner that was not configured.
+	ErrUnknownSpawner = errors.New("gostage: unknown spawner")
+	// ErrInvalidSpawnerConfig indicates a spawner configuration is incomplete or invalid.
+	ErrInvalidSpawnerConfig = errors.New("gostage: invalid spawner config")
+	// ErrSubmissionRejected indicates the node rejected a submission prior to enqueueing.
+	ErrSubmissionRejected = errors.New("gostage: submission rejected")
+)
 
 // Node is the public handle returned by Run. It embeds the runtime behaviour
 // while exposing the read-only State facade as a field for ergonomic access.
 type Node struct {
 	*parentNode
-	State state.StateReader
+	State StateReader
 }
 
 // Stats returns scheduler metrics using a background context.
@@ -73,7 +110,7 @@ type CancelFunc func()
 
 // Result captures workflow execution results returned by Wait.
 type Result struct {
-	WorkflowID      state.WorkflowID
+	WorkflowID      WorkflowID
 	Success         bool
 	Error           error
 	Duration        time.Duration
@@ -320,10 +357,14 @@ func Run(ctx context.Context, opts ...Option) (*Node, <-chan DiagnosticEvent, er
 	runOpts := []runner.Option{runner.WithDefaultLogger(logger)}
 	r := runner.New(local.Factory{}, registry.Default(), broker, runOpts...)
 
-	poolBindings := buildPools(cfg.pools)
-	if len(poolBindings) == 0 {
-		defaultPool := pools.NewLocal("default", state.Selector{All: []string{}}, 1)
-		poolBindings = []*poolBinding{{pool: defaultPool}}
+	spawnerIndex, err := indexSpawners(cfg.spawners)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	poolBindings, err := buildPools(cfg.pools, spawnerIndex)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	dispatcher := newDispatcher(ctx, queue, store, managerWithTelemetry, r, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, logger, cfg.dispatcher.ClaimInterval, cfg.dispatcher.Jitter, cfg.dispatcher.MaxInFlight, cfg.failurePolicy, poolBindings)
@@ -348,13 +389,50 @@ func Run(ctx context.Context, opts ...Option) (*Node, <-chan DiagnosticEvent, er
 	}, base.Diagnostics(), nil
 }
 
-func buildPools(cfgs []PoolConfig) []*poolBinding {
+func indexSpawners(cfgs []SpawnerConfig) (map[string]SpawnerConfig, error) {
+	if len(cfgs) == 0 {
+		return map[string]SpawnerConfig{}, nil
+	}
+	index := make(map[string]SpawnerConfig, len(cfgs))
+	for _, cfg := range cfgs {
+		if cfg.Name == "" || cfg.BinaryPath == "" {
+			return nil, errors.Join(ErrInvalidSpawnerConfig, fmt.Errorf("spawner %q requires name and binary path", cfg.Name))
+		}
+		if _, exists := index[cfg.Name]; exists {
+			return nil, errors.Join(ErrDuplicateSpawner, fmt.Errorf("spawner %q defined multiple times", cfg.Name))
+		}
+		index[cfg.Name] = cfg
+	}
+	return index, nil
+}
+
+func buildPools(cfgs []PoolConfig, spawners map[string]SpawnerConfig) ([]*poolBinding, error) {
+	if len(cfgs) == 0 {
+		cfgs = []PoolConfig{{Slots: 1}}
+	}
 	bindings := make([]*poolBinding, 0, len(cfgs))
+	seenNames := make(map[string]struct{}, len(cfgs))
 	for idx, cfg := range cfgs {
 		name := cfg.Name
 		if name == "" {
 			name = fmt.Sprintf("pool-%d", idx+1)
 		}
+		if _, exists := seenNames[name]; exists {
+			return nil, errors.Join(ErrDuplicatePool, fmt.Errorf("pool %q defined multiple times", name))
+		}
+		seenNames[name] = struct{}{}
+
+		slots := cfg.Slots
+		if slots <= 0 {
+			return nil, errors.Join(ErrInvalidPoolConfig, fmt.Errorf("pool %q must specify Slots > 0", name))
+		}
+
+		if cfg.Spawner != "" {
+			if _, ok := spawners[cfg.Spawner]; !ok {
+				return nil, errors.Join(ErrUnknownSpawner, fmt.Errorf("pool %q references unknown spawner %q", name, cfg.Spawner))
+			}
+		}
+
 		selector := state.Selector{
 			All:  append([]string(nil), cfg.Selector.All...),
 			Any:  append([]string(nil), cfg.Selector.Any...),
@@ -363,14 +441,10 @@ func buildPools(cfgs []PoolConfig) []*poolBinding {
 		if len(selector.All) == 0 && len(cfg.Tags) > 0 {
 			selector.All = append([]string(nil), cfg.Tags...)
 		}
-		slots := cfg.Slots
-		if slots <= 0 {
-			slots = 1
-		}
 		pool := pools.NewLocal(name, selector, slots)
 		bindings = append(bindings, &poolBinding{pool: pool})
 	}
-	return bindings
+	return bindings, nil
 }
 
 // ChildHandler represents the entrypoint executed when the binary re-enters as a child.

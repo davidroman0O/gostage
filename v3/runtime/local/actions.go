@@ -28,9 +28,6 @@ type actionContext struct {
 	removedStages   map[string]string            // stageID -> createdBy
 
 	allActions []rt.Action
-
-	dynamicStageCounter   int
-	dynamicActionCounters map[string]int
 }
 
 func newActionContext(workflow rt.Workflow) *actionContext {
@@ -340,23 +337,6 @@ func (ctx *actionContext) consumeRemovedStages() map[string]string {
 	}
 	ctx.removedStages = make(map[string]string)
 	return result
-}
-
-func (ctx *actionContext) nextStageCounter() int {
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-	ctx.dynamicStageCounter++
-	return ctx.dynamicStageCounter
-}
-
-func (ctx *actionContext) nextActionCounter(stageID string) int {
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-	if ctx.dynamicActionCounters == nil {
-		ctx.dynamicActionCounters = make(map[string]int)
-	}
-	ctx.dynamicActionCounters[stageID]++
-	return ctx.dynamicActionCounters[stageID]
 }
 
 func mutationSource(stage rt.Stage, action rt.Action) string {

@@ -36,7 +36,7 @@ func TestCancellationQueuedWorkflow(t *testing.T) {
 
 	opts := append(testkit.MemoryOptions(backends),
 		gostage.WithPool(gostage.PoolConfig{Name: "primary", Tags: []string{"primary"}, Slots: 1}),
-		gostage.WithDispatcherConfig(gostage.DispatcherConfig{ClaimInterval: 500 * time.Millisecond}),
+		gostage.WithDispatcher(gostage.DispatcherConfig{ClaimInterval: 500 * time.Millisecond}),
 	)
 	node, diag, err := gostage.Run(ctx, opts...)
 	if err != nil {

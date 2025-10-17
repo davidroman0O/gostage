@@ -30,12 +30,13 @@ WHERE id = sqlc.arg(id);
 
 -- name: InsertStageRun :exec
 INSERT INTO stage_runs (
-    workflow_id, stage_id, name, tags, dynamic, created_by, state, started_at, completed_at
+    workflow_id, stage_id, name, description, tags, dynamic, created_by, state, started_at, completed_at
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
 ON CONFLICT(workflow_id, stage_id) DO UPDATE SET
     name = excluded.name,
+    description = excluded.description,
     tags = excluded.tags,
     dynamic = excluded.dynamic,
     created_by = excluded.created_by,
@@ -54,12 +55,13 @@ WHERE workflow_id = sqlc.arg(workflow_id)
 
 -- name: InsertActionRun :exec
 INSERT INTO action_runs (
-    workflow_id, stage_id, action_id, ref, tags, dynamic, created_by, state, started_at, completed_at
+    workflow_id, stage_id, action_id, ref, description, tags, dynamic, created_by, state, started_at, completed_at
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
 ON CONFLICT(workflow_id, stage_id, action_id) DO UPDATE SET
     ref = excluded.ref,
+    description = excluded.description,
     tags = excluded.tags,
     dynamic = excluded.dynamic,
     created_by = excluded.created_by,
@@ -134,7 +136,7 @@ LIMIT CASE WHEN sqlc.arg(limit_rows) IS NULL OR sqlc.arg(limit_rows) <= 0 THEN -
 OFFSET COALESCE(sqlc.arg(offset_rows), 0);
 
 -- name: ListActionsByWorkflow :many
-SELECT action_id, stage_id, ref, tags, dynamic, created_by, state, started_at, completed_at
+SELECT action_id, stage_id, ref, description, tags, dynamic, created_by, state, started_at, completed_at
 FROM action_runs
 WHERE workflow_id = ?
 ORDER BY created_at ASC;

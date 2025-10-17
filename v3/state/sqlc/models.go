@@ -14,6 +14,7 @@ type ActionRun struct {
 	StageID     string         `json:"stage_id"`
 	ActionID    string         `json:"action_id"`
 	Ref         sql.NullString `json:"ref"`
+	Description sql.NullString `json:"description"`
 	Tags        []byte         `json:"tags"`
 	Dynamic     int64          `json:"dynamic"`
 	CreatedBy   sql.NullString `json:"created_by"`
@@ -54,6 +55,7 @@ type StageRun struct {
 	WorkflowID  string         `json:"workflow_id"`
 	StageID     string         `json:"stage_id"`
 	Name        sql.NullString `json:"name"`
+	Description sql.NullString `json:"description"`
 	Tags        []byte         `json:"tags"`
 	Dynamic     int64          `json:"dynamic"`
 	CreatedBy   sql.NullString `json:"created_by"`

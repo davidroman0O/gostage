@@ -174,13 +174,14 @@ func (r *managerStateReader) ActionHistory(ctx context.Context, id WorkflowID) (
 				continue
 			}
 			record := ActionHistoryRecord{
-				ActionID:  actionID,
-				StageID:   stageID,
-				Ref:       action.Ref,
-				Tags:      append([]string(nil), action.Tags...),
-				Dynamic:   action.Dynamic,
-				CreatedBy: action.CreatedBy,
-				State:     action.Status,
+				ActionID:    actionID,
+				StageID:     stageID,
+				Ref:         action.Ref,
+				Description: action.Description,
+				Tags:        append([]string(nil), action.Tags...),
+				Dynamic:     action.Dynamic,
+				CreatedBy:   action.CreatedBy,
+				State:       action.Status,
 			}
 			history = append(history, record)
 		}

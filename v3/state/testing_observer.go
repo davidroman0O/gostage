@@ -151,13 +151,14 @@ func (c *CaptureObserver) ActionRegistered(_ context.Context, workflowID, stageI
 	}
 	key := actionKey(stageID, action.Name)
 	c.actions[WorkflowID(workflowID)][key] = ActionHistoryRecord{
-		ActionID:  action.Name,
-		StageID:   stageID,
-		Ref:       action.Ref,
-		Tags:      append([]string(nil), action.Tags...),
-		Dynamic:   action.Dynamic,
-		CreatedBy: action.CreatedBy,
-		State:     action.Status,
+		ActionID:    action.Name,
+		StageID:     stageID,
+		Ref:         action.Ref,
+		Description: action.Description,
+		Tags:        append([]string(nil), action.Tags...),
+		Dynamic:     action.Dynamic,
+		CreatedBy:   action.CreatedBy,
+		State:       action.Status,
 	}
 }
 

@@ -62,7 +62,7 @@ func TestConcurrencyAndFairnessAcrossPools(t *testing.T) {
 		append(testkit.MemoryOptions(backends),
 			gostage.WithPool(gostage.PoolConfig{Name: "cpu", Tags: []string{"cpu"}, Slots: 1}),
 			gostage.WithPool(gostage.PoolConfig{Name: "gpu", Tags: []string{"gpu"}, Slots: 1}),
-			gostage.WithDispatcherConfig(gostage.DispatcherConfig{MaxInFlight: 2, ClaimInterval: 10 * time.Millisecond}),
+			gostage.WithDispatcher(gostage.DispatcherConfig{MaxInFlight: 2, ClaimInterval: 10 * time.Millisecond}),
 		)...,
 	)
 	if err != nil {
@@ -168,9 +168,20 @@ func TestConcurrencyAndFairnessAcrossPools(t *testing.T) {
 		t.Fatalf("expected healthy events for both pools, got %+v", poolsHealthy)
 	}
 
-	stats, err := node.Stats()
-	if err != nil {
-		t.Fatalf("stats final: %v", err)
+	deadline = time.Now().Add(500 * time.Millisecond)
+	var stats gostage.Snapshot
+	for {
+		stats, err = node.Stats()
+		if err != nil {
+			t.Fatalf("stats final: %v", err)
+		}
+		if stats.QueueDepth == 0 && stats.InFlight == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if stats.Completed != len(runs) || stats.InFlight != 0 || stats.QueueDepth != 0 {
 		t.Fatalf("unexpected final stats %+v", stats)

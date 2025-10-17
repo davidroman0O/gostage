@@ -33,7 +33,7 @@ type parentNode struct {
 	closed    atomic.Bool
 }
 
-func (n *parentNode) Submit(ctx context.Context, ref WorkflowReference, opts ...SubmitOption) (state.WorkflowID, error) {
+func (n *parentNode) Submit(ctx context.Context, ref WorkflowReference, opts ...SubmitOption) (WorkflowID, error) {
 	if n.closed.Load() {
 		return "", ErrNodeClosed
 	}
@@ -69,34 +69,54 @@ func (n *parentNode) Submit(ctx context.Context, ref WorkflowReference, opts ...
 		metadata[metadataInitialStore] = cfg.initialStore
 	}
 
-	return n.queue.Enqueue(ctx, def.Clone(), cfg.priority, metadata)
+	if !n.hasMatchingPool(def.Tags) {
+		return "", errors.Join(ErrSubmissionRejected, ErrNoMatchingPool)
+	}
+
+	id, err := n.queue.Enqueue(ctx, def.Clone(), cfg.priority, metadata)
+	if err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
-func (n *parentNode) Wait(ctx context.Context, id state.WorkflowID) (Result, error) {
+func (n *parentNode) Wait(ctx context.Context, id WorkflowID) (Result, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	summary, err := n.store.WaitResult(ctx, id)
+	summary, err := n.store.WaitResult(ctx, state.WorkflowID(id))
 	if err != nil {
 		return Result{}, err
 	}
 	return resultFromSummary(id, summary), nil
 }
 
-func (n *parentNode) Cancel(ctx context.Context, id state.WorkflowID) error {
+func (n *parentNode) Cancel(ctx context.Context, id WorkflowID) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if n.dispatcher != nil {
-		n.dispatcher.cancelWorkflow(id)
+		n.dispatcher.cancelWorkflow(state.WorkflowID(id))
 	}
 	if n.queue == nil {
 		return nil
 	}
-	if err := n.queue.Cancel(ctx, id); err != nil && !errors.Is(err, state.ErrNoPending) {
+	if err := n.queue.Cancel(ctx, state.WorkflowID(id)); err != nil && !errors.Is(err, state.ErrNoPending) {
 		return err
 	}
 	return nil
+}
+
+func (n *parentNode) hasMatchingPool(tags []string) bool {
+	if len(n.pools) == 0 {
+		return false
+	}
+	for _, binding := range n.pools {
+		if selectorMatches(tags, binding.pool.Selector()) {
+			return true
+		}
+	}
+	return false
 }
 
 func (n *parentNode) stats(ctx context.Context) (Snapshot, error) {
@@ -236,7 +256,7 @@ func (n *parentNode) Close() error {
 	return closeErr
 }
 
-func resultFromSummary(id state.WorkflowID, summary state.ResultSummary) Result {
+func resultFromSummary(id WorkflowID, summary state.ResultSummary) Result {
 	res := Result{
 		WorkflowID:      id,
 		Success:         summary.Success,
@@ -253,4 +273,37 @@ func resultFromSummary(id state.WorkflowID, summary state.ResultSummary) Result 
 		res.Error = errors.New(summary.Error)
 	}
 	return res
+}
+
+func selectorMatches(tags []string, sel state.Selector) bool {
+	if len(sel.All) == 0 && len(sel.Any) == 0 && len(sel.None) == 0 {
+		return true
+	}
+	tagSet := make(map[string]struct{}, len(tags))
+	for _, tag := range tags {
+		tagSet[tag] = struct{}{}
+	}
+	for _, required := range sel.All {
+		if _, ok := tagSet[required]; !ok {
+			return false
+		}
+	}
+	if len(sel.Any) > 0 {
+		match := false
+		for _, candidate := range sel.Any {
+			if _, ok := tagSet[candidate]; ok {
+				match = true
+				break
+			}
+		}
+		if !match {
+			return false
+		}
+	}
+	for _, excluded := range sel.None {
+		if _, ok := tagSet[excluded]; ok {
+			return false
+		}
+	}
+	return true
 }

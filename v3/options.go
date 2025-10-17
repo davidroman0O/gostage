@@ -22,7 +22,7 @@ type options struct {
 	telemetrySinks []telemetry.Sink
 	queue          state.Queue
 	store          state.Store
-	stateReader    state.StateReader
+	stateReader    StateReader
 	observers      []state.ManagerObserver
 	sqlite         *SQLiteConfig
 	pools          []PoolConfig
@@ -96,7 +96,7 @@ func WithSQLite(cfg SQLiteConfig) Option {
 }
 
 // WithStateReader overrides the read-only state facade exposed via Node.State.
-func WithStateReader(reader state.StateReader) Option {
+func WithStateReader(reader StateReader) Option {
 	return optionFunc(func(o *options) {
 		o.stateReader = reader
 	})
@@ -133,8 +133,8 @@ func WithSpawner(cfg SpawnerConfig) Option {
 	})
 }
 
-// WithDispatcherConfig sets dispatcher tuning parameters.
-func WithDispatcherConfig(cfg DispatcherConfig) Option {
+// WithDispatcher sets dispatcher tuning parameters.
+func WithDispatcher(cfg DispatcherConfig) Option {
 	return optionFunc(func(o *options) {
 		o.dispatcher = cfg
 	})

@@ -66,12 +66,13 @@ func (q *Queries) GetWorkflowSummary(ctx context.Context, id string) (WorkflowRu
 
 const insertActionRun = `-- name: InsertActionRun :exec
 INSERT INTO action_runs (
-    workflow_id, stage_id, action_id, ref, tags, dynamic, created_by, state, started_at, completed_at
+    workflow_id, stage_id, action_id, ref, description, tags, dynamic, created_by, state, started_at, completed_at
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
 ON CONFLICT(workflow_id, stage_id, action_id) DO UPDATE SET
     ref = excluded.ref,
+    description = excluded.description,
     tags = excluded.tags,
     dynamic = excluded.dynamic,
     created_by = excluded.created_by,
@@ -85,6 +86,7 @@ type InsertActionRunParams struct {
 	StageID     string         `json:"stage_id"`
 	ActionID    string         `json:"action_id"`
 	Ref         sql.NullString `json:"ref"`
+	Description sql.NullString `json:"description"`
 	Tags        []byte         `json:"tags"`
 	Dynamic     int64          `json:"dynamic"`
 	CreatedBy   sql.NullString `json:"created_by"`
@@ -99,6 +101,7 @@ func (q *Queries) InsertActionRun(ctx context.Context, arg InsertActionRunParams
 		arg.StageID,
 		arg.ActionID,
 		arg.Ref,
+		arg.Description,
 		arg.Tags,
 		arg.Dynamic,
 		arg.CreatedBy,
@@ -111,12 +114,13 @@ func (q *Queries) InsertActionRun(ctx context.Context, arg InsertActionRunParams
 
 const insertStageRun = `-- name: InsertStageRun :exec
 INSERT INTO stage_runs (
-    workflow_id, stage_id, name, tags, dynamic, created_by, state, started_at, completed_at
+    workflow_id, stage_id, name, description, tags, dynamic, created_by, state, started_at, completed_at
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
 ON CONFLICT(workflow_id, stage_id) DO UPDATE SET
     name = excluded.name,
+    description = excluded.description,
     tags = excluded.tags,
     dynamic = excluded.dynamic,
     created_by = excluded.created_by,
@@ -129,6 +133,7 @@ type InsertStageRunParams struct {
 	WorkflowID  string         `json:"workflow_id"`
 	StageID     string         `json:"stage_id"`
 	Name        sql.NullString `json:"name"`
+	Description sql.NullString `json:"description"`
 	Tags        []byte         `json:"tags"`
 	Dynamic     int64          `json:"dynamic"`
 	CreatedBy   sql.NullString `json:"created_by"`
@@ -142,6 +147,7 @@ func (q *Queries) InsertStageRun(ctx context.Context, arg InsertStageRunParams) 
 		arg.WorkflowID,
 		arg.StageID,
 		arg.Name,
+		arg.Description,
 		arg.Tags,
 		arg.Dynamic,
 		arg.CreatedBy,
@@ -153,7 +159,7 @@ func (q *Queries) InsertStageRun(ctx context.Context, arg InsertStageRunParams) 
 }
 
 const listActionsByWorkflow = `-- name: ListActionsByWorkflow :many
-SELECT action_id, stage_id, ref, tags, dynamic, created_by, state, started_at, completed_at
+SELECT action_id, stage_id, ref, description, tags, dynamic, created_by, state, started_at, completed_at
 FROM action_runs
 WHERE workflow_id = ?
 ORDER BY created_at ASC
@@ -163,6 +169,7 @@ type ListActionsByWorkflowRow struct {
 	ActionID    string         `json:"action_id"`
 	StageID     string         `json:"stage_id"`
 	Ref         sql.NullString `json:"ref"`
+	Description sql.NullString `json:"description"`
 	Tags        []byte         `json:"tags"`
 	Dynamic     int64          `json:"dynamic"`
 	CreatedBy   sql.NullString `json:"created_by"`
@@ -184,6 +191,7 @@ func (q *Queries) ListActionsByWorkflow(ctx context.Context, workflowID string) 
 			&i.ActionID,
 			&i.StageID,
 			&i.Ref,
+			&i.Description,
 			&i.Tags,
 			&i.Dynamic,
 			&i.CreatedBy,

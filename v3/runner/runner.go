@@ -951,8 +951,14 @@ func makeStageRecord(stage rt.Stage, dynamic bool, createdBy string) state.Stage
 }
 
 func makeActionRecord(action rt.Action, dynamic bool, createdBy string) state.ActionRecord {
+	ref := action.Name()
+	if withRef, ok := action.(actionWithRef); ok {
+		if candidate := withRef.Ref(); candidate != "" {
+			ref = candidate
+		}
+	}
 	return state.ActionRecord{
-		Ref:         action.Name(),
+		Ref:         ref,
 		Name:        action.Name(),
 		Description: action.Description(),
 		Tags:        copyStrings(action.Tags()),

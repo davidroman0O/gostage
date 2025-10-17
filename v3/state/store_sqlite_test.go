@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
@@ -34,8 +35,12 @@ func TestSQLiteStoreWaitResult(t *testing.T) {
 	}
 
 	stageDef := workflow.Stage{
-		Name:    "Prepare",
-		Actions: []workflow.Action{{Ref: "prepare.ref"}},
+		Name:        "Prepare",
+		Description: "Prepare description",
+		Actions: []workflow.Action{{
+			Ref:         "prepare.ref",
+			Description: "Prepare action description",
+		}},
 	}
 	stageNormalized, _, err := workflow.EnsureIDs(workflow.Definition{Stages: []workflow.Stage{stageDef}})
 	if err != nil {
@@ -44,23 +49,25 @@ func TestSQLiteStoreWaitResult(t *testing.T) {
 	stage := stageNormalized.Stages[0]
 	action := stage.Actions[0]
 	stageRecord := StageRecord{
-		ID:        stage.ID,
-		Name:      stage.Name,
-		Tags:      append([]string(nil), stage.Tags...),
-		Dynamic:   false,
-		CreatedBy: "",
-		Status:    WorkflowRunning,
+		ID:          stage.ID,
+		Name:        stage.Name,
+		Description: stage.Description,
+		Tags:        append([]string(nil), stage.Tags...),
+		Dynamic:     false,
+		CreatedBy:   "",
+		Status:      WorkflowRunning,
 	}
 	if err := store.RecordStage(ctx, wfID, stageRecord); err != nil {
 		t.Fatalf("record stage: %v", err)
 	}
 	actionRecord := ActionRecord{
-		Name:      action.ID,
-		Ref:       action.Ref,
-		Tags:      append([]string(nil), action.Tags...),
-		Dynamic:   false,
-		CreatedBy: "",
-		Status:    WorkflowRunning,
+		Name:        action.ID,
+		Ref:         action.Ref,
+		Description: action.Description,
+		Tags:        append([]string(nil), action.Tags...),
+		Dynamic:     false,
+		CreatedBy:   "",
+		Status:      WorkflowRunning,
 	}
 	if err := store.RecordAction(ctx, wfID, stage.ID, actionRecord); err != nil {
 		t.Fatalf("record action: %v", err)
@@ -112,6 +119,13 @@ func TestSQLiteStoreWaitResult(t *testing.T) {
 	if summaryRow.State != WorkflowCompleted || !summaryRow.Success {
 		t.Fatalf("summary state mismatch: %#v", summaryRow)
 	}
+	var storedStageDescription sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT description FROM stage_runs WHERE workflow_id = ? AND stage_id = ?`, wfID, stage.ID).Scan(&storedStageDescription); err != nil {
+		t.Fatalf("fetch stage description: %v", err)
+	}
+	if storedStageDescription.String != stage.Description {
+		t.Fatalf("expected stage description %q, got %q", stage.Description, storedStageDescription.String)
+	}
 
 	history, err := reader.ActionHistory(ctx, wfID)
 	if err != nil {
@@ -119,5 +133,11 @@ func TestSQLiteStoreWaitResult(t *testing.T) {
 	}
 	if len(history) != 1 || history[0].ActionID != action.ID || history[0].StageID != stage.ID {
 		t.Fatalf("unexpected history: %#v", history)
+	}
+	if history[0].Ref != action.Ref {
+		t.Fatalf("expected history ref %q, got %q", action.Ref, history[0].Ref)
+	}
+	if history[0].Description != action.Description {
+		t.Fatalf("expected history description %q, got %q", action.Description, history[0].Description)
 	}
 }

@@ -127,13 +127,14 @@ func (r *SQLiteStateReader) ActionHistory(ctx context.Context, id WorkflowID) ([
 			_ = json.Unmarshal(row.Tags, &tags)
 		}
 		record := ActionHistoryRecord{
-			ActionID:  row.ActionID,
-			StageID:   row.StageID,
-			Ref:       row.Ref.String,
-			Tags:      tags,
-			Dynamic:   row.Dynamic == 1,
-			CreatedBy: row.CreatedBy.String,
-			State:     WorkflowState(row.State),
+			ActionID:    row.ActionID,
+			StageID:     row.StageID,
+			Ref:         row.Ref.String,
+			Description: row.Description.String,
+			Tags:        append([]string(nil), tags...),
+			Dynamic:     row.Dynamic == 1,
+			CreatedBy:   row.CreatedBy.String,
+			State:       WorkflowState(row.State),
 		}
 		if row.StartedAt.Valid {
 			t := row.StartedAt.Time

@@ -1,7 +1,7 @@
 package local
 
 import (
-	"fmt"
+	"github.com/google/uuid"
 
 	rt "github.com/davidroman0O/gostage/v3/runtime"
 )
@@ -18,21 +18,8 @@ func (a *actionMutationContext) Add(entity rt.Action) string {
 	if entity == nil {
 		return ""
 	}
-	id := a.getActionID(entity)
-	if id == "" {
-		stage := a.actionContext.getStage()
-		stageID := ""
-		if stage != nil {
-			stageID = stage.ID()
-		}
-		counter := a.actionContext.nextActionCounter(stageID)
-		base := stageID
-		if base == "" {
-			base = "stage"
-		}
-		id = fmt.Sprintf("dyn-%s-action-%d", base, counter)
-		entity = actionWithOverrideName{Action: entity, name: id}
-	}
+	id := uuid.NewString()
+	entity = actionWithOverrideName{Action: entity, name: id}
 	a.addDynamicAction(entity)
 	return id
 }
@@ -177,6 +164,13 @@ type actionWithOverrideName struct {
 }
 
 func (a actionWithOverrideName) Name() string { return a.name }
+
+func (a actionWithOverrideName) Ref() string {
+	if withRef, ok := a.Action.(interface{ Ref() string }); ok {
+		return withRef.Ref()
+	}
+	return ""
+}
 
 func (a actionWithOverrideName) MiddlewareChain() []rt.ActionMiddleware {
 	type chainProvider interface {

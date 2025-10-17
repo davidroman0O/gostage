@@ -1,7 +1,7 @@
 package local
 
 import (
-	"fmt"
+	"github.com/google/uuid"
 
 	rt "github.com/davidroman0O/gostage/v3/runtime"
 )
@@ -18,12 +18,8 @@ func (s *stageMutationContext) Add(entity rt.Stage) string {
 	if entity == nil {
 		return ""
 	}
-	id := entity.ID()
-	if id == "" {
-		counter := s.actionContext.nextStageCounter()
-		id = fmt.Sprintf("dyn-stage-%d", counter)
-		entity = stageWithOverrideID{Stage: entity, id: id}
-	}
+	id := uuid.NewString()
+	entity = stageWithOverrideID{Stage: entity, id: id}
 	s.addDynamicStage(entity)
 	return id
 }

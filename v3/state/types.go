@@ -107,6 +107,7 @@ type ActionHistoryRecord struct {
 	ActionID    string
 	StageID     string
 	Ref         string
+	Description string
 	Tags        []string
 	Dynamic     bool
 	CreatedBy   string

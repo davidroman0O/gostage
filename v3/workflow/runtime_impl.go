@@ -356,11 +356,8 @@ func (m *actionMutation) Add(action rt.Action) string {
 	if action == nil {
 		return ""
 	}
-	id := action.Name()
-	if id == "" {
-		id = uuid.NewString()
-		action = runtimeActionWithOverrideName{Action: action, name: id}
-	}
+	id := uuid.NewString()
+	action = runtimeActionWithOverrideName{Action: action, name: id}
 	m.stage.actions = append(m.stage.actions, action)
 	m.stage.RecordDynamicAction(action, actionMutationSource)
 	return id
@@ -438,6 +435,13 @@ type runtimeActionWithOverrideName struct {
 }
 
 func (a runtimeActionWithOverrideName) Name() string { return a.name }
+
+func (a runtimeActionWithOverrideName) Ref() string {
+	if withRef, ok := a.Action.(interface{ Ref() string }); ok {
+		return withRef.Ref()
+	}
+	return ""
+}
 
 func (a runtimeActionWithOverrideName) MiddlewareChain() []rt.ActionMiddleware {
 	type chainProvider interface {
