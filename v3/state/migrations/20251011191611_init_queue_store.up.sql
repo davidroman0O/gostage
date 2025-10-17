@@ -96,3 +96,15 @@ CREATE TABLE IF NOT EXISTS telemetry_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_telemetry_workflow ON telemetry_events(workflow_id, occurred_at);
+
+CREATE TABLE IF NOT EXISTS queue_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id TEXT NOT NULL,
+    event TEXT NOT NULL,
+    worker_id TEXT,
+    attempt INTEGER,
+    metadata BLOB,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_queue_audit_created_at ON queue_audit(created_at DESC);

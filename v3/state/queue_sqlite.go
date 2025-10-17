@@ -205,19 +205,60 @@ func (q *SQLiteQueue) Claim(ctx context.Context, sel Selector, workerID string) 
 	if claimedBy.Valid {
 		claimed.WorkerID = claimedBy.String
 	}
+	q.recordAudit(ctx, claimed.ID, "claim", claimed.Attempt, claimed.WorkerID, map[string]any{
+		"selector": map[string][]string{
+			"all":  append([]string(nil), sel.All...),
+			"any":  append([]string(nil), sel.Any...),
+			"none": append([]string(nil), sel.None...),
+		},
+	})
 	return claimed, nil
 }
 
+func (q *SQLiteQueue) recordAudit(ctx context.Context, id WorkflowID, event string, attempt int, workerID string, metadata map[string]any) {
+	var metaBytes []byte
+	if len(metadata) > 0 {
+		metaBytes, _ = json.Marshal(metadata)
+	}
+	worker := sql.NullString{}
+	if workerID != "" {
+		worker = sql.NullString{String: workerID, Valid: true}
+	}
+	attemptVal := sql.NullInt64{}
+	if attempt > 0 {
+		attemptVal = sql.NullInt64{Int64: int64(attempt), Valid: true}
+	}
+	_ = q.queries.InsertQueueAudit(ctx, sqlc.InsertQueueAuditParams{
+		WorkflowID: string(id),
+		Event:      event,
+		WorkerID:   worker,
+		Attempt:    attemptVal,
+		Metadata:   metaBytes,
+	})
+}
+
 func (q *SQLiteQueue) Release(ctx context.Context, id WorkflowID) error {
-	return q.queries.ReleaseWorkflow(ctx, string(id))
+	if err := q.queries.ReleaseWorkflow(ctx, string(id)); err != nil {
+		return err
+	}
+	q.recordAudit(ctx, id, "release", 0, "", nil)
+	return nil
 }
 
 func (q *SQLiteQueue) Ack(ctx context.Context, id WorkflowID, summary ResultSummary) error {
-	return q.queries.AckWorkflow(ctx, string(id))
+	if err := q.queries.AckWorkflow(ctx, string(id)); err != nil {
+		return err
+	}
+	q.recordAudit(ctx, id, "ack", summary.Attempt, "", nil)
+	return nil
 }
 
 func (q *SQLiteQueue) Cancel(ctx context.Context, id WorkflowID) error {
-	return q.queries.CancelWorkflow(ctx, string(id))
+	if err := q.queries.CancelWorkflow(ctx, string(id)); err != nil {
+		return err
+	}
+	q.recordAudit(ctx, id, "cancel", 0, "", nil)
+	return nil
 }
 
 func (q *SQLiteQueue) Stats(ctx context.Context) (QueueStats, error) {
@@ -244,6 +285,38 @@ func (q *SQLiteQueue) PendingCount(ctx context.Context, sel Selector) (int, erro
 		return 0, err
 	}
 	return count, nil
+}
+
+func (q *SQLiteQueue) AuditLog(ctx context.Context, limit int) ([]QueueAuditRecord, error) {
+	if limit <= 0 {
+		limit = DefaultAuditLogLimit
+	}
+	rows, err := q.queries.ListQueueAudit(ctx, int64(limit))
+	if err != nil {
+		return nil, err
+	}
+	records := make([]QueueAuditRecord, len(rows))
+	for i, row := range rows {
+		rec := QueueAuditRecord{
+			WorkflowID: WorkflowID(row.WorkflowID),
+			Event:      row.Event,
+			Timestamp:  row.CreatedAt,
+		}
+		if row.WorkerID.Valid {
+			rec.WorkerID = row.WorkerID.String
+		}
+		if row.Attempt.Valid {
+			rec.Attempt = int(row.Attempt.Int64)
+		}
+		if len(row.Metadata) > 0 {
+			var meta map[string]any
+			if err := json.Unmarshal(row.Metadata, &meta); err == nil {
+				rec.Metadata = meta
+			}
+		}
+		records[i] = rec
+	}
+	return records, nil
 }
 
 func (q *SQLiteQueue) Close() error {

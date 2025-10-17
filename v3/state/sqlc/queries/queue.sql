@@ -30,3 +30,22 @@ SELECT
     (SELECT COUNT(*) FROM queue_entries WHERE state = 'pending') AS pending,
     (SELECT COUNT(*) FROM queue_entries WHERE state = 'claimed') AS claimed,
     (SELECT COUNT(*) FROM queue_entries WHERE state = 'cancelled') AS cancelled;
+
+-- name: InsertQueueAudit :exec
+INSERT INTO queue_audit (
+    workflow_id, event, worker_id, attempt, metadata
+) VALUES (
+    ?, ?, ?, ?, ?
+);
+
+-- name: ListQueueAudit :many
+SELECT
+    workflow_id,
+    event,
+    worker_id,
+    attempt,
+    metadata,
+    created_at
+FROM queue_audit
+ORDER BY id DESC
+LIMIT ?;

@@ -14,5 +14,8 @@ type Queue interface {
 	Cancel(ctx context.Context, id WorkflowID) error
 	Stats(ctx context.Context) (QueueStats, error)
 	PendingCount(ctx context.Context, sel Selector) (int, error)
+	AuditLog(ctx context.Context, limit int) ([]QueueAuditRecord, error)
 	Close() error
 }
+
+const DefaultAuditLogLimit = 256

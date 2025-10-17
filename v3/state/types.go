@@ -58,6 +58,16 @@ type QueueStats struct {
 	Cancelled int
 }
 
+// QueueAuditRecord captures a queue lifecycle event for observability.
+type QueueAuditRecord struct {
+	WorkflowID WorkflowID
+	Event      string
+	WorkerID   string
+	Attempt    int
+	Metadata   map[string]any
+	Timestamp  time.Time
+}
+
 type WorkflowState string
 
 const (

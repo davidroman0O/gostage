@@ -42,6 +42,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.insertActionRunStmt, err = db.PrepareContext(ctx, insertActionRun); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertActionRun: %w", err)
 	}
+	if q.insertQueueAuditStmt, err = db.PrepareContext(ctx, insertQueueAudit); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertQueueAudit: %w", err)
+	}
 	if q.insertQueueTagsStmt, err = db.PrepareContext(ctx, insertQueueTags); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertQueueTags: %w", err)
 	}
@@ -56,6 +59,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.listLatestActionProgressStmt, err = db.PrepareContext(ctx, listLatestActionProgress); err != nil {
 		return nil, fmt.Errorf("error preparing query ListLatestActionProgress: %w", err)
+	}
+	if q.listQueueAuditStmt, err = db.PrepareContext(ctx, listQueueAudit); err != nil {
+		return nil, fmt.Errorf("error preparing query ListQueueAudit: %w", err)
 	}
 	if q.listTelemetryByWorkflowStmt, err = db.PrepareContext(ctx, listTelemetryByWorkflow); err != nil {
 		return nil, fmt.Errorf("error preparing query ListTelemetryByWorkflow: %w", err)
@@ -119,6 +125,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing insertActionRunStmt: %w", cerr)
 		}
 	}
+	if q.insertQueueAuditStmt != nil {
+		if cerr := q.insertQueueAuditStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertQueueAuditStmt: %w", cerr)
+		}
+	}
 	if q.insertQueueTagsStmt != nil {
 		if cerr := q.insertQueueTagsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertQueueTagsStmt: %w", cerr)
@@ -142,6 +153,11 @@ func (q *Queries) Close() error {
 	if q.listLatestActionProgressStmt != nil {
 		if cerr := q.listLatestActionProgressStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listLatestActionProgressStmt: %w", cerr)
+		}
+	}
+	if q.listQueueAuditStmt != nil {
+		if cerr := q.listQueueAuditStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listQueueAuditStmt: %w", cerr)
 		}
 	}
 	if q.listTelemetryByWorkflowStmt != nil {
@@ -234,11 +250,13 @@ type Queries struct {
 	getExecutionSummaryStmt      *sql.Stmt
 	getWorkflowSummaryStmt       *sql.Stmt
 	insertActionRunStmt          *sql.Stmt
+	insertQueueAuditStmt         *sql.Stmt
 	insertQueueTagsStmt          *sql.Stmt
 	insertStageRunStmt           *sql.Stmt
 	insertTelemetryEventStmt     *sql.Stmt
 	listActionsByWorkflowStmt    *sql.Stmt
 	listLatestActionProgressStmt *sql.Stmt
+	listQueueAuditStmt           *sql.Stmt
 	listTelemetryByWorkflowStmt  *sql.Stmt
 	listWorkflowsFilteredStmt    *sql.Stmt
 	queueStatsStmt               *sql.Stmt
@@ -260,11 +278,13 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getExecutionSummaryStmt:      q.getExecutionSummaryStmt,
 		getWorkflowSummaryStmt:       q.getWorkflowSummaryStmt,
 		insertActionRunStmt:          q.insertActionRunStmt,
+		insertQueueAuditStmt:         q.insertQueueAuditStmt,
 		insertQueueTagsStmt:          q.insertQueueTagsStmt,
 		insertStageRunStmt:           q.insertStageRunStmt,
 		insertTelemetryEventStmt:     q.insertTelemetryEventStmt,
 		listActionsByWorkflowStmt:    q.listActionsByWorkflowStmt,
 		listLatestActionProgressStmt: q.listLatestActionProgressStmt,
+		listQueueAuditStmt:           q.listQueueAuditStmt,
 		listTelemetryByWorkflowStmt:  q.listTelemetryByWorkflowStmt,
 		listWorkflowsFilteredStmt:    q.listWorkflowsFilteredStmt,
 		queueStatsStmt:               q.queueStatsStmt,

@@ -33,6 +33,16 @@ type ExecutionSummary struct {
 	RemovedActions  []byte `json:"removed_actions"`
 }
 
+type QueueAudit struct {
+	ID         int64          `json:"id"`
+	WorkflowID string         `json:"workflow_id"`
+	Event      string         `json:"event"`
+	WorkerID   sql.NullString `json:"worker_id"`
+	Attempt    sql.NullInt64  `json:"attempt"`
+	Metadata   []byte         `json:"metadata"`
+	CreatedAt  time.Time      `json:"created_at"`
+}
+
 type QueueEntry struct {
 	ID         string         `json:"id"`
 	Definition []byte         `json:"definition"`

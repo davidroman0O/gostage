@@ -208,6 +208,11 @@ func (q *errorQueue) Stats(context.Context) (state.QueueStats, error) {
 func (q *errorQueue) PendingCount(context.Context, state.Selector) (int, error) {
 	return 0, nil
 }
+
+func (q *errorQueue) AuditLog(context.Context, int) ([]state.QueueAuditRecord, error) {
+	return nil, nil
+}
+
 func (q *errorQueue) Close() error { return nil }
 
 func TestFailurePolicyRetryReleasesWorkflow(t *testing.T) {
@@ -339,6 +344,11 @@ func (q *retryQueue) PendingCount(context.Context, state.Selector) (int, error) 
 	defer q.mu.Unlock()
 	return len(q.pending), nil
 }
+
+func (q *retryQueue) AuditLog(context.Context, int) ([]state.QueueAuditRecord, error) {
+	return nil, nil
+}
+
 func (q *retryQueue) Close() error { return nil }
 
 func TestDispatcherEmitsCancelledEventOnExplicitCancel(t *testing.T) {

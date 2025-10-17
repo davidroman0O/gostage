@@ -44,13 +44,32 @@ func (m *telemetryManager) WorkflowStatus(ctx context.Context, workflowID string
 	if err := m.delegate.WorkflowStatus(ctx, workflowID, status); err != nil {
 		return err
 	}
-	m.emit(telemetry.Event{
-		Kind:       telemetry.EventKind("workflow." + string(status)),
-		WorkflowID: workflowID,
-		Metadata: map[string]any{
-			"status": status,
-		},
-	})
+	var kind telemetry.EventKind
+	switch status {
+	case state.WorkflowRunning:
+		kind = telemetry.EventWorkflowStarted
+	case state.WorkflowCompleted:
+		kind = telemetry.EventWorkflowCompleted
+	case state.WorkflowFailed:
+		kind = telemetry.EventWorkflowFailed
+	case state.WorkflowCancelled:
+		kind = telemetry.EventWorkflowCancelled
+	case state.WorkflowSkipped:
+		kind = telemetry.EventWorkflowSkipped
+	case state.WorkflowRemoved:
+		kind = telemetry.EventWorkflowRemoved
+	default:
+		kind = ""
+	}
+	if kind != "" {
+		m.emit(telemetry.Event{
+			Kind:       kind,
+			WorkflowID: workflowID,
+			Metadata: map[string]any{
+				"status": status,
+			},
+		})
+	}
 	return nil
 }
 
@@ -77,14 +96,33 @@ func (m *telemetryManager) StageStatus(ctx context.Context, workflowID, stageID 
 	if err := m.delegate.StageStatus(ctx, workflowID, stageID, status); err != nil {
 		return err
 	}
-	m.emit(telemetry.Event{
-		Kind:       telemetry.EventKind("stage." + string(status)),
-		WorkflowID: workflowID,
-		StageID:    stageID,
-		Metadata: map[string]any{
-			"status": status,
-		},
-	})
+	var kind telemetry.EventKind
+	switch status {
+	case state.WorkflowRunning:
+		kind = telemetry.EventStageStarted
+	case state.WorkflowCompleted:
+		kind = telemetry.EventStageCompleted
+	case state.WorkflowFailed:
+		kind = telemetry.EventStageFailed
+	case state.WorkflowCancelled:
+		kind = telemetry.EventStageCancelled
+	case state.WorkflowSkipped:
+		kind = telemetry.EventStageSkipped
+	case state.WorkflowRemoved:
+		kind = telemetry.EventStageRemoved
+	default:
+		kind = ""
+	}
+	if kind != "" {
+		m.emit(telemetry.Event{
+			Kind:       kind,
+			WorkflowID: workflowID,
+			StageID:    stageID,
+			Metadata: map[string]any{
+				"status": status,
+			},
+		})
+	}
 	return nil
 }
 
@@ -112,15 +150,34 @@ func (m *telemetryManager) ActionStatus(ctx context.Context, workflowID, stageID
 	if err := m.delegate.ActionStatus(ctx, workflowID, stageID, actionName, status); err != nil {
 		return err
 	}
-	m.emit(telemetry.Event{
-		Kind:       telemetry.EventKind("action." + string(status)),
-		WorkflowID: workflowID,
-		StageID:    stageID,
-		ActionID:   actionName,
-		Metadata: map[string]any{
-			"status": status,
-		},
-	})
+	var kind telemetry.EventKind
+	switch status {
+	case state.WorkflowRunning:
+		kind = telemetry.EventActionStarted
+	case state.WorkflowCompleted:
+		kind = telemetry.EventActionCompleted
+	case state.WorkflowFailed:
+		kind = telemetry.EventActionFailed
+	case state.WorkflowCancelled:
+		kind = telemetry.EventActionCancelled
+	case state.WorkflowSkipped:
+		kind = telemetry.EventActionSkipped
+	case state.WorkflowRemoved:
+		kind = telemetry.EventActionRemoved
+	default:
+		kind = ""
+	}
+	if kind != "" {
+		m.emit(telemetry.Event{
+			Kind:       kind,
+			WorkflowID: workflowID,
+			StageID:    stageID,
+			ActionID:   actionName,
+			Metadata: map[string]any{
+				"status": status,
+			},
+		})
+	}
 	return nil
 }
 

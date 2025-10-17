@@ -39,8 +39,8 @@ func TestTelemetryManagerEmitsWorkflowStatus(t *testing.T) {
 		t.Fatalf("workflow status: %v", err)
 	}
 	evt := <-sink.C()
-	if evt.Kind != telemetry.EventKind("workflow.running") {
-		t.Fatalf("expected workflow.running, got %s", evt.Kind)
+	if evt.Kind != telemetry.EventWorkflowStarted {
+		t.Fatalf("expected %s, got %s", telemetry.EventWorkflowStarted, evt.Kind)
 	}
 	if evt.WorkflowID != string(wf.ID) {
 		t.Fatalf("unexpected workflow id: %s", evt.WorkflowID)

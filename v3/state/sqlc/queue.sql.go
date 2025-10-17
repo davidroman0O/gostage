@@ -7,6 +7,8 @@ package sqlc
 
 import (
 	"context"
+	"database/sql"
+	"time"
 )
 
 const ackWorkflow = `-- name: AckWorkflow :exec
@@ -55,6 +57,33 @@ func (q *Queries) EnqueueWorkflow(ctx context.Context, arg EnqueueWorkflowParams
 	return err
 }
 
+const insertQueueAudit = `-- name: InsertQueueAudit :exec
+INSERT INTO queue_audit (
+    workflow_id, event, worker_id, attempt, metadata
+) VALUES (
+    ?, ?, ?, ?, ?
+)
+`
+
+type InsertQueueAuditParams struct {
+	WorkflowID string         `json:"workflow_id"`
+	Event      string         `json:"event"`
+	WorkerID   sql.NullString `json:"worker_id"`
+	Attempt    sql.NullInt64  `json:"attempt"`
+	Metadata   []byte         `json:"metadata"`
+}
+
+func (q *Queries) InsertQueueAudit(ctx context.Context, arg InsertQueueAuditParams) error {
+	_, err := q.exec(ctx, q.insertQueueAuditStmt, insertQueueAudit,
+		arg.WorkflowID,
+		arg.Event,
+		arg.WorkerID,
+		arg.Attempt,
+		arg.Metadata,
+	)
+	return err
+}
+
 const insertQueueTags = `-- name: InsertQueueTags :exec
 INSERT INTO queue_entry_tags (entry_id, tag)
 VALUES (?1, ?2)
@@ -68,6 +97,58 @@ type InsertQueueTagsParams struct {
 func (q *Queries) InsertQueueTags(ctx context.Context, arg InsertQueueTagsParams) error {
 	_, err := q.exec(ctx, q.insertQueueTagsStmt, insertQueueTags, arg.EntryID, arg.Tag)
 	return err
+}
+
+const listQueueAudit = `-- name: ListQueueAudit :many
+SELECT
+    workflow_id,
+    event,
+    worker_id,
+    attempt,
+    metadata,
+    created_at
+FROM queue_audit
+ORDER BY id DESC
+LIMIT ?
+`
+
+type ListQueueAuditRow struct {
+	WorkflowID string         `json:"workflow_id"`
+	Event      string         `json:"event"`
+	WorkerID   sql.NullString `json:"worker_id"`
+	Attempt    sql.NullInt64  `json:"attempt"`
+	Metadata   []byte         `json:"metadata"`
+	CreatedAt  time.Time      `json:"created_at"`
+}
+
+func (q *Queries) ListQueueAudit(ctx context.Context, limit int64) ([]ListQueueAuditRow, error) {
+	rows, err := q.query(ctx, q.listQueueAuditStmt, listQueueAudit, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListQueueAuditRow
+	for rows.Next() {
+		var i ListQueueAuditRow
+		if err := rows.Scan(
+			&i.WorkflowID,
+			&i.Event,
+			&i.WorkerID,
+			&i.Attempt,
+			&i.Metadata,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const queueStats = `-- name: QueueStats :one

@@ -178,7 +178,11 @@ func (n *parentNode) StreamTelemetry(ctx context.Context, fn TelemetryHandler) C
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if n.dispatcher == nil || n.dispatcher.health == nil {
+	if n.base == nil {
+		return func() {}
+	}
+	dispatcher := n.base.TelemetryDispatcher()
+	if dispatcher == nil {
 		return func() {}
 	}
 	var canceled atomic.Bool
@@ -193,7 +197,7 @@ func (n *parentNode) StreamTelemetry(ctx context.Context, fn TelemetryHandler) C
 		}
 		fn(evt)
 	})
-	unregister := n.base.TelemetryDispatcher().Register(sink)
+	unregister := dispatcher.Register(sink)
 	return func() {
 		if canceled.CompareAndSwap(false, true) {
 			unregister()

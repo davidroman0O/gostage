@@ -100,3 +100,59 @@ func TestSQLiteQueueSelectorAnyNone(t *testing.T) {
 		t.Fatalf("expected ErrNoPending for unmatched Any selector, got %v", err)
 	}
 }
+
+func TestSQLiteQueueAuditLog(t *testing.T) {
+	db := openTestDB(t)
+	queue, err := NewSQLiteQueue(db)
+	if err != nil {
+		t.Fatalf("new sqlite queue: %v", err)
+	}
+
+	ctx := context.Background()
+	def := workflow.Definition{ID: "wf", Tags: []string{"payments"}}
+	id, err := queue.Enqueue(ctx, def, PriorityDefault, nil)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	run1, err := queue.Claim(ctx, Selector{All: []string{"payments"}}, "worker-1")
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	if run1.ID != id {
+		t.Fatalf("unexpected workflow claimed: %s", run1.ID)
+	}
+	if err := queue.Release(ctx, run1.ID); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	run2, err := queue.Claim(ctx, Selector{All: []string{"payments"}}, "worker-2")
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if err := queue.Ack(ctx, run2.ID, ResultSummary{Attempt: run2.Attempt, Success: true}); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+
+	records, err := queue.AuditLog(ctx, 10)
+	if err != nil {
+		t.Fatalf("audit log: %v", err)
+	}
+	if len(records) < 4 {
+		t.Fatalf("expected at least 4 audit entries, got %d", len(records))
+	}
+
+	events := []string{records[0].Event, records[1].Event, records[2].Event, records[3].Event}
+	expected := []string{"ack", "claim", "release", "claim"}
+	for i, want := range expected {
+		if events[i] != want {
+			t.Fatalf("expected event %q at index %d, got %q", want, i, events[i])
+		}
+	}
+	if records[3].WorkerID != "worker-1" {
+		t.Fatalf("expected first claim worker worker-1, got %s", records[3].WorkerID)
+	}
+	if records[0].Attempt != run2.Attempt {
+		t.Fatalf("expected ack attempt %d, got %d", run2.Attempt, records[0].Attempt)
+	}
+}

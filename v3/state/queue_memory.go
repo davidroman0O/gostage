@@ -19,12 +19,15 @@ type MemoryQueue struct {
 	waiters  map[string]chan ResultSummary
 	items    []*memQueueItem
 	inflight map[string]*memQueueItem
+	audit    []QueueAuditRecord
 }
 
 type memQueueItem struct {
 	queued   QueuedWorkflow
 	metadata map[string]any
 }
+
+const memoryQueueAuditLimit = DefaultAuditLogLimit
 
 // NewMemoryQueue creates a new MemoryQueue instance.
 func NewMemoryQueue() *MemoryQueue {
@@ -90,6 +93,13 @@ func (q *MemoryQueue) Claim(ctx context.Context, sel Selector, workerID string) 
 	workflowID := string(item.queued.ID)
 	q.waiters[workflowID] = make(chan ResultSummary, 1)
 	q.inflight[workflowID] = item
+	q.recordAuditLocked("claim", item.queued.ID, item.queued.Attempt, workerID, map[string]any{
+		"selector": map[string][]string{
+			"all":  append([]string(nil), sel.All...),
+			"any":  append([]string(nil), sel.Any...),
+			"none": append([]string(nil), sel.None...),
+		},
+	})
 	return claimed, nil
 }
 
@@ -120,6 +130,7 @@ func (q *MemoryQueue) Release(ctx context.Context, id WorkflowID) error {
 		}
 		return a.queued.Priority > b.queued.Priority
 	})
+	q.recordAuditLocked("release", id, item.queued.Attempt, "", nil)
 	q.cond.Signal()
 	return nil
 }
@@ -135,6 +146,9 @@ func (q *MemoryQueue) Ack(ctx context.Context, id WorkflowID, summary ResultSumm
 	if item != nil && summary.Attempt == 0 {
 		summary.Attempt = item.queued.Attempt
 	}
+	q.mu.Lock()
+	q.recordAuditLocked("ack", id, summary.Attempt, "", nil)
+	q.mu.Unlock()
 	if ch != nil {
 		ch <- summary
 	}
@@ -145,12 +159,18 @@ func (q *MemoryQueue) Cancel(_ context.Context, id WorkflowID) error {
 	key := string(id)
 	q.mu.Lock()
 	if _, ok := q.inflight[key]; ok {
+		q.recordAuditLocked("cancel", id, 0, "", map[string]any{
+			"state": "inflight",
+		})
 		q.mu.Unlock()
 		return nil
 	}
 	for idx, item := range q.items {
 		if item.queued.ID == id {
 			q.items = append(q.items[:idx], q.items[idx+1:]...)
+			q.recordAuditLocked("cancel", id, item.queued.Attempt, "", map[string]any{
+				"state": "pending",
+			})
 			q.mu.Unlock()
 			q.cond.Signal()
 			return nil
@@ -179,4 +199,47 @@ func (q *MemoryQueue) PendingCount(ctx context.Context, sel Selector) (int, erro
 	return count, nil
 }
 
+func (q *MemoryQueue) AuditLog(ctx context.Context, limit int) ([]QueueAuditRecord, error) {
+	_ = ctx
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if limit <= 0 || limit > len(q.audit) {
+		limit = len(q.audit)
+	}
+	result := make([]QueueAuditRecord, limit)
+	for i := 0; i < limit; i++ {
+		rec := q.audit[len(q.audit)-1-i]
+		result[i] = cloneAuditRecord(rec)
+	}
+	return result, nil
+}
+
 func (q *MemoryQueue) Close() error { return nil }
+
+func (q *MemoryQueue) recordAuditLocked(event string, id WorkflowID, attempt int, workerID string, metadata map[string]any) {
+	if metadata != nil {
+		metadata = cloneAnyMap(metadata)
+	}
+	rec := QueueAuditRecord{
+		WorkflowID: id,
+		Event:      event,
+		WorkerID:   workerID,
+		Attempt:    attempt,
+		Metadata:   metadata,
+		Timestamp:  time.Now(),
+	}
+	if len(q.audit) >= memoryQueueAuditLimit {
+		copy(q.audit, q.audit[1:])
+		q.audit[memoryQueueAuditLimit-1] = rec
+	} else {
+		q.audit = append(q.audit, rec)
+	}
+}
+
+func cloneAuditRecord(rec QueueAuditRecord) QueueAuditRecord {
+	out := rec
+	if rec.Metadata != nil {
+		out.Metadata = cloneAnyMap(rec.Metadata)
+	}
+	return out
+}

@@ -111,3 +111,79 @@ func TestMemoryQueueAnyNoneSelectors(t *testing.T) {
 		t.Fatalf("expected ErrNoPending when Any selector has no matches, got %v", err)
 	}
 }
+
+func TestMemoryQueueAuditLog(t *testing.T) {
+	q := NewMemoryQueue()
+	ctx := context.Background()
+
+	def := workflow.Definition{ID: "wf", Tags: []string{"payments"}}
+	id, err := q.Enqueue(ctx, def, PriorityDefault, nil)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	run1, err := q.Claim(ctx, Selector{All: []string{"payments"}}, "worker-1")
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	if err := q.Release(ctx, run1.ID); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	run2, err := q.Claim(ctx, Selector{All: []string{"payments"}}, "worker-2")
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if run2.ID != id {
+		t.Fatalf("expected same workflow ID after release, got %s", run2.ID)
+	}
+
+	if err := q.Ack(ctx, run2.ID, ResultSummary{Attempt: run2.Attempt, Success: true}); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+
+	records, err := q.AuditLog(ctx, 10)
+	if err != nil {
+		t.Fatalf("audit log: %v", err)
+	}
+	if len(records) < 4 {
+		t.Fatalf("expected at least 4 audit records, got %d", len(records))
+	}
+
+	events := []string{records[0].Event, records[1].Event, records[2].Event, records[3].Event}
+	expected := []string{"ack", "claim", "release", "claim"}
+	for i, want := range expected {
+		if events[i] != want {
+			t.Fatalf("expected event %q at position %d, got %q", want, i, events[i])
+		}
+	}
+	if records[0].Attempt != run2.Attempt {
+		t.Fatalf("ack attempt mismatch: want %d, got %d", run2.Attempt, records[0].Attempt)
+	}
+	if records[3].WorkerID != "worker-1" {
+		t.Fatalf("expected first claim worker worker-1, got %s", records[3].WorkerID)
+	}
+	rawSelector, exists := records[3].Metadata["selector"]
+	if !exists {
+		t.Fatalf("expected selector metadata, got %#v", records[3].Metadata)
+	}
+
+	var all []string
+	switch sel := rawSelector.(type) {
+	case map[string][]string:
+		all = sel["all"]
+	case map[string]any:
+		if vals, ok := sel["all"].([]any); ok {
+			for _, v := range vals {
+				if s, ok := v.(string); ok {
+					all = append(all, s)
+				}
+			}
+		}
+	default:
+		t.Fatalf("expected selector metadata, got %#v", records[3].Metadata)
+	}
+	if len(all) != 1 || all[0] != "payments" {
+		t.Fatalf("unexpected selector metadata: %#v", rawSelector)
+	}
+}
