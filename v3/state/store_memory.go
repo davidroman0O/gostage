@@ -2,7 +2,6 @@ package state
 
 import (
 	"context"
-	"time"
 
 	deadlock "github.com/sasha-s/go-deadlock"
 )
@@ -43,10 +42,10 @@ func (s *MemoryStore) UpdateWorkflowStatus(ctx context.Context, update WorkflowS
 	}
 	rec.State = update.Status
 	if update.StartedAt != nil {
-		rec.StartedAt = cloneTimePtr(update.StartedAt)
+		rec.StartedAt = cloneTimePointer(update.StartedAt)
 	}
 	if update.CompletedAt != nil {
-		rec.CompletedAt = cloneTimePtr(update.CompletedAt)
+		rec.CompletedAt = cloneTimePointer(update.CompletedAt)
 	}
 	if update.Duration != nil {
 		rec.Duration = *update.Duration
@@ -86,6 +85,12 @@ func (s *MemoryStore) UpdateStageStatus(ctx context.Context, update StageStatusU
 		stageClone = StageRecord{ID: update.StageID, Actions: make(map[string]*ActionRecord)}
 	}
 	stageClone.Status = update.Status
+	if update.StartedAt != nil {
+		stageClone.StartedAt = cloneTimePointer(update.StartedAt)
+	}
+	if update.CompletedAt != nil {
+		stageClone.CompletedAt = cloneTimePointer(update.CompletedAt)
+	}
 	s.stages[update.WorkflowID][update.StageID] = &stageClone
 	return nil
 }
@@ -128,6 +133,12 @@ func (s *MemoryStore) UpdateActionStatus(ctx context.Context, update ActionStatu
 		actionClone = ActionRecord{Name: update.ActionID}
 	}
 	actionClone.Status = update.Status
+	if update.StartedAt != nil {
+		actionClone.StartedAt = cloneTimePointer(update.StartedAt)
+	}
+	if update.CompletedAt != nil {
+		actionClone.CompletedAt = cloneTimePointer(update.CompletedAt)
+	}
 	s.actions[update.WorkflowID][update.StageID][update.ActionID] = &actionClone
 	if s.stages[update.WorkflowID] != nil {
 		if stage := s.stages[update.WorkflowID][update.StageID]; stage != nil {
@@ -180,12 +191,4 @@ func (s *MemoryStore) WaitResult(ctx context.Context, id WorkflowID) (ResultSumm
 
 func (s *MemoryStore) Close() error {
 	return nil
-}
-
-func cloneTimePtr(ts *time.Time) *time.Time {
-	if ts == nil {
-		return nil
-	}
-	v := *ts
-	return &v
 }

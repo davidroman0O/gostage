@@ -313,10 +313,21 @@ func (r *Runner) executeWorkflow(ctx context.Context, workflow rt.Workflow, exec
 
 		stageStatus.Status = StatusRunning
 		r.notifyStageStatus(ctx, workflow.ID(), stage.ID(), StatusRunning, logger)
-		if err := stageRunner(ctx, stage, workflow, logger); err != nil {
-			stageStatus.Status = StatusFailed
-			r.notifyStageStatus(ctx, workflow.ID(), stage.ID(), StatusFailed, logger)
+		err := stageRunner(ctx, stage, workflow, logger)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+				stageStatus.Status = StatusCancelled
+				r.notifyStageStatus(ctx, workflow.ID(), stage.ID(), StatusCancelled, logger)
+			} else {
+				stageStatus.Status = StatusFailed
+				r.notifyStageStatus(ctx, workflow.ID(), stage.ID(), StatusFailed, logger)
+			}
 			return err
+		}
+		if errors.Is(ctx.Err(), context.Canceled) {
+			stageStatus.Status = StatusCancelled
+			r.notifyStageStatus(ctx, workflow.ID(), stage.ID(), StatusCancelled, logger)
+			return ctx.Err()
 		}
 		stageStatus.Status = StatusCompleted
 		r.notifyStageStatus(ctx, workflow.ID(), stage.ID(), StatusCompleted, logger)
@@ -404,10 +415,21 @@ func (r *Runner) runActions(ctx context.Context, workflow rt.Workflow, stage rt.
 			}
 		}
 
-		if err := runnerFn(execCtx, action, i, i == len(actionList)-1); err != nil {
-			actionStatus.Status = StatusFailed
-			r.notifyActionStatus(ctx, workflow.ID(), stage.ID(), action.Name(), StatusFailed, logger)
+		err := runnerFn(execCtx, action, i, i == len(actionList)-1)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(execCtx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+				actionStatus.Status = StatusCancelled
+				r.notifyActionStatus(ctx, workflow.ID(), stage.ID(), action.Name(), StatusCancelled, logger)
+			} else {
+				actionStatus.Status = StatusFailed
+				r.notifyActionStatus(ctx, workflow.ID(), stage.ID(), action.Name(), StatusFailed, logger)
+			}
 			return err
+		}
+		if errors.Is(ctx.Err(), context.Canceled) || errors.Is(execCtx.Err(), context.Canceled) {
+			actionStatus.Status = StatusCancelled
+			r.notifyActionStatus(ctx, workflow.ID(), stage.ID(), action.Name(), StatusCancelled, logger)
+			return ctx.Err()
 		}
 
 		actionStatus.Status = StatusCompleted
@@ -702,8 +724,9 @@ func (r *Runner) notifyWorkflowStatus(ctx context.Context, logger rt.Logger, wor
 		return
 	}
 	stateValue := toWorkflowState(status)
+	callCtx := brokerContext(ctx)
 	r.safeBrokerCall(logger, "WorkflowStatus", func() error {
-		return r.broker.WorkflowStatus(ctx, workflowID, stateValue)
+		return r.broker.WorkflowStatus(callCtx, workflowID, stateValue)
 	})
 }
 
@@ -712,8 +735,9 @@ func (r *Runner) notifyStageStatus(ctx context.Context, workflowID, stageID stri
 		return
 	}
 	stateValue := toWorkflowState(status)
+	callCtx := brokerContext(ctx)
 	r.safeBrokerCall(logger, "StageStatus", func() error {
-		return r.broker.StageStatus(ctx, workflowID, stageID, stateValue)
+		return r.broker.StageStatus(callCtx, workflowID, stageID, stateValue)
 	})
 }
 
@@ -722,8 +746,9 @@ func (r *Runner) notifyActionStatus(ctx context.Context, workflowID, stageID, ac
 		return
 	}
 	stateValue := toWorkflowState(status)
+	callCtx := brokerContext(ctx)
 	r.safeBrokerCall(logger, "ActionStatus", func() error {
-		return r.broker.ActionStatus(ctx, workflowID, stageID, actionName, stateValue)
+		return r.broker.ActionStatus(callCtx, workflowID, stageID, actionName, stateValue)
 	})
 }
 
@@ -731,8 +756,9 @@ func (r *Runner) notifyActionProgress(ctx context.Context, workflowID, stageID, 
 	if r.broker == nil {
 		return
 	}
+	callCtx := brokerContext(ctx)
 	r.safeBrokerCall(logger, "ActionProgress", func() error {
-		return r.broker.ActionProgress(ctx, workflowID, stageID, actionName, progress, message)
+		return r.broker.ActionProgress(callCtx, workflowID, stageID, actionName, progress, message)
 	})
 }
 
@@ -747,16 +773,18 @@ func (r *Runner) notifyActionEvent(ctx context.Context, workflowID, stageID, act
 			metaCopy[k] = v
 		}
 	}
+	callCtx := brokerContext(ctx)
 	r.safeBrokerCall(logger, "ActionEvent", func() error {
-		return r.broker.ActionEvent(ctx, workflowID, stageID, actionName, kind, message, metaCopy)
+		return r.broker.ActionEvent(callCtx, workflowID, stageID, actionName, kind, message, metaCopy)
 	})
 }
 
 func (r *Runner) notifyActionRemoved(ctx context.Context, workflowID, stageID, actionName, createdBy string, logger rt.Logger) {
 	r.notifyActionStatus(ctx, workflowID, stageID, actionName, StatusRemoved, logger)
 	if r.broker != nil {
+		callCtx := brokerContext(ctx)
 		r.safeBrokerCall(logger, "ActionRemoved", func() error {
-			return r.broker.ActionRemoved(ctx, workflowID, stageID, actionName, createdBy)
+			return r.broker.ActionRemoved(callCtx, workflowID, stageID, actionName, createdBy)
 		})
 	}
 }
@@ -764,8 +792,9 @@ func (r *Runner) notifyActionRemoved(ctx context.Context, workflowID, stageID, a
 func (r *Runner) notifyStageRemoved(ctx context.Context, workflowID, stageID, createdBy string, logger rt.Logger) {
 	r.notifyStageStatus(ctx, workflowID, stageID, StatusRemoved, logger)
 	if r.broker != nil {
+		callCtx := brokerContext(ctx)
 		r.safeBrokerCall(logger, "StageRemoved", func() error {
-			return r.broker.StageRemoved(ctx, workflowID, stageID, createdBy)
+			return r.broker.StageRemoved(callCtx, workflowID, stageID, createdBy)
 		})
 	}
 }
@@ -790,6 +819,13 @@ func (r *Runner) safeBrokerCall(logger rt.Logger, op string, fn func() error) {
 			logger.Warn("runner broker %s failed: %v", op, err)
 		}
 	}
+}
+
+func brokerContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return context.WithoutCancel(ctx)
 }
 
 func (r *Runner) newBrokerProxy(ctx context.Context, workflow rt.Workflow, logger rt.Logger) *runnerBrokerProxy {

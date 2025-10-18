@@ -105,8 +105,8 @@ func (s *SQLiteStore) upsertStage(ctx context.Context, workflowID WorkflowID, st
 		Dynamic:     boolToInt64(stage.Dynamic),
 		CreatedBy:   toNullString(stage.CreatedBy),
 		State:       string(stage.Status),
-		StartedAt:   sql.NullTime{},
-		CompletedAt: sql.NullTime{},
+		StartedAt:   toNullTime(stage.StartedAt),
+		CompletedAt: toNullTime(stage.CompletedAt),
 	}
 	return s.queries.InsertStageRun(ctx, params)
 }
@@ -142,8 +142,8 @@ func (s *SQLiteStore) upsertAction(ctx context.Context, workflowID WorkflowID, s
 		Dynamic:     boolToInt64(action.Dynamic),
 		CreatedBy:   toNullString(action.CreatedBy),
 		State:       string(action.Status),
-		StartedAt:   sql.NullTime{},
-		CompletedAt: sql.NullTime{},
+		StartedAt:   toNullTime(action.StartedAt),
+		CompletedAt: toNullTime(action.CompletedAt),
 	}
 	return s.queries.InsertActionRun(ctx, params)
 }

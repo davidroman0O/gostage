@@ -5,6 +5,14 @@ import (
 	"time"
 )
 
+func cloneTimePointer(ts *time.Time) *time.Time {
+	if ts == nil {
+		return nil
+	}
+	val := *ts
+	return &val
+}
+
 func toNullString(val string) sql.NullString {
 	if val == "" {
 		return sql.NullString{}

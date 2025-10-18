@@ -149,13 +149,34 @@ func (m *StoreManager) StageStatus(ctx context.Context, workflowID, stageID stri
 		return err
 	}
 	stage := ensureStageRecord(&snap.record, stageID)
+	var startedAt, completedAt *time.Time
+	now := time.Now()
+
+	if status == WorkflowRunning && stage.StartedAt == nil {
+		stage.StartedAt = cloneTimePointer(&now)
+		startedAt = stage.StartedAt
+	}
+	if isTerminalState(status) {
+		if stage.StartedAt == nil {
+			stage.StartedAt = cloneTimePointer(&now)
+			startedAt = stage.StartedAt
+		}
+		if stage.CompletedAt == nil {
+			stage.CompletedAt = cloneTimePointer(&now)
+			completedAt = stage.CompletedAt
+		}
+	}
 	stage.Status = status
 
-	if err := m.store.UpdateStageStatus(ctx, StageStatusUpdate{
-		WorkflowID: id,
-		StageID:    stageID,
-		Status:     status,
-	}); err != nil {
+	update := StageStatusUpdate{
+		WorkflowID:  id,
+		StageID:     stageID,
+		Status:      status,
+		StartedAt:   startedAt,
+		CompletedAt: completedAt,
+	}
+
+	if err := m.store.UpdateStageStatus(ctx, update); err != nil {
 		return err
 	}
 	m.notifyStageStatus(ctx, workflowID, stageID, status)
@@ -193,14 +214,34 @@ func (m *StoreManager) ActionStatus(ctx context.Context, workflowID, stageID, ac
 	}
 	stage := ensureStageRecord(&snap.record, stageID)
 	action := ensureActionRecord(stage, actionName)
+	var startedAt, completedAt *time.Time
+	now := time.Now()
+
+	if status == WorkflowRunning && action.StartedAt == nil {
+		action.StartedAt = cloneTimePointer(&now)
+		startedAt = action.StartedAt
+	}
+	if isTerminalState(status) {
+		if action.StartedAt == nil {
+			action.StartedAt = cloneTimePointer(&now)
+			startedAt = action.StartedAt
+		}
+		if action.CompletedAt == nil {
+			action.CompletedAt = cloneTimePointer(&now)
+			completedAt = action.CompletedAt
+		}
+	}
 	action.Status = status
 
-	if err := m.store.UpdateActionStatus(ctx, ActionStatusUpdate{
-		WorkflowID: id,
-		StageID:    stageID,
-		ActionID:   actionName,
-		Status:     status,
-	}); err != nil {
+	update := ActionStatusUpdate{
+		WorkflowID:  id,
+		StageID:     stageID,
+		ActionID:    actionName,
+		Status:      status,
+		StartedAt:   startedAt,
+		CompletedAt: completedAt,
+	}
+	if err := m.store.UpdateActionStatus(ctx, update); err != nil {
 		return err
 	}
 	m.notifyActionStatus(ctx, workflowID, stageID, actionName, status)
@@ -414,6 +455,8 @@ func cloneWorkflowRecord(rec WorkflowRecord) WorkflowRecord {
 func cloneStageRecord(rec StageRecord) StageRecord {
 	out := rec
 	out.Tags = append([]string(nil), rec.Tags...)
+	out.StartedAt = cloneTimePointer(rec.StartedAt)
+	out.CompletedAt = cloneTimePointer(rec.CompletedAt)
 	if len(rec.Actions) > 0 {
 		out.Actions = make(map[string]*ActionRecord, len(rec.Actions))
 		for id, act := range rec.Actions {
@@ -433,6 +476,8 @@ func cloneActionRecord(rec ActionRecord) ActionRecord {
 	out := rec
 	out.Ref = rec.Ref
 	out.Tags = append([]string(nil), rec.Tags...)
+	out.StartedAt = cloneTimePointer(rec.StartedAt)
+	out.CompletedAt = cloneTimePointer(rec.CompletedAt)
 	return out
 }
 
@@ -516,6 +561,15 @@ func (m *StoreManager) notifyActionProgress(ctx context.Context, workflowID, sta
 	}
 	for _, obs := range m.observers {
 		obs.ActionProgress(ctx, workflowID, stageID, actionID, progress, message)
+	}
+}
+
+func isTerminalState(state WorkflowState) bool {
+	switch state {
+	case WorkflowCompleted, WorkflowFailed, WorkflowCancelled, WorkflowSkipped, WorkflowRemoved:
+		return true
+	default:
+		return false
 	}
 }
 

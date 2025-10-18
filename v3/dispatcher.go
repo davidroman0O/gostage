@@ -438,6 +438,9 @@ func (d *dispatcher) statsCounters() (completed, failed, cancelled int) {
 }
 
 func (d *dispatcher) decideFailure(claimed *state.ClaimedWorkflow, result runResult) FailureDecision {
+	if result.state == runner.StatusCancelled {
+		return FailureDecisionAck
+	}
 	if result.result.Success || d.failurePolicy == nil {
 		return FailureDecisionAck
 	}

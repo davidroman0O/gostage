@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,7 +18,47 @@ import (
 type SQLiteQueue struct {
 	db      *sql.DB
 	queries *sqlc.Queries
+	mu      sync.RWMutex
+	workers map[WorkflowID]string
 }
+
+const pendingCountQuery = `
+WITH require_all(tag) AS (
+    SELECT value FROM json_each(?)
+),
+require_any(tag) AS (
+    SELECT value FROM json_each(?)
+),
+exclude(tag) AS (
+    SELECT value FROM json_each(?)
+)
+SELECT COUNT(*) AS pending
+FROM queue_entries qe
+WHERE qe.state = 'pending'
+  AND (
+      (SELECT COUNT(*) FROM require_all) = 0
+      OR (
+          SELECT COUNT(DISTINCT t.tag)
+          FROM queue_entry_tags t
+          JOIN require_all ra ON ra.tag = t.tag
+          WHERE t.entry_id = qe.id
+      ) = (SELECT COUNT(*) FROM require_all)
+  )
+  AND (
+      (SELECT COUNT(*) FROM require_any) = 0
+      OR EXISTS (
+          SELECT 1
+          FROM queue_entry_tags t
+          JOIN require_any ry ON ry.tag = t.tag
+          WHERE t.entry_id = qe.id
+      )
+  )
+  AND NOT EXISTS (
+      SELECT 1
+      FROM queue_entry_tags t
+      JOIN exclude ex ON ex.tag = t.tag
+      WHERE t.entry_id = qe.id
+  );`
 
 // NewSQLiteQueue instantiates a queue backed by the provided *sql.DB. The caller
 // is responsible for running migrations before construction.
@@ -25,79 +66,12 @@ func NewSQLiteQueue(db *sql.DB) (*SQLiteQueue, error) {
 	if db == nil {
 		return nil, errors.New("state: db is nil")
 	}
-	return &SQLiteQueue{db: db, queries: sqlc.New(db)}, nil
+	return &SQLiteQueue{
+		db:      db,
+		queries: sqlc.New(db),
+		workers: make(map[WorkflowID]string),
+	}, nil
 }
-
-const claimNextWorkflowSQL = `
-UPDATE queue_entries
-SET state = 'claimed',
-    claimed_by = @claimed_by,
-    claimed_at = CURRENT_TIMESTAMP,
-    lease_id = @lease_id,
-    attempts = attempts + 1
-WHERE id = (
-    SELECT qe.id
-    FROM queue_entries qe
-    WHERE qe.state = 'pending'
-      AND NOT EXISTS (
-          SELECT 1
-          FROM json_each(@required_tags) rt
-          WHERE NOT EXISTS (
-              SELECT 1
-              FROM queue_entry_tags t
-              WHERE t.entry_id = qe.id AND t.tag = rt.value
-          )
-      )
-      AND (
-          NOT EXISTS (SELECT 1 FROM json_each(@any_tags))
-          OR EXISTS (
-              SELECT 1
-              FROM queue_entry_tags t
-              JOIN json_each(@any_tags) at ON at.value = t.tag
-              WHERE t.entry_id = qe.id
-          )
-      )
-      AND NOT EXISTS (
-          SELECT 1
-          FROM queue_entry_tags t
-          JOIN json_each(@none_tags) nt ON nt.value = t.tag
-          WHERE t.entry_id = qe.id
-      )
-    ORDER BY qe.priority DESC, qe.created_at ASC
-    LIMIT 1
-)
-RETURNING id, definition, priority, created_at, attempts, claimed_by, claimed_at, lease_id, metadata;
-`
-
-const pendingCountSQL = `
-SELECT COUNT(*) AS pending
-FROM queue_entries qe
-WHERE qe.state = 'pending'
-  AND NOT EXISTS (
-      SELECT 1
-      FROM json_each(@required_tags) rt
-      WHERE NOT EXISTS (
-          SELECT 1
-          FROM queue_entry_tags t
-          WHERE t.entry_id = qe.id AND t.tag = rt.value
-      )
-  )
-  AND (
-      NOT EXISTS (SELECT 1 FROM json_each(@any_tags))
-      OR EXISTS (
-          SELECT 1
-          FROM queue_entry_tags t
-          JOIN json_each(@any_tags) at ON at.value = t.tag
-          WHERE t.entry_id = qe.id
-      )
-  )
-  AND NOT EXISTS (
-      SELECT 1
-      FROM queue_entry_tags t
-      JOIN json_each(@none_tags) nt ON nt.value = t.tag
-      WHERE t.entry_id = qe.id
-  );
-`
 
 func (q *SQLiteQueue) Enqueue(ctx context.Context, def workflow.Definition, priority Priority, metadata map[string]any) (WorkflowID, error) {
 	id := WorkflowID(uuid.NewString())
@@ -142,77 +116,111 @@ func (q *SQLiteQueue) Enqueue(ctx context.Context, def workflow.Definition, prio
 }
 
 func (q *SQLiteQueue) Claim(ctx context.Context, sel Selector, workerID string) (*ClaimedWorkflow, error) {
+	const batchSize int64 = 64
+
 	leaseID := uuid.NewString()
 	worker := sql.NullString{String: workerID, Valid: workerID != ""}
 	lease := sql.NullString{String: leaseID, Valid: true}
 
-	params := []any{
-		sql.Named("required_tags", string(encodeStringSlice(sel.All))),
-		sql.Named("any_tags", string(encodeStringSlice(sel.Any))),
-		sql.Named("none_tags", string(encodeStringSlice(sel.None))),
-		sql.Named("claimed_by", worker),
-		sql.Named("lease_id", lease),
-	}
+	offset := int64(0)
 
-	var (
-		id        string
-		defBytes  []byte
-		metaBytes []byte
-		priority  int64
-		createdAt time.Time
-		attempts  int64
-		claimedBy sql.NullString
-		claimedAt sql.NullTime
-		leaseVal  sql.NullString
-	)
-
-	row := q.db.QueryRowContext(ctx, claimNextWorkflowSQL, params...)
-	if err := row.Scan(&id, &defBytes, &priority, &createdAt, &attempts, &claimedBy, &claimedAt, &leaseVal, &metaBytes); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+	for {
+		candidates, err := q.queries.SelectPendingCandidates(ctx, sqlc.SelectPendingCandidatesParams{
+			Limit:  batchSize,
+			Offset: offset,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if len(candidates) == 0 {
+			if offset == 0 {
+				return nil, ErrNoPending
+			}
 			return nil, ErrNoPending
 		}
-		return nil, err
-	}
 
-	var def workflow.Definition
-	if err := json.Unmarshal(defBytes, &def); err != nil {
-		_ = q.queries.ReleaseWorkflow(ctx, id)
-		return nil, err
-	}
-	meta := map[string]any{}
-	if len(metaBytes) > 0 {
-		_ = json.Unmarshal(metaBytes, &meta)
-	}
+		tagRows, err := q.queries.SelectPendingCandidateTags(ctx, sqlc.SelectPendingCandidateTagsParams{
+			Limit:  int64(len(candidates)),
+			Offset: offset,
+		})
+		if err != nil {
+			return nil, err
+		}
+		tagMap := make(map[string][]string, len(candidates))
+		for _, row := range tagRows {
+			if row.Tag != "" {
+				tagMap[row.EntryID] = append(tagMap[row.EntryID], row.Tag)
+			}
+		}
 
-	claimed := &ClaimedWorkflow{
-		QueuedWorkflow: QueuedWorkflow{
-			ID:         WorkflowID(id),
-			Definition: def,
-			Priority:   Priority(priority),
-			CreatedAt:  createdAt,
-			Attempt:    int(attempts),
-			Metadata:   meta,
-		},
-		LeaseID:  leaseID,
-		WorkerID: workerID,
+		var chosen *sqlc.SelectPendingCandidatesRow
+		for i := range candidates {
+			row := &candidates[i]
+			if matchesSelector(tagMap[row.ID], sel) {
+				chosen = row
+				break
+			}
+		}
+
+		if chosen == nil {
+			if len(candidates) < int(batchSize) {
+				return nil, ErrNoPending
+			}
+			offset += int64(len(candidates))
+			continue
+		}
+
+		attempts, err := q.queries.MarkWorkflowClaimed(ctx, sqlc.MarkWorkflowClaimedParams{
+			ID:        chosen.ID,
+			ClaimedBy: worker,
+			LeaseID:   lease,
+		})
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				offset = 0
+				continue
+			}
+			return nil, err
+		}
+
+		var def workflow.Definition
+		if err := json.Unmarshal(chosen.Definition, &def); err != nil {
+			_ = q.queries.ReleaseWorkflow(ctx, chosen.ID)
+			return nil, err
+		}
+
+		meta := map[string]any{}
+		if len(chosen.Metadata) > 0 {
+			if err := json.Unmarshal(chosen.Metadata, &meta); err != nil {
+				_ = q.queries.ReleaseWorkflow(ctx, chosen.ID)
+				return nil, err
+			}
+		}
+
+		claimed := &ClaimedWorkflow{
+			QueuedWorkflow: QueuedWorkflow{
+				ID:         WorkflowID(chosen.ID),
+				Definition: def,
+				Priority:   Priority(chosen.Priority),
+				CreatedAt:  chosen.CreatedAt,
+				Attempt:    int(attempts),
+				Metadata:   meta,
+			},
+			LeaseID:   leaseID,
+			WorkerID:  workerID,
+			ClaimedAt: time.Now(),
+		}
+
+		q.setWorker(claimed.ID, workerID)
+		q.recordAudit(ctx, claimed.ID, "claim", claimed.Attempt, workerID, map[string]any{
+			"selector": map[string][]string{
+				"all":  append([]string(nil), sel.All...),
+				"any":  append([]string(nil), sel.Any...),
+				"none": append([]string(nil), sel.None...),
+			},
+		})
+		return claimed, nil
 	}
-	if claimedAt.Valid {
-		claimed.ClaimedAt = claimedAt.Time
-	}
-	if leaseVal.Valid {
-		claimed.LeaseID = leaseVal.String
-	}
-	if claimedBy.Valid {
-		claimed.WorkerID = claimedBy.String
-	}
-	q.recordAudit(ctx, claimed.ID, "claim", claimed.Attempt, claimed.WorkerID, map[string]any{
-		"selector": map[string][]string{
-			"all":  append([]string(nil), sel.All...),
-			"any":  append([]string(nil), sel.Any...),
-			"none": append([]string(nil), sel.None...),
-		},
-	})
-	return claimed, nil
 }
 
 func (q *SQLiteQueue) recordAudit(ctx context.Context, id WorkflowID, event string, attempt int, workerID string, metadata map[string]any) {
@@ -237,27 +245,49 @@ func (q *SQLiteQueue) recordAudit(ctx context.Context, id WorkflowID, event stri
 	})
 }
 
+func (q *SQLiteQueue) setWorker(id WorkflowID, worker string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if worker == "" {
+		delete(q.workers, id)
+		return
+	}
+	q.workers[id] = worker
+}
+
+func (q *SQLiteQueue) workerFor(id WorkflowID) string {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return q.workers[id]
+}
+
 func (q *SQLiteQueue) Release(ctx context.Context, id WorkflowID) error {
+	worker := q.workerFor(id)
 	if err := q.queries.ReleaseWorkflow(ctx, string(id)); err != nil {
 		return err
 	}
-	q.recordAudit(ctx, id, "release", 0, "", nil)
+	q.recordAudit(ctx, id, "release", 0, worker, nil)
+	q.setWorker(id, "")
 	return nil
 }
 
 func (q *SQLiteQueue) Ack(ctx context.Context, id WorkflowID, summary ResultSummary) error {
+	worker := q.workerFor(id)
 	if err := q.queries.AckWorkflow(ctx, string(id)); err != nil {
 		return err
 	}
-	q.recordAudit(ctx, id, "ack", summary.Attempt, "", nil)
+	q.recordAudit(ctx, id, "ack", summary.Attempt, worker, nil)
+	q.setWorker(id, "")
 	return nil
 }
 
 func (q *SQLiteQueue) Cancel(ctx context.Context, id WorkflowID) error {
+	worker := q.workerFor(id)
 	if err := q.queries.CancelWorkflow(ctx, string(id)); err != nil {
 		return err
 	}
-	q.recordAudit(ctx, id, "cancel", 0, "", nil)
+	q.recordAudit(ctx, id, "cancel", 0, worker, nil)
+	q.setWorker(id, "")
 	return nil
 }
 
@@ -274,17 +304,36 @@ func (q *SQLiteQueue) Stats(ctx context.Context) (QueueStats, error) {
 }
 
 func (q *SQLiteQueue) PendingCount(ctx context.Context, sel Selector) (int, error) {
-	params := []any{
-		sql.Named("required_tags", string(encodeStringSlice(sel.All))),
-		sql.Named("any_tags", string(encodeStringSlice(sel.Any))),
-		sql.Named("none_tags", string(encodeStringSlice(sel.None))),
+	mustJSON := func(tags []string) (string, error) {
+		if len(tags) == 0 {
+			return "[]", nil
+		}
+		data, err := json.Marshal(tags)
+		if err != nil {
+			return "", err
+		}
+		return string(data), nil
 	}
-	row := q.db.QueryRowContext(ctx, pendingCountSQL, params...)
-	var count int
-	if err := row.Scan(&count); err != nil {
+
+	requireAll, err := mustJSON(sel.All)
+	if err != nil {
 		return 0, err
 	}
-	return count, nil
+	requireAny, err := mustJSON(sel.Any)
+	if err != nil {
+		return 0, err
+	}
+	exclude, err := mustJSON(sel.None)
+	if err != nil {
+		return 0, err
+	}
+
+	row := q.db.QueryRowContext(ctx, pendingCountQuery, requireAll, requireAny, exclude)
+	var total int
+	if err := row.Scan(&total); err != nil {
+		return 0, err
+	}
+	return total, nil
 }
 
 func (q *SQLiteQueue) AuditLog(ctx context.Context, limit int) ([]QueueAuditRecord, error) {
@@ -354,15 +403,4 @@ func matchesSelector(tags []string, sel Selector) bool {
 		}
 	}
 	return true
-}
-
-func encodeStringSlice(values []string) []byte {
-	if len(values) == 0 {
-		return []byte("[]")
-	}
-	data, err := json.Marshal(values)
-	if err != nil {
-		return []byte("[]")
-	}
-	return data
 }

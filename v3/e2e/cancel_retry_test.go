@@ -186,6 +186,59 @@ func TestCancellationInFlightWorkflow(t *testing.T) {
 	if summary.State != state.WorkflowCancelled {
 		t.Fatalf("expected cancelled state, got %s", summary.State)
 	}
+
+	if len(summary.Stages) == 0 {
+		t.Fatalf("expected stage entries in summary, got none")
+	}
+	stageCancelled := false
+	actionCancelled := false
+	for _, stage := range summary.Stages {
+		if stage == nil {
+			continue
+		}
+		if stage.Status == state.WorkflowCancelled {
+			stageCancelled = true
+		}
+		if len(stage.Actions) == 0 {
+			continue
+		}
+		for _, action := range stage.Actions {
+			if action == nil {
+				continue
+			}
+			if action.Status == state.WorkflowCancelled {
+				actionCancelled = true
+			}
+		}
+	}
+	if !stageCancelled {
+		t.Fatalf("expected at least one cancelled stage, got %+v", summary.Stages)
+	}
+	if !actionCancelled {
+		t.Fatalf("expected at least one cancelled action, got %+v", summary.Stages)
+	}
+
+	snap := backends.Observer.Snapshot()
+	stageEventCancelled := false
+	for _, evt := range snap.StageStatuses {
+		if evt.WorkflowID == string(runID) && evt.Status == state.WorkflowCancelled {
+			stageEventCancelled = true
+			break
+		}
+	}
+	if !stageEventCancelled {
+		t.Fatalf("observer did not emit cancelled stage status: %+v", snap.StageStatuses)
+	}
+	actionEventCancelled := false
+	for _, evt := range snap.ActionStatuses {
+		if evt.WorkflowID == string(runID) && evt.Status == state.WorkflowCancelled {
+			actionEventCancelled = true
+			break
+		}
+	}
+	if !actionEventCancelled {
+		t.Fatalf("observer did not emit cancelled action status: %+v", snap.ActionStatuses)
+	}
 }
 
 func TestRetryPolicyUpdatesSummary(t *testing.T) {

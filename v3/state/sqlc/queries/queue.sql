@@ -49,3 +49,50 @@ SELECT
 FROM queue_audit
 ORDER BY id DESC
 LIMIT ?;
+
+-- name: SelectPendingCandidates :many
+SELECT
+    qe.id,
+    qe.definition,
+    qe.priority,
+    qe.created_at,
+    qe.attempts,
+    qe.metadata
+FROM queue_entries qe
+WHERE qe.state = 'pending'
+ORDER BY qe.priority DESC, qe.created_at ASC
+LIMIT ? OFFSET ?;
+
+-- name: SelectPendingCandidateTags :many
+SELECT
+    t.entry_id,
+    t.tag
+FROM queue_entry_tags t
+JOIN (
+    SELECT id
+    FROM queue_entries
+    WHERE state = 'pending'
+    ORDER BY priority DESC, created_at ASC
+    LIMIT ? OFFSET ?
+) AS pending ON pending.id = t.entry_id
+ORDER BY t.entry_id, t.tag;
+
+-- name: SelectAllPendingTags :many
+SELECT
+    qe.id,
+    t.tag
+FROM queue_entries qe
+LEFT JOIN queue_entry_tags t ON t.entry_id = qe.id
+WHERE qe.state = 'pending'
+ORDER BY qe.priority DESC, qe.created_at ASC, t.tag ASC;
+
+-- name: MarkWorkflowClaimed :one
+UPDATE queue_entries
+SET state = 'claimed',
+    claimed_by = ?2,
+    claimed_at = CURRENT_TIMESTAMP,
+    lease_id = ?3,
+    attempts = attempts + 1
+WHERE id = ?1
+  AND state = 'pending'
+RETURNING attempts;

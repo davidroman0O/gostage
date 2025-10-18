@@ -129,6 +129,14 @@ func (c *CaptureObserver) StageRegistered(_ context.Context, workflowID string, 
 		c.stages[WorkflowID(workflowID)] = make(map[string]StageRecord)
 	}
 	c.stages[WorkflowID(workflowID)][stage.ID] = cloneStageRecord(stage)
+	if wf, ok := c.workflows[WorkflowID(workflowID)]; ok {
+		if wf.Stages == nil {
+			wf.Stages = make(map[string]*StageRecord)
+		}
+		clone := cloneStageRecord(stage)
+		wf.Stages[stage.ID] = &clone
+		c.workflows[WorkflowID(workflowID)] = wf
+	}
 }
 
 func (c *CaptureObserver) StageStatus(_ context.Context, workflowID, stageID string, status WorkflowState) {
@@ -140,6 +148,18 @@ func (c *CaptureObserver) StageStatus(_ context.Context, workflowID, stageID str
 			stage.Status = status
 			stages[stageID] = stage
 		}
+	}
+	if wf, ok := c.workflows[WorkflowID(workflowID)]; ok {
+		if wf.Stages == nil {
+			wf.Stages = make(map[string]*StageRecord)
+		}
+		if stage := wf.Stages[stageID]; stage != nil {
+			stage.Status = status
+		} else {
+			copy := StageRecord{ID: stageID, Status: status}
+			wf.Stages[stageID] = &copy
+		}
+		c.workflows[WorkflowID(workflowID)] = wf
 	}
 }
 
@@ -160,6 +180,23 @@ func (c *CaptureObserver) ActionRegistered(_ context.Context, workflowID, stageI
 		CreatedBy:   action.CreatedBy,
 		State:       action.Status,
 	}
+	if wf, ok := c.workflows[WorkflowID(workflowID)]; ok {
+		stage := wf.Stages[stageID]
+		if stage == nil {
+			stageClone := cloneStageRecord(StageRecord{ID: stageID})
+			stage = &stageClone
+			if wf.Stages == nil {
+				wf.Stages = make(map[string]*StageRecord)
+			}
+			wf.Stages[stageID] = stage
+		}
+		if stage.Actions == nil {
+			stage.Actions = make(map[string]*ActionRecord)
+		}
+		actionClone := cloneActionRecord(action)
+		stage.Actions[action.Name] = &actionClone
+		c.workflows[WorkflowID(workflowID)] = wf
+	}
 }
 
 func (c *CaptureObserver) ActionStatus(_ context.Context, workflowID, stageID, actionID string, status WorkflowState) {
@@ -176,6 +213,26 @@ func (c *CaptureObserver) ActionStatus(_ context.Context, workflowID, stageID, a
 		record := actions[key]
 		record.State = status
 		actions[key] = record
+	}
+	if wf, ok := c.workflows[WorkflowID(workflowID)]; ok {
+		stage := wf.Stages[stageID]
+		if stage == nil {
+			stageClone := cloneStageRecord(StageRecord{ID: stageID})
+			stage = &stageClone
+			if wf.Stages == nil {
+				wf.Stages = make(map[string]*StageRecord)
+			}
+			wf.Stages[stageID] = stage
+		}
+		if stage.Actions == nil {
+			stage.Actions = make(map[string]*ActionRecord)
+		}
+		if action := stage.Actions[actionID]; action != nil {
+			action.Status = status
+		} else {
+			stage.Actions[actionID] = &ActionRecord{Name: actionID, Status: status}
+		}
+		c.workflows[WorkflowID(workflowID)] = wf
 	}
 }
 

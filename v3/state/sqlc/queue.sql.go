@@ -151,6 +151,31 @@ func (q *Queries) ListQueueAudit(ctx context.Context, limit int64) ([]ListQueueA
 	return items, nil
 }
 
+const markWorkflowClaimed = `-- name: MarkWorkflowClaimed :one
+UPDATE queue_entries
+SET state = 'claimed',
+    claimed_by = ?2,
+    claimed_at = CURRENT_TIMESTAMP,
+    lease_id = ?3,
+    attempts = attempts + 1
+WHERE id = ?1
+  AND state = 'pending'
+RETURNING attempts
+`
+
+type MarkWorkflowClaimedParams struct {
+	ID        string         `json:"id"`
+	ClaimedBy sql.NullString `json:"claimed_by"`
+	LeaseID   sql.NullString `json:"lease_id"`
+}
+
+func (q *Queries) MarkWorkflowClaimed(ctx context.Context, arg MarkWorkflowClaimedParams) (int64, error) {
+	row := q.queryRow(ctx, q.markWorkflowClaimedStmt, markWorkflowClaimed, arg.ID, arg.ClaimedBy, arg.LeaseID)
+	var attempts int64
+	err := row.Scan(&attempts)
+	return attempts, err
+}
+
 const queueStats = `-- name: QueueStats :one
 SELECT
     (SELECT COUNT(*) FROM queue_entries WHERE state = 'pending') AS pending,
@@ -183,4 +208,143 @@ WHERE id = ?
 func (q *Queries) ReleaseWorkflow(ctx context.Context, id string) error {
 	_, err := q.exec(ctx, q.releaseWorkflowStmt, releaseWorkflow, id)
 	return err
+}
+
+const selectAllPendingTags = `-- name: SelectAllPendingTags :many
+SELECT
+    qe.id,
+    t.tag
+FROM queue_entries qe
+LEFT JOIN queue_entry_tags t ON t.entry_id = qe.id
+WHERE qe.state = 'pending'
+ORDER BY qe.priority DESC, qe.created_at ASC, t.tag ASC
+`
+
+type SelectAllPendingTagsRow struct {
+	ID  string         `json:"id"`
+	Tag sql.NullString `json:"tag"`
+}
+
+func (q *Queries) SelectAllPendingTags(ctx context.Context) ([]SelectAllPendingTagsRow, error) {
+	rows, err := q.query(ctx, q.selectAllPendingTagsStmt, selectAllPendingTags)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SelectAllPendingTagsRow
+	for rows.Next() {
+		var i SelectAllPendingTagsRow
+		if err := rows.Scan(&i.ID, &i.Tag); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const selectPendingCandidateTags = `-- name: SelectPendingCandidateTags :many
+SELECT
+    t.entry_id,
+    t.tag
+FROM queue_entry_tags t
+JOIN (
+    SELECT id
+    FROM queue_entries
+    WHERE state = 'pending'
+    ORDER BY priority DESC, created_at ASC
+    LIMIT ? OFFSET ?
+) AS pending ON pending.id = t.entry_id
+ORDER BY t.entry_id, t.tag
+`
+
+type SelectPendingCandidateTagsParams struct {
+	Limit  int64 `json:"limit"`
+	Offset int64 `json:"offset"`
+}
+
+func (q *Queries) SelectPendingCandidateTags(ctx context.Context, arg SelectPendingCandidateTagsParams) ([]QueueEntryTag, error) {
+	rows, err := q.query(ctx, q.selectPendingCandidateTagsStmt, selectPendingCandidateTags, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []QueueEntryTag
+	for rows.Next() {
+		var i QueueEntryTag
+		if err := rows.Scan(&i.EntryID, &i.Tag); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const selectPendingCandidates = `-- name: SelectPendingCandidates :many
+SELECT
+    qe.id,
+    qe.definition,
+    qe.priority,
+    qe.created_at,
+    qe.attempts,
+    qe.metadata
+FROM queue_entries qe
+WHERE qe.state = 'pending'
+ORDER BY qe.priority DESC, qe.created_at ASC
+LIMIT ? OFFSET ?
+`
+
+type SelectPendingCandidatesParams struct {
+	Limit  int64 `json:"limit"`
+	Offset int64 `json:"offset"`
+}
+
+type SelectPendingCandidatesRow struct {
+	ID         string    `json:"id"`
+	Definition []byte    `json:"definition"`
+	Priority   int64     `json:"priority"`
+	CreatedAt  time.Time `json:"created_at"`
+	Attempts   int64     `json:"attempts"`
+	Metadata   []byte    `json:"metadata"`
+}
+
+func (q *Queries) SelectPendingCandidates(ctx context.Context, arg SelectPendingCandidatesParams) ([]SelectPendingCandidatesRow, error) {
+	rows, err := q.query(ctx, q.selectPendingCandidatesStmt, selectPendingCandidates, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SelectPendingCandidatesRow
+	for rows.Next() {
+		var i SelectPendingCandidatesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Definition,
+			&i.Priority,
+			&i.CreatedAt,
+			&i.Attempts,
+			&i.Metadata,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

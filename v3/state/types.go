@@ -148,6 +148,8 @@ type StageRecord struct {
 	CreatedBy   string
 	Status      WorkflowState
 	Actions     map[string]*ActionRecord
+	StartedAt   *time.Time
+	CompletedAt *time.Time
 }
 
 type ActionRecord struct {
@@ -158,6 +160,8 @@ type ActionRecord struct {
 	Dynamic     bool
 	CreatedBy   string
 	Status      WorkflowState
+	StartedAt   *time.Time
+	CompletedAt *time.Time
 }
 
 type ExecutionReport struct {
