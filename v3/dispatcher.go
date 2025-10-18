@@ -2,7 +2,6 @@ package gostage
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -513,14 +512,8 @@ func extractInitialStore(metadata map[string]any) map[string]any {
 	if !ok {
 		return nil
 	}
-	switch value := raw.(type) {
-	case map[string]any:
+	if value, ok := raw.(map[string]any); ok {
 		return copyMap(value)
-	case string:
-		var data map[string]any
-		if err := json.Unmarshal([]byte(value), &data); err == nil {
-			return data
-		}
 	}
 	return nil
 }
