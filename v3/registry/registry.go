@@ -3,8 +3,8 @@ package registry
 import (
 	"fmt"
 
+	"github.com/davidroman0O/gostage/v3/internal/locks"
 	rt "github.com/davidroman0O/gostage/v3/runtime"
-	"github.com/sasha-s/go-deadlock"
 )
 
 // ActionFactory defines the function signature used to execute a registered action.
@@ -37,7 +37,7 @@ type Registry interface {
 }
 
 var defaultRegistry Registry = NewSafeRegistry()
-var defaultOnce deadlock.Once
+var defaultOnce locks.Once
 
 // Default returns the process-wide registry used by defaults helpers.
 func Default() Registry {
@@ -55,7 +55,7 @@ func SetDefault(reg Registry) {
 }
 
 type safeRegistry struct {
-	mu        deadlock.RWMutex
+	mu        locks.RWMutex
 	factories map[string]ActionFactory
 	metadata  map[string]ActionMetadata
 }

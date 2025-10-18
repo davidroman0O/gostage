@@ -8,13 +8,13 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/davidroman0O/gostage/v3/internal/locks"
 	"github.com/davidroman0O/gostage/v3/workflow"
-	deadlock "github.com/sasha-s/go-deadlock"
 )
 
 // MemoryQueue provides an in-memory queue for tests.
 type MemoryQueue struct {
-	mu       deadlock.Mutex
+	mu       locks.Mutex
 	cond     *sync.Cond
 	waiters  map[string]chan ResultSummary
 	items    []*memQueueItem

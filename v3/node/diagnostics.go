@@ -2,12 +2,12 @@ package node
 
 import (
 	"github.com/davidroman0O/gostage/v3/diagnostics"
-	"github.com/sasha-s/go-deadlock"
+	"github.com/davidroman0O/gostage/v3/internal/locks"
 )
 
 // DiagnosticsHub provides a subscribe/broadcast mechanism for diagnostic events.
 type DiagnosticsHub struct {
-	mu deadlock.RWMutex
+	mu locks.RWMutex
 
 	subscribers []chan diagnostics.Event
 	closed      bool

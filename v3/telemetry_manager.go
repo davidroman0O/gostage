@@ -267,6 +267,9 @@ func (m *telemetryManager) StoreExecutionSummary(ctx context.Context, workflowID
 		"success": report.Success,
 		"status":  report.Status,
 	}
+	if report.Reason != "" {
+		metadata["reason"] = report.Reason
+	}
 	if report.ErrorMessage != "" {
 		metadata["error"] = report.ErrorMessage
 	}
@@ -292,5 +295,5 @@ func (m *telemetryManager) emit(evt telemetry.Event) {
 	if evt.Timestamp.IsZero() {
 		evt.Timestamp = time.Now()
 	}
-	m.dispatcher.Dispatch(evt)
+	_ = m.dispatcher.Dispatch(evt)
 }

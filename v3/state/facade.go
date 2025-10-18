@@ -194,6 +194,9 @@ func convertWorkflowRow(row sqlc.WorkflowRun) (WorkflowSummary, error) {
 			Error:       row.Error.String,
 		},
 	}
+	if row.TerminationReason != "" {
+		summary.WorkflowRecord.TerminationReason = TerminationReason(row.TerminationReason)
+	}
 	return summary, nil
 }
 

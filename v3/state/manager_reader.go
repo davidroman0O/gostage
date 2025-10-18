@@ -30,6 +30,7 @@ func (r *managerStateReader) WorkflowSummary(ctx context.Context, id WorkflowID)
 		return WorkflowSummary{}, errors.New("state: workflow not found")
 	}
 	record := cloneWorkflowRecord(snap.record)
+	reason := record.TerminationReason
 	if snap.summary != nil {
 		summary := *snap.summary
 		record.Success = summary.Success
@@ -39,7 +40,17 @@ func (r *managerStateReader) WorkflowSummary(ctx context.Context, id WorkflowID)
 			completed := summary.CompletedAt
 			record.CompletedAt = &completed
 		}
+		if summary.Reason != "" {
+			reason = summary.Reason
+		}
+		if reason == "" {
+			reason = inferSummaryReason(record.State, summary.Success)
+		}
 	}
+	if reason == "" {
+		reason = inferSummaryReason(record.State, record.Success)
+	}
+	record.TerminationReason = reason
 	r.manager.mu.RUnlock()
 
 	return WorkflowSummary{WorkflowRecord: record}, nil
@@ -187,4 +198,23 @@ func (r *managerStateReader) ActionHistory(ctx context.Context, id WorkflowID) (
 		}
 	}
 	return history, nil
+}
+
+func inferSummaryReason(status WorkflowState, success bool) TerminationReason {
+	switch status {
+	case WorkflowCancelled:
+		return TerminationReasonUserCancel
+	case WorkflowCompleted:
+		if success {
+			return TerminationReasonSuccess
+		}
+		return TerminationReasonFailure
+	case WorkflowFailed:
+		return TerminationReasonFailure
+	default:
+		if success {
+			return TerminationReasonSuccess
+		}
+		return TerminationReasonUnknown
+	}
 }

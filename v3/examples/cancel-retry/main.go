@@ -31,12 +31,12 @@ func main() {
 
 	cancelWorkflowID, retryWorkflowID := registerWorkflows()
 
-	retryPolicy := gostage.FailurePolicyFunc(func(_ context.Context, info gostage.FailureContext) gostage.FailureDecision {
+	retryPolicy := gostage.FailurePolicyFunc(func(_ context.Context, info gostage.FailureContext) gostage.FailureOutcome {
 		if info.Attempt < 2 {
 			log.Printf("failure policy: retrying workflow %s attempt %d due to %v", info.WorkflowID, info.Attempt, info.Err)
-			return gostage.FailureDecisionRetry
+			return gostage.RetryOutcome()
 		}
-		return gostage.FailureDecisionAck
+		return gostage.AckOutcome()
 	})
 
 	node, diag, err := gostage.Run(ctx,

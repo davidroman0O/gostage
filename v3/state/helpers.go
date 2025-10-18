@@ -69,6 +69,9 @@ func toOptionalNullString(val *string) sql.NullString {
 	if val == nil {
 		return sql.NullString{}
 	}
+	if *val == "" {
+		return sql.NullString{}
+	}
 	return sql.NullString{String: *val, Valid: true}
 }
 

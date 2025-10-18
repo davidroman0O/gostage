@@ -116,7 +116,9 @@ func (d *dispatcher) emitWorkflowEvent(kind telemetry.EventKind, id state.Workfl
 	if err != nil {
 		evt.Error = err.Error()
 	}
-	d.telemetry.Dispatch(evt)
+	if derr := d.telemetry.Dispatch(evt); derr != nil {
+		d.reportError("telemetry.dispatch", derr)
+	}
 }
 
 func (d *dispatcher) start() {
@@ -228,38 +230,48 @@ func (d *dispatcher) execute(pool *pools.Local, release func(), claimed *state.C
 		}
 	}
 
-	decision := d.decideFailure(claimed, result)
-	cancelledEmitted := false
-	switch decision {
-	case FailureDecisionRetry:
+	outcome := d.decideFailure(claimed, result)
+	finalState := result.state
+	if outcome.FinalState != "" {
+		finalState = outcome.FinalState
+	}
+	result.state = finalState
+	result.report.Status = executionStatusToWorkflow(result.state)
+	result.reason = normalizeReason(outcome.Reason, finalState, result.result.Success)
+
+	switch outcome.Action {
+	case FailureActionRetry:
 		d.emitWorkflowEvent(telemetry.EventWorkflowRetry, claimed.ID, claimed.Attempt, map[string]any{
-			"pool":  pool.Name(),
-			"error": errorMessage(result.result.Error),
+			"pool":   pool.Name(),
+			"error":  errorMessage(result.result.Error),
+			"reason": result.reason,
 		}, result.result.Error)
 		if err := d.queue.Release(d.ctx, claimed.ID); err != nil {
 			d.reportError("dispatcher.release", fmt.Errorf("release workflow %s: %w", claimed.ID, err))
 			d.publishHealth(pool.Name(), node.HealthUnavailable, err.Error())
 		}
 		return
-	case FailureDecisionCancel:
-		d.emitWorkflowEvent(telemetry.EventWorkflowCancelled, claimed.ID, claimed.Attempt, map[string]any{
-			"pool":   pool.Name(),
-			"reason": "failure_policy",
-		}, result.result.Error)
-		cancelledEmitted = true
 	}
 
-	if !cancelledEmitted && result.state == runner.StatusCancelled {
+	if result.state == runner.StatusCancelled {
 		metadata := map[string]any{
-			"pool":   pool.Name(),
-			"reason": "explicit_request",
+			"pool": pool.Name(),
 		}
 		if msg := errorMessage(result.result.Error); msg != "" {
 			metadata["error"] = msg
 		}
+		switch result.reason {
+		case state.TerminationReasonPolicyCancel:
+			metadata["reason"] = "failure_policy"
+		case state.TerminationReasonTimeout:
+			metadata["reason"] = "timeout"
+		default:
+			metadata["reason"] = "explicit_request"
+		}
 		d.emitWorkflowEvent(telemetry.EventWorkflowCancelled, claimed.ID, claimed.Attempt, metadata, result.result.Error)
 	}
 
+	result.report.Reason = result.reason
 	summary := result.toSummary()
 	if err := d.queue.Ack(d.ctx, claimed.ID, summary); err != nil {
 		d.reportError("dispatcher.ack", fmt.Errorf("ack workflow %s: %w", claimed.ID, err))
@@ -436,25 +448,70 @@ func (d *dispatcher) statsCounters() (completed, failed, cancelled int) {
 	return int(d.completed.Load()), int(d.failed.Load()), int(d.cancelled.Load())
 }
 
-func (d *dispatcher) decideFailure(claimed *state.ClaimedWorkflow, result runResult) FailureDecision {
-	if result.state == runner.StatusCancelled {
-		return FailureDecisionAck
+func (d *dispatcher) decideFailure(claimed *state.ClaimedWorkflow, result runResult) FailureOutcome {
+	if result.result.Success {
+		return FailureOutcome{
+			Action:     FailureActionAck,
+			FinalState: runner.StatusCompleted,
+			Reason:     state.TerminationReasonSuccess,
+		}
 	}
-	if result.result.Success || d.failurePolicy == nil {
-		return FailureDecisionAck
+	if result.state == runner.StatusCancelled {
+		return FailureOutcome{
+			Action:     FailureActionAck,
+			FinalState: runner.StatusCancelled,
+			Reason:     state.TerminationReasonUserCancel,
+		}
+	}
+	if d.failurePolicy == nil {
+		return FailureOutcome{
+			Action:     FailureActionAck,
+			FinalState: result.state,
+			Reason:     state.TerminationReasonFailure,
+		}
 	}
 	ctx := FailureContext{
 		WorkflowID: claimed.ID,
 		Attempt:    claimed.Attempt,
 		Err:        result.result.Error,
 	}
-	switch decision := d.failurePolicy.Decide(d.ctx, ctx); decision {
-	case FailureDecisionRetry:
-		return FailureDecisionRetry
-	case FailureDecisionCancel:
-		return FailureDecisionCancel
-	default:
-		return FailureDecisionAck
+	outcome := d.failurePolicy.Decide(d.ctx, ctx)
+	if outcome.Action == FailureActionRetry {
+		if outcome.Reason == "" {
+			outcome.Reason = state.TerminationReasonFailure
+		}
+		return outcome
+	}
+	if outcome.FinalState == "" {
+		outcome.FinalState = result.state
+	}
+	if outcome.Reason == "" {
+		switch outcome.FinalState {
+		case runner.StatusCancelled:
+			outcome.Reason = state.TerminationReasonPolicyCancel
+		case runner.StatusCompleted:
+			outcome.Reason = state.TerminationReasonSuccess
+		default:
+			outcome.Reason = state.TerminationReasonFailure
+		}
+	}
+	if outcome.Action == FailureActionFinalize {
+		if outcome.FinalState == "" {
+			outcome.FinalState = runner.StatusCancelled
+		}
+		return outcome
+	}
+	// Default: acknowledge.
+	if outcome.Action == FailureActionAck {
+		if outcome.Reason == "" {
+			outcome.Reason = state.TerminationReasonFailure
+		}
+		return outcome
+	}
+	return FailureOutcome{
+		Action:     FailureActionAck,
+		FinalState: result.state,
+		Reason:     state.TerminationReasonFailure,
 	}
 }
 
@@ -480,9 +537,15 @@ type runResult struct {
 	result  runner.RunResult
 	report  state.ExecutionReport
 	state   runner.ExecutionStatus
+	reason  state.TerminationReason
 }
 
 func (r runResult) toSummary() state.ResultSummary {
+	completedAt := r.report.CompletedAt
+	if completedAt.IsZero() {
+		completedAt = time.Now()
+	}
+	reason := normalizeReason(r.reason, r.state, r.result.Success)
 	summary := state.ResultSummary{
 		Success:         r.result.Success,
 		Duration:        r.result.Duration,
@@ -491,12 +554,21 @@ func (r runResult) toSummary() state.ResultSummary {
 		DisabledActions: copyBoolMap(r.result.DisabledActions),
 		RemovedStages:   copyStringMap(r.result.RemovedStages),
 		RemovedActions:  copyStringMap(r.result.RemovedActions),
-		CompletedAt:     time.Now(),
+		CompletedAt:     completedAt,
+		Reason:          reason,
 	}
-	if r.claimed != nil && r.claimed.Attempt > 0 {
-		summary.Attempt = r.claimed.Attempt
-	} else if r.result.Attempt > 0 {
-		summary.Attempt = r.result.Attempt
+	if r.reason == "" {
+		fmt.Println("DEBUG summary missing reason", r.state, r.result.Success, r.result.Error)
+	}
+	if summary.Attempt == 0 {
+		switch {
+		case r.report.Attempt > 0:
+			summary.Attempt = r.report.Attempt
+		case r.claimed != nil && r.claimed.Attempt > 0:
+			summary.Attempt = r.claimed.Attempt
+		case r.result.Attempt > 0:
+			summary.Attempt = r.result.Attempt
+		}
 	}
 	if r.result.Error != nil {
 		summary.Error = r.result.Error.Error()
@@ -549,6 +621,44 @@ func copyStringMap(src map[string]string) map[string]string {
 		dst[k] = v
 	}
 	return dst
+}
+
+func normalizeReason(reason state.TerminationReason, finalState runner.ExecutionStatus, success bool) state.TerminationReason {
+	if reason != "" {
+		return reason
+	}
+	switch finalState {
+	case runner.StatusCancelled:
+		return state.TerminationReasonUserCancel
+	case runner.StatusCompleted:
+		if success {
+			return state.TerminationReasonSuccess
+		}
+		return state.TerminationReasonFailure
+	default:
+		return state.TerminationReasonFailure
+	}
+}
+
+func executionStatusToWorkflow(status runner.ExecutionStatus) state.WorkflowState {
+	switch status {
+	case runner.StatusPending:
+		return state.WorkflowPending
+	case runner.StatusRunning:
+		return state.WorkflowRunning
+	case runner.StatusCompleted:
+		return state.WorkflowCompleted
+	case runner.StatusFailed:
+		return state.WorkflowFailed
+	case runner.StatusSkipped:
+		return state.WorkflowSkipped
+	case runner.StatusRemoved:
+		return state.WorkflowRemoved
+	case runner.StatusCancelled:
+		return state.WorkflowCancelled
+	default:
+		return state.WorkflowPending
+	}
 }
 
 func errorMessage(err error) string {

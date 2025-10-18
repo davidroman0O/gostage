@@ -4,10 +4,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/davidroman0O/gostage/v3/internal/locks"
 	rt "github.com/davidroman0O/gostage/v3/runtime"
 	"github.com/davidroman0O/gostage/v3/runtime/core"
 	store "github.com/davidroman0O/gostage/v3/store"
-	deadlock "github.com/sasha-s/go-deadlock"
 )
 
 // Factory builds execution contexts for the local runner backend.
@@ -32,7 +32,7 @@ type contextImpl struct {
 	*actionContext
 	broker rt.Broker
 
-	valueMu deadlock.RWMutex
+	valueMu locks.RWMutex
 
 	deadline    time.Time
 	hasDeadline bool

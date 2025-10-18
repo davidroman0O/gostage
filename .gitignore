@@ -1,3 +1,5 @@
 .gocache
 .gomodcache
 **.zip
+
+**/**.db

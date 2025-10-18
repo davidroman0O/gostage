@@ -1,14 +1,14 @@
 package local
 
 import (
+	"github.com/davidroman0O/gostage/v3/internal/locks"
 	rt "github.com/davidroman0O/gostage/v3/runtime"
-	deadlock "github.com/sasha-s/go-deadlock"
 )
 
 const globalStageID = "*"
 
 type actionContext struct {
-	mu deadlock.RWMutex
+	mu locks.RWMutex
 
 	workflow rt.Workflow
 	logger   rt.Logger

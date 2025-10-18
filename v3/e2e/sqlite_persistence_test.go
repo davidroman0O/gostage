@@ -209,6 +209,9 @@ func TestSQLiteCancellationPersistsCancelledState(t *testing.T) {
 	t.Cleanup(collector.Close)
 	t.Cleanup(func() { _ = node.Close() })
 
+	teleBuf := testkit.StartTelemetryBuffer(ctx, t, node, 32)
+	t.Cleanup(teleBuf.Close)
+
 	runID, err := node.Submit(ctx, gostage.WorkflowRef(workflowID), gostage.WithTags("sqlite-cancel"))
 	if err != nil {
 		t.Fatalf("submit: %v", err)
@@ -229,9 +232,11 @@ func TestSQLiteCancellationPersistsCancelledState(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 
+	teleBuf.Next(t, telemetry.EventStageStarted, 3*time.Second)
 	if err := node.Cancel(ctx, runID); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
+	teleBuf.Next(t, telemetry.EventWorkflowCancelRequest, 3*time.Second)
 
 	waitCtx, cancelWait := context.WithTimeout(ctx, 10*time.Second)
 	defer cancelWait()
@@ -245,17 +250,52 @@ func TestSQLiteCancellationPersistsCancelledState(t *testing.T) {
 	if result.Success {
 		t.Fatalf("expected cancellation result, got %+v", result)
 	}
-
-	queryCtx, cancelQuery := context.WithTimeout(ctx, time.Second)
-	var wfState string
-	var wfSuccess int
-	if err := db.QueryRowContext(queryCtx, "SELECT state, success FROM workflow_runs WHERE id = ?", string(runID)).Scan(&wfState, &wfSuccess); err != nil {
-		cancelQuery()
-		t.Fatalf("workflow_runs query: %v", err)
+	if result.Reason != gostage.TerminationReasonUserCancel {
+		t.Fatalf("expected user cancel reason, got %s", result.Reason)
 	}
-	cancelQuery()
-	if wfState != string(state.WorkflowCancelled) || wfSuccess != 0 {
-		t.Fatalf("unexpected workflow_runs row: state=%s success=%d", wfState, wfSuccess)
+
+	// Poll for reason propagation because UpdateWorkflowStatus runs after StoreSummary notifies waiters.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		queryCtx, cancelQuery := context.WithTimeout(ctx, time.Second)
+		var (
+			wfState   string
+			wfSuccess int
+			wfReason  string
+		)
+		err := db.QueryRowContext(queryCtx, "SELECT state, success, termination_reason FROM workflow_runs WHERE id = ?", string(runID)).Scan(&wfState, &wfSuccess, &wfReason)
+		cancelQuery()
+		if err != nil {
+			t.Fatalf("workflow_runs query: %v", err)
+		}
+		if wfState != string(state.WorkflowCancelled) || wfSuccess != 0 {
+			t.Fatalf("unexpected workflow_runs row: state=%s success=%d", wfState, wfSuccess)
+		}
+		if wfReason == string(state.TerminationReasonUserCancel) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("unexpected workflow_runs reason: %s", wfReason)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		summaryCtx, cancelSummary := context.WithTimeout(ctx, time.Second)
+		var summaryReason string
+		err := db.QueryRowContext(summaryCtx, "SELECT termination_reason FROM execution_summaries WHERE workflow_id = ?", string(runID)).Scan(&summaryReason)
+		cancelSummary()
+		if err != nil {
+			t.Fatalf("execution_summaries query: %v", err)
+		}
+		if summaryReason == string(state.TerminationReasonUserCancel) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("unexpected execution_summaries reason: %s", summaryReason)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 
 	getLifecycle := func(query string) (string, int, int) {

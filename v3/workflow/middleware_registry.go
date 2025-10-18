@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/davidroman0O/gostage/v3/internal/locks"
 	rt "github.com/davidroman0O/gostage/v3/runtime"
-	deadlock "github.com/sasha-s/go-deadlock"
 )
 
 type middlewareRegistry[T any] struct {
-	mu      deadlock.RWMutex
+	mu      locks.RWMutex
 	entries map[string]T
 }
 

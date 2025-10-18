@@ -276,6 +276,11 @@ func resultFromSummary(id WorkflowID, summary state.ResultSummary) Result {
 	if summary.Error != "" {
 		res.Error = errors.New(summary.Error)
 	}
+	if summary.Reason != "" {
+		res.Reason = TerminationReason(summary.Reason)
+	} else {
+		res.Reason = TerminationReasonUnknown
+	}
 	return res
 }
 

@@ -3,12 +3,12 @@ package state
 import (
 	"context"
 
-	deadlock "github.com/sasha-s/go-deadlock"
+	"github.com/davidroman0O/gostage/v3/internal/locks"
 )
 
 // MemoryStore provides an in-memory Store suitable for tests.
 type MemoryStore struct {
-	mu        deadlock.Mutex
+	mu        locks.Mutex
 	workflows map[WorkflowID]WorkflowRecord
 	stages    map[WorkflowID]map[string]*StageRecord
 	actions   map[WorkflowID]map[string]map[string]*ActionRecord
@@ -55,6 +55,9 @@ func (s *MemoryStore) UpdateWorkflowStatus(ctx context.Context, update WorkflowS
 	}
 	if update.Error != nil {
 		rec.Error = *update.Error
+	}
+	if update.Reason != nil {
+		rec.TerminationReason = *update.Reason
 	}
 	s.workflows[update.ID] = rec
 	return nil

@@ -11,17 +11,18 @@ import (
 )
 
 const getExecutionSummary = `-- name: GetExecutionSummary :one
-SELECT final_store, disabled_stages, disabled_actions, removed_stages, removed_actions
+SELECT final_store, disabled_stages, disabled_actions, removed_stages, removed_actions, termination_reason
 FROM execution_summaries
 WHERE workflow_id = ?
 `
 
 type GetExecutionSummaryRow struct {
-	FinalStore      []byte `json:"final_store"`
-	DisabledStages  []byte `json:"disabled_stages"`
-	DisabledActions []byte `json:"disabled_actions"`
-	RemovedStages   []byte `json:"removed_stages"`
-	RemovedActions  []byte `json:"removed_actions"`
+	FinalStore        []byte `json:"final_store"`
+	DisabledStages    []byte `json:"disabled_stages"`
+	DisabledActions   []byte `json:"disabled_actions"`
+	RemovedStages     []byte `json:"removed_stages"`
+	RemovedActions    []byte `json:"removed_actions"`
+	TerminationReason string `json:"termination_reason"`
 }
 
 func (q *Queries) GetExecutionSummary(ctx context.Context, workflowID string) (GetExecutionSummaryRow, error) {
@@ -33,12 +34,13 @@ func (q *Queries) GetExecutionSummary(ctx context.Context, workflowID string) (G
 		&i.DisabledActions,
 		&i.RemovedStages,
 		&i.RemovedActions,
+		&i.TerminationReason,
 	)
 	return i, err
 }
 
 const getWorkflowSummary = `-- name: GetWorkflowSummary :one
-SELECT id, name, description, type, tags, metadata, created_at, started_at, completed_at, duration, state, success, error
+SELECT id, name, description, type, tags, metadata, created_at, started_at, completed_at, duration, state, success, error, termination_reason
 FROM workflow_runs
 WHERE id = ?
 `
@@ -60,6 +62,7 @@ func (q *Queries) GetWorkflowSummary(ctx context.Context, id string) (WorkflowRu
 		&i.State,
 		&i.Success,
 		&i.Error,
+		&i.TerminationReason,
 	)
 	return i, err
 }
@@ -213,7 +216,7 @@ func (q *Queries) ListActionsByWorkflow(ctx context.Context, workflowID string) 
 }
 
 const listWorkflowsFiltered = `-- name: ListWorkflowsFiltered :many
-SELECT id, name, description, type, tags, metadata, created_at, started_at, completed_at, duration, state, success, error
+SELECT id, name, description, type, tags, metadata, created_at, started_at, completed_at, duration, state, success, error, termination_reason
 FROM workflow_runs
 WHERE
     (
@@ -292,6 +295,7 @@ func (q *Queries) ListWorkflowsFiltered(ctx context.Context, arg ListWorkflowsFi
 			&i.State,
 			&i.Success,
 			&i.Error,
+			&i.TerminationReason,
 		); err != nil {
 			return nil, err
 		}
@@ -375,18 +379,20 @@ SET
     completed_at = COALESCE(?3, workflow_runs.completed_at),
     duration = COALESCE(?4, workflow_runs.duration),
     success = COALESCE(?5, workflow_runs.success),
-    error = COALESCE(?6, workflow_runs.error)
-WHERE id = ?7
+    error = COALESCE(?6, workflow_runs.error),
+    termination_reason = COALESCE(?7, workflow_runs.termination_reason)
+WHERE id = ?8
 `
 
 type UpdateWorkflowStatusParams struct {
-	State       string         `json:"state"`
-	StartedAt   sql.NullTime   `json:"started_at"`
-	CompletedAt sql.NullTime   `json:"completed_at"`
-	Duration    sql.NullInt64  `json:"duration"`
-	Success     sql.NullInt64  `json:"success"`
-	Error       sql.NullString `json:"error"`
-	ID          string         `json:"id"`
+	State             string         `json:"state"`
+	StartedAt         sql.NullTime   `json:"started_at"`
+	CompletedAt       sql.NullTime   `json:"completed_at"`
+	Duration          sql.NullInt64  `json:"duration"`
+	Success           sql.NullInt64  `json:"success"`
+	Error             sql.NullString `json:"error"`
+	TerminationReason sql.NullString `json:"termination_reason"`
+	ID                string         `json:"id"`
 }
 
 func (q *Queries) UpdateWorkflowStatus(ctx context.Context, arg UpdateWorkflowStatusParams) error {
@@ -397,6 +403,7 @@ func (q *Queries) UpdateWorkflowStatus(ctx context.Context, arg UpdateWorkflowSt
 		arg.Duration,
 		arg.Success,
 		arg.Error,
+		arg.TerminationReason,
 		arg.ID,
 	)
 	return err
@@ -404,25 +411,27 @@ func (q *Queries) UpdateWorkflowStatus(ctx context.Context, arg UpdateWorkflowSt
 
 const upsertExecutionSummary = `-- name: UpsertExecutionSummary :exec
 INSERT INTO execution_summaries (
-    workflow_id, final_store, disabled_stages, disabled_actions, removed_stages, removed_actions
+    workflow_id, final_store, disabled_stages, disabled_actions, removed_stages, removed_actions, termination_reason
 ) VALUES (
-    ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?
 )
 ON CONFLICT(workflow_id) DO UPDATE SET
     final_store = excluded.final_store,
     disabled_stages = excluded.disabled_stages,
     disabled_actions = excluded.disabled_actions,
     removed_stages = excluded.removed_stages,
-    removed_actions = excluded.removed_actions
+    removed_actions = excluded.removed_actions,
+    termination_reason = excluded.termination_reason
 `
 
 type UpsertExecutionSummaryParams struct {
-	WorkflowID      string `json:"workflow_id"`
-	FinalStore      []byte `json:"final_store"`
-	DisabledStages  []byte `json:"disabled_stages"`
-	DisabledActions []byte `json:"disabled_actions"`
-	RemovedStages   []byte `json:"removed_stages"`
-	RemovedActions  []byte `json:"removed_actions"`
+	WorkflowID        string `json:"workflow_id"`
+	FinalStore        []byte `json:"final_store"`
+	DisabledStages    []byte `json:"disabled_stages"`
+	DisabledActions   []byte `json:"disabled_actions"`
+	RemovedStages     []byte `json:"removed_stages"`
+	RemovedActions    []byte `json:"removed_actions"`
+	TerminationReason string `json:"termination_reason"`
 }
 
 func (q *Queries) UpsertExecutionSummary(ctx context.Context, arg UpsertExecutionSummaryParams) error {
@@ -433,15 +442,16 @@ func (q *Queries) UpsertExecutionSummary(ctx context.Context, arg UpsertExecutio
 		arg.DisabledActions,
 		arg.RemovedStages,
 		arg.RemovedActions,
+		arg.TerminationReason,
 	)
 	return err
 }
 
 const upsertWorkflowRun = `-- name: UpsertWorkflowRun :exec
 INSERT INTO workflow_runs (
-    id, name, description, type, tags, metadata, created_at, state, success, error, started_at, completed_at, duration
+    id, name, description, type, tags, metadata, created_at, state, success, error, started_at, completed_at, duration, termination_reason
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?, ?, ?, ?, ?, ?
 )
 ON CONFLICT(id) DO UPDATE SET
     name = excluded.name,
@@ -454,23 +464,25 @@ ON CONFLICT(id) DO UPDATE SET
     error = excluded.error,
     started_at = COALESCE(excluded.started_at, workflow_runs.started_at),
     completed_at = COALESCE(excluded.completed_at, workflow_runs.completed_at),
-    duration = COALESCE(excluded.duration, workflow_runs.duration)
+    duration = COALESCE(excluded.duration, workflow_runs.duration),
+    termination_reason = excluded.termination_reason
 `
 
 type UpsertWorkflowRunParams struct {
-	ID          string         `json:"id"`
-	Name        sql.NullString `json:"name"`
-	Description sql.NullString `json:"description"`
-	Type        sql.NullString `json:"type"`
-	Tags        []byte         `json:"tags"`
-	Metadata    []byte         `json:"metadata"`
-	Column7     interface{}    `json:"column_7"`
-	State       string         `json:"state"`
-	Success     int64          `json:"success"`
-	Error       sql.NullString `json:"error"`
-	StartedAt   sql.NullTime   `json:"started_at"`
-	CompletedAt sql.NullTime   `json:"completed_at"`
-	Duration    sql.NullInt64  `json:"duration"`
+	ID                string         `json:"id"`
+	Name              sql.NullString `json:"name"`
+	Description       sql.NullString `json:"description"`
+	Type              sql.NullString `json:"type"`
+	Tags              []byte         `json:"tags"`
+	Metadata          []byte         `json:"metadata"`
+	Column7           interface{}    `json:"column_7"`
+	State             string         `json:"state"`
+	Success           int64          `json:"success"`
+	Error             sql.NullString `json:"error"`
+	StartedAt         sql.NullTime   `json:"started_at"`
+	CompletedAt       sql.NullTime   `json:"completed_at"`
+	Duration          sql.NullInt64  `json:"duration"`
+	TerminationReason string         `json:"termination_reason"`
 }
 
 func (q *Queries) UpsertWorkflowRun(ctx context.Context, arg UpsertWorkflowRunParams) error {
@@ -488,6 +500,7 @@ func (q *Queries) UpsertWorkflowRun(ctx context.Context, arg UpsertWorkflowRunPa
 		arg.StartedAt,
 		arg.CompletedAt,
 		arg.Duration,
+		arg.TerminationReason,
 	)
 	return err
 }

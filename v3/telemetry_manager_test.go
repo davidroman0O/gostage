@@ -17,7 +17,7 @@ func TestTelemetryManagerEmitsWorkflowStatus(t *testing.T) {
 		t.Fatalf("store manager: %v", err)
 	}
 
-	dispatcher := node.NewTelemetryDispatcher(context.Background(), nil)
+	dispatcher := node.NewTelemetryDispatcher(context.Background(), nil, node.TelemetryDispatcherConfig{})
 	defer dispatcher.Close()
 
 	sink := telemetry.NewChannelSink(8)
@@ -61,7 +61,7 @@ func TestTelemetryManagerEmitsActionProgress(t *testing.T) {
 	stageID := assignment.Stages[0].ID
 	actionID := assignment.Stages[0].Actions[0].ID
 
-	dispatcher := node.NewTelemetryDispatcher(context.Background(), nil)
+	dispatcher := node.NewTelemetryDispatcher(context.Background(), nil, node.TelemetryDispatcherConfig{})
 	defer dispatcher.Close()
 
 	sink := telemetry.NewChannelSink(4)

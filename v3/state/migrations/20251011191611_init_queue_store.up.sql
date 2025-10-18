@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
     duration INTEGER,
     state TEXT NOT NULL DEFAULT 'pending',
     success INTEGER NOT NULL DEFAULT 0,
-    error TEXT
+    error TEXT,
+    termination_reason TEXT NOT NULL DEFAULT 'unknown'
 );
 
 CREATE TABLE IF NOT EXISTS stage_runs (
@@ -79,6 +80,7 @@ CREATE TABLE IF NOT EXISTS execution_summaries (
     disabled_actions BLOB,
     removed_stages BLOB,
     removed_actions BLOB,
+    termination_reason TEXT NOT NULL DEFAULT 'unknown',
     FOREIGN KEY (workflow_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
 );
 

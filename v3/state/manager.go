@@ -6,7 +6,7 @@ import (
 	"maps"
 	"time"
 
-	deadlock "github.com/sasha-s/go-deadlock"
+	"github.com/davidroman0O/gostage/v3/internal/locks"
 )
 
 // StoreManager bridges the legacy state.Manager contract used by the runner
@@ -16,7 +16,7 @@ import (
 type StoreManager struct {
 	store Store
 
-	mu        deadlock.RWMutex
+	mu        locks.RWMutex
 	workflows map[WorkflowID]*workflowSnapshot
 
 	now       func() time.Time
@@ -338,6 +338,7 @@ func (m *StoreManager) StoreExecutionSummary(ctx context.Context, workflowID str
 		}
 		snap.record.Success = summary.Success
 		snap.record.Error = summary.Error
+		snap.record.TerminationReason = summary.Reason
 		snap.record.Duration = summary.Duration
 		if report.WorkflowName != "" {
 			snap.record.Name = report.WorkflowName
@@ -386,8 +387,23 @@ func (m *StoreManager) StoreExecutionSummary(ctx context.Context, workflowID str
 				}
 			}
 		}
+		finalState := snap.record.State
+		reason := summary.Reason
+		if reason == "" {
+			reason = TerminationReasonUnknown
+		}
+		m.mu.Unlock()
+		if err := m.store.UpdateWorkflowStatus(ctx, WorkflowStatusUpdate{
+			ID:     id,
+			Status: finalState,
+			Reason: &reason,
+		}); err != nil {
+			return err
+		}
+		m.notifyWorkflowStatus(ctx, string(id), finalState)
+	} else {
+		m.mu.Unlock()
 	}
-	m.mu.Unlock()
 	m.notifyExecutionSummary(ctx, workflowID, summary)
 	return nil
 }
@@ -482,6 +498,10 @@ func cloneActionRecord(rec ActionRecord) ActionRecord {
 }
 
 func resultSummaryFromReport(report ExecutionReport) ResultSummary {
+	reason := report.Reason
+	if reason == "" {
+		reason = TerminationReasonUnknown
+	}
 	return ResultSummary{
 		Success:         report.Success,
 		Error:           report.ErrorMessage,
@@ -493,6 +513,7 @@ func resultSummaryFromReport(report ExecutionReport) ResultSummary {
 		DisabledActions: maps.Clone(report.DisabledActions),
 		RemovedStages:   maps.Clone(report.RemovedStages),
 		RemovedActions:  maps.Clone(report.RemovedActions),
+		Reason:          reason,
 	}
 }
 

@@ -20,12 +20,16 @@ import (
 
 // Public state aliases so callers don't reach into v3/state.
 type (
-	WorkflowID          = state.WorkflowID
-	StateReader         = state.StateReader
-	StateFilter         = state.StateFilter
-	WorkflowSummary     = state.WorkflowSummary
-	ActionHistoryRecord = state.ActionHistoryRecord
-	WorkflowState       = state.WorkflowState
+	WorkflowID                = state.WorkflowID
+	StateReader               = state.StateReader
+	StateFilter               = state.StateFilter
+	WorkflowSummary           = state.WorkflowSummary
+	ActionHistoryRecord       = state.ActionHistoryRecord
+	WorkflowState             = state.WorkflowState
+	TelemetryDispatcherConfig = node.TelemetryDispatcherConfig
+	TelemetryStats            = node.TelemetryStats
+	OverflowStrategy          = node.OverflowStrategy
+	TerminationReason         = state.TerminationReason
 )
 
 const (
@@ -37,6 +41,17 @@ const (
 	WorkflowCancelled = state.WorkflowCancelled
 	WorkflowSkipped   = state.WorkflowSkipped
 	WorkflowRemoved   = state.WorkflowRemoved
+
+	OverflowStrategyDropOldest = node.OverflowStrategyDropOldest
+	OverflowStrategyBlock      = node.OverflowStrategyBlock
+	OverflowStrategyFailFast   = node.OverflowStrategyFailFast
+
+	TerminationReasonUnknown      = state.TerminationReasonUnknown
+	TerminationReasonSuccess      = state.TerminationReasonSuccess
+	TerminationReasonFailure      = state.TerminationReasonFailure
+	TerminationReasonUserCancel   = state.TerminationReasonUserCancel
+	TerminationReasonPolicyCancel = state.TerminationReasonPolicyCancel
+	TerminationReasonTimeout      = state.TerminationReasonTimeout
 )
 
 var (
@@ -121,6 +136,7 @@ type Result struct {
 	RemovedStages   map[string]string
 	RemovedActions  map[string]string
 	CompletedAt     time.Time
+	Reason          TerminationReason
 }
 
 // Snapshot provides point-in-time scheduler metrics.
@@ -332,7 +348,7 @@ func Run(ctx context.Context, opts ...Option) (*Node, <-chan DiagnosticEvent, er
 		stateReader = state.NewManagerStateReader(manager)
 	}
 
-	base := node.New(ctx, cfg.telemetrySinks)
+	base := node.New(ctx, cfg.telemetrySinks, cfg.telemetryCfg)
 	health := node.NewHealthDispatcher()
 	if diagWriter := base.DiagnosticsWriter(); diagWriter != nil {
 		_ = health.Subscribe(func(evt node.HealthEvent) {

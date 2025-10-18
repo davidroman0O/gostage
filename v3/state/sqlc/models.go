@@ -25,12 +25,13 @@ type ActionRun struct {
 }
 
 type ExecutionSummary struct {
-	WorkflowID      string `json:"workflow_id"`
-	FinalStore      []byte `json:"final_store"`
-	DisabledStages  []byte `json:"disabled_stages"`
-	DisabledActions []byte `json:"disabled_actions"`
-	RemovedStages   []byte `json:"removed_stages"`
-	RemovedActions  []byte `json:"removed_actions"`
+	WorkflowID        string `json:"workflow_id"`
+	FinalStore        []byte `json:"final_store"`
+	DisabledStages    []byte `json:"disabled_stages"`
+	DisabledActions   []byte `json:"disabled_actions"`
+	RemovedStages     []byte `json:"removed_stages"`
+	RemovedActions    []byte `json:"removed_actions"`
+	TerminationReason string `json:"termination_reason"`
 }
 
 type QueueAudit struct {
@@ -89,17 +90,18 @@ type TelemetryEvent struct {
 }
 
 type WorkflowRun struct {
-	ID          string         `json:"id"`
-	Name        sql.NullString `json:"name"`
-	Description sql.NullString `json:"description"`
-	Type        sql.NullString `json:"type"`
-	Tags        []byte         `json:"tags"`
-	Metadata    []byte         `json:"metadata"`
-	CreatedAt   time.Time      `json:"created_at"`
-	StartedAt   sql.NullTime   `json:"started_at"`
-	CompletedAt sql.NullTime   `json:"completed_at"`
-	Duration    sql.NullInt64  `json:"duration"`
-	State       string         `json:"state"`
-	Success     int64          `json:"success"`
-	Error       sql.NullString `json:"error"`
+	ID                string         `json:"id"`
+	Name              sql.NullString `json:"name"`
+	Description       sql.NullString `json:"description"`
+	Type              sql.NullString `json:"type"`
+	Tags              []byte         `json:"tags"`
+	Metadata          []byte         `json:"metadata"`
+	CreatedAt         time.Time      `json:"created_at"`
+	StartedAt         sql.NullTime   `json:"started_at"`
+	CompletedAt       sql.NullTime   `json:"completed_at"`
+	Duration          sql.NullInt64  `json:"duration"`
+	State             string         `json:"state"`
+	Success           int64          `json:"success"`
+	Error             sql.NullString `json:"error"`
+	TerminationReason string         `json:"termination_reason"`
 }

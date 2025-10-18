@@ -31,6 +31,7 @@ type options struct {
 	dispatcher     DispatcherConfig
 	logger         telemetry.Logger
 	failurePolicy  FailurePolicy
+	telemetryCfg   TelemetryDispatcherConfig
 }
 
 // ChildOption configures child node bootstrap via HandleChild.
@@ -70,6 +71,13 @@ func WithTelemetrySinks(sinks ...telemetry.Sink) Option {
 				o.telemetrySinks = append(o.telemetrySinks, sink)
 			}
 		}
+	})
+}
+
+// WithTelemetryDispatcherConfig customises telemetry buffering/backpressure behaviour.
+func WithTelemetryDispatcherConfig(cfg TelemetryDispatcherConfig) Option {
+	return optionFunc(func(o *options) {
+		o.telemetryCfg = cfg
 	})
 }
 

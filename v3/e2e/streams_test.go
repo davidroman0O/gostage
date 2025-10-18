@@ -173,11 +173,8 @@ func TestHealthStreamDegradationAndRecovery(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	policy := gostage.FailurePolicyFunc(func(_ context.Context, info gostage.FailureContext) gostage.FailureDecision {
-		if info.Attempt >= 1 {
-			return gostage.FailureDecisionAck
-		}
-		return gostage.FailureDecisionAck
+	policy := gostage.FailurePolicyFunc(func(_ context.Context, info gostage.FailureContext) gostage.FailureOutcome {
+		return gostage.AckOutcome()
 	})
 
 	node, diag, err := gostage.Run(ctx, append(testkit.MemoryOptions(backends),

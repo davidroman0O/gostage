@@ -25,3 +25,7 @@ migrate-down:
 .PHONY: test
 test:
 	GOMODCACHE=$$(pwd)/../.gocache/mod GOPATH=$$(pwd)/../.gocache go test ./...
+
+.PHONY: test-deadlock
+test-deadlock:
+	GOMODCACHE=$$(pwd)/../.gocache/mod GOPATH=$$(pwd)/../.gocache go test -tags gostage_deadlock ./...

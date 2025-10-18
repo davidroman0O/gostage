@@ -3,11 +3,11 @@ package gostage
 import (
 	"fmt"
 
+	"github.com/davidroman0O/gostage/v3/internal/locks"
 	"github.com/davidroman0O/gostage/v3/registry"
 	rt "github.com/davidroman0O/gostage/v3/runtime"
 	"github.com/davidroman0O/gostage/v3/workflow"
 	"github.com/google/uuid"
-	deadlock "github.com/sasha-s/go-deadlock"
 )
 
 // ActionFunc is the callable executed for a registered action.
@@ -79,7 +79,7 @@ func RegisterAction(name string, factory ActionFactory, opts ...ActionOption) er
 }
 
 var (
-	workflowsMu         deadlock.RWMutex
+	workflowsMu         locks.RWMutex
 	workflows           = make(map[string]workflow.Definition)
 	workflowAssignments = make(map[string]workflow.IDAssignment)
 )

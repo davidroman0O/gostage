@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 
+	"github.com/davidroman0O/gostage/v3/internal/locks"
 	"github.com/davidroman0O/gostage/v3/state/sqlc"
-	deadlock "github.com/sasha-s/go-deadlock"
 )
 
 // SQLiteStore persists workflow state using sqlite/sqlc.
@@ -15,7 +15,7 @@ type SQLiteStore struct {
 	db      *sql.DB
 	queries *sqlc.Queries
 
-	mu        deadlock.Mutex
+	mu        locks.Mutex
 	waiters   map[WorkflowID][]chan ResultSummary
 	summaries map[WorkflowID]ResultSummary
 }
@@ -37,14 +37,20 @@ func (s *SQLiteStore) RecordWorkflow(ctx context.Context, rec WorkflowRecord) er
 }
 
 func (s *SQLiteStore) UpdateWorkflowStatus(ctx context.Context, update WorkflowStatusUpdate) error {
+	var reasonPtr *string
+	if update.Reason != nil {
+		val := string(*update.Reason)
+		reasonPtr = &val
+	}
 	params := sqlc.UpdateWorkflowStatusParams{
-		ID:          string(update.ID),
-		State:       string(update.Status),
-		StartedAt:   toNullTime(update.StartedAt),
-		CompletedAt: toNullTime(update.CompletedAt),
-		Duration:    toOptionalNullDuration(update.Duration),
-		Success:     toOptionalNullBool(update.Success),
-		Error:       toOptionalNullString(update.Error),
+		ID:                string(update.ID),
+		State:             string(update.Status),
+		StartedAt:         toNullTime(update.StartedAt),
+		CompletedAt:       toNullTime(update.CompletedAt),
+		Duration:          toOptionalNullDuration(update.Duration),
+		Success:           toOptionalNullBool(update.Success),
+		Error:             toOptionalNullString(update.Error),
+		TerminationReason: toOptionalNullString(reasonPtr),
 	}
 	return s.queries.UpdateWorkflowStatus(ctx, params)
 }
@@ -58,20 +64,25 @@ func (s *SQLiteStore) upsertWorkflow(ctx context.Context, rec WorkflowRecord) er
 	if err != nil {
 		return err
 	}
+	reason := rec.TerminationReason
+	if reason == "" {
+		reason = TerminationReasonUnknown
+	}
 	params := sqlc.UpsertWorkflowRunParams{
-		ID:          string(rec.ID),
-		Name:        toNullString(rec.Name),
-		Description: toNullString(rec.Description),
-		Type:        toNullString(rec.Type),
-		Tags:        tags,
-		Metadata:    metadata,
-		Column7:     nullableTimeValue(rec.CreatedAt),
-		State:       string(rec.State),
-		Success:     boolToInt64(rec.Success),
-		Error:       toNullString(rec.Error),
-		StartedAt:   toNullTime(rec.StartedAt),
-		CompletedAt: toNullTime(rec.CompletedAt),
-		Duration:    toNullDuration(rec.Duration),
+		ID:                string(rec.ID),
+		Name:              toNullString(rec.Name),
+		Description:       toNullString(rec.Description),
+		Type:              toNullString(rec.Type),
+		Tags:              tags,
+		Metadata:          metadata,
+		Column7:           nullableTimeValue(rec.CreatedAt),
+		State:             string(rec.State),
+		Success:           boolToInt64(rec.Success),
+		Error:             toNullString(rec.Error),
+		StartedAt:         toNullTime(rec.StartedAt),
+		CompletedAt:       toNullTime(rec.CompletedAt),
+		Duration:          toNullDuration(rec.Duration),
+		TerminationReason: string(reason),
 	}
 	return s.queries.UpsertWorkflowRun(ctx, params)
 }
@@ -170,12 +181,13 @@ func (s *SQLiteStore) StoreSummary(ctx context.Context, id WorkflowID, summary R
 		return err
 	}
 	if err := s.queries.UpsertExecutionSummary(ctx, sqlc.UpsertExecutionSummaryParams{
-		WorkflowID:      string(id),
-		FinalStore:      storeBytes,
-		DisabledStages:  disabledStages,
-		DisabledActions: disabledActions,
-		RemovedStages:   removedStages,
-		RemovedActions:  removedActions,
+		WorkflowID:        string(id),
+		FinalStore:        storeBytes,
+		DisabledStages:    disabledStages,
+		DisabledActions:   disabledActions,
+		RemovedStages:     removedStages,
+		RemovedActions:    removedActions,
+		TerminationReason: string(summary.Reason),
 	}); err != nil {
 		return err
 	}
@@ -256,12 +268,17 @@ func (s *SQLiteStore) fetchSummary(ctx context.Context, id WorkflowID) (ResultSu
 	if len(rec.RemovedActions) > 0 {
 		_ = json.Unmarshal(rec.RemovedActions, &removedActions)
 	}
+	reason := TerminationReason(rec.TerminationReason)
+	if reason == "" {
+		reason = TerminationReasonUnknown
+	}
 	return ResultSummary{
 		Output:          storeMap,
 		DisabledStages:  disabledStages,
 		DisabledActions: disabledActions,
 		RemovedStages:   removedStages,
 		RemovedActions:  removedActions,
+		Reason:          reason,
 	}, nil
 }
 

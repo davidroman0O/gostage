@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/sasha-s/go-deadlock"
+	"github.com/davidroman0O/gostage/v3/internal/locks"
 )
 
 var (
@@ -24,7 +24,7 @@ type entry struct {
 
 // KVStore is a threadsafe in-memory key/value store used by the runtime.
 type KVStore struct {
-	mu   deadlock.RWMutex
+	mu   locks.RWMutex
 	data map[string]entry
 }
 

@@ -4,8 +4,8 @@ import (
 	"context"
 
 	"github.com/davidroman0O/gostage/v3/diagnostics"
+	"github.com/davidroman0O/gostage/v3/internal/locks"
 	"github.com/davidroman0O/gostage/v3/telemetry"
-	"github.com/sasha-s/go-deadlock"
 )
 
 // Node represents a running orchestrator instance.
@@ -15,17 +15,17 @@ type Node struct {
 	telemetry  *TelemetryDispatcher
 	diagHub    *DiagnosticsHub
 	diagStream <-chan diagnostics.Event
-	closeOnce  deadlock.Once
+	closeOnce  locks.Once
 }
 
 // New creates a Node with pre-wired telemetry and diagnostics plumbing.
-func New(ctx context.Context, sinks []telemetry.Sink) *Node {
+func New(ctx context.Context, sinks []telemetry.Sink, cfg TelemetryDispatcherConfig) *Node {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	diagHub := NewDiagnosticsHub()
-	teleDispatcher := NewTelemetryDispatcher(ctx, diagHub)
+	teleDispatcher := NewTelemetryDispatcher(ctx, diagHub, cfg)
 	for _, sink := range sinks {
 		_ = teleDispatcher.Register(sink)
 	}

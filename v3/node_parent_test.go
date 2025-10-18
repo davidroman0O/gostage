@@ -13,7 +13,7 @@ func TestParentNodeStreamTelemetryWithoutDispatcher(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	base := node.New(ctx, nil)
+	base := node.New(ctx, nil, node.TelemetryDispatcherConfig{})
 	defer func() {
 		if err := base.Close(); err != nil {
 			t.Fatalf("close base: %v", err)
@@ -33,10 +33,12 @@ func TestParentNodeStreamTelemetryWithoutDispatcher(t *testing.T) {
 	})
 	defer cancelStream()
 
-	base.TelemetryDispatcher().Dispatch(telemetry.Event{
+	if err := base.TelemetryDispatcher().Dispatch(telemetry.Event{
 		Kind:       telemetry.EventWorkflowRegistered,
 		WorkflowID: "wf-1",
-	})
+	}); err != nil {
+		t.Fatalf("dispatch telemetry: %v", err)
+	}
 
 	select {
 	case evt := <-events:

@@ -3,12 +3,12 @@ package diagnostics
 import (
 	"time"
 
-	"github.com/sasha-s/go-deadlock"
+	"github.com/davidroman0O/gostage/v3/internal/locks"
 )
 
 // Hub provides publish/subscribe for diagnostic events.
 type Hub struct {
-	mu     deadlock.RWMutex
+	mu     locks.RWMutex
 	subs   []chan Event
 	closed bool
 }

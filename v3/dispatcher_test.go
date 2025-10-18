@@ -257,11 +257,11 @@ func TestFailurePolicyRetryReleasesWorkflow(t *testing.T) {
 	br := broker.NewLocal(manager)
 	run := runner.New(local.Factory{}, registry.Default(), br)
 
-	policy := FailurePolicyFunc(func(_ context.Context, info FailureContext) FailureDecision {
+	policy := FailurePolicyFunc(func(_ context.Context, info FailureContext) FailureOutcome {
 		if info.Err != nil && info.Attempt < 2 {
-			return FailureDecisionRetry
+			return RetryOutcome()
 		}
-		return FailureDecisionAck
+		return AckOutcome()
 	})
 
 	pool := pools.NewLocal("local", state.Selector{}, 1)
@@ -400,7 +400,7 @@ func TestDispatcherEmitsCancelledEventOnExplicitCancel(t *testing.T) {
 		t.Fatalf("store manager: %v", err)
 	}
 
-	teleDispatcher := node.NewTelemetryDispatcher(ctx, nil)
+	teleDispatcher := node.NewTelemetryDispatcher(ctx, nil, node.TelemetryDispatcherConfig{})
 	defer teleDispatcher.Close()
 
 	sink := telemetry.NewChannelSink(64)

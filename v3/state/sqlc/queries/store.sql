@@ -1,8 +1,8 @@
 -- name: UpsertWorkflowRun :exec
 INSERT INTO workflow_runs (
-    id, name, description, type, tags, metadata, created_at, state, success, error, started_at, completed_at, duration
+    id, name, description, type, tags, metadata, created_at, state, success, error, started_at, completed_at, duration, termination_reason
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?, ?, ?, ?, ?, ?
 )
 ON CONFLICT(id) DO UPDATE SET
     name = excluded.name,
@@ -15,7 +15,8 @@ ON CONFLICT(id) DO UPDATE SET
     error = excluded.error,
     started_at = COALESCE(excluded.started_at, workflow_runs.started_at),
     completed_at = COALESCE(excluded.completed_at, workflow_runs.completed_at),
-    duration = COALESCE(excluded.duration, workflow_runs.duration);
+    duration = COALESCE(excluded.duration, workflow_runs.duration),
+    termination_reason = excluded.termination_reason;
 
 -- name: UpdateWorkflowStatus :exec
 UPDATE workflow_runs
@@ -25,7 +26,8 @@ SET
     completed_at = COALESCE(sqlc.arg(completed_at), workflow_runs.completed_at),
     duration = COALESCE(sqlc.narg(duration), workflow_runs.duration),
     success = COALESCE(sqlc.narg(success), workflow_runs.success),
-    error = COALESCE(sqlc.narg(error), workflow_runs.error)
+    error = COALESCE(sqlc.narg(error), workflow_runs.error),
+    termination_reason = COALESCE(sqlc.narg(termination_reason), workflow_runs.termination_reason)
 WHERE id = sqlc.arg(id);
 
 -- name: InsertStageRun :exec
@@ -81,24 +83,25 @@ WHERE workflow_id = sqlc.arg(workflow_id)
 
 -- name: UpsertExecutionSummary :exec
 INSERT INTO execution_summaries (
-    workflow_id, final_store, disabled_stages, disabled_actions, removed_stages, removed_actions
+    workflow_id, final_store, disabled_stages, disabled_actions, removed_stages, removed_actions, termination_reason
 ) VALUES (
-    ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?
 )
 ON CONFLICT(workflow_id) DO UPDATE SET
     final_store = excluded.final_store,
     disabled_stages = excluded.disabled_stages,
     disabled_actions = excluded.disabled_actions,
     removed_stages = excluded.removed_stages,
-    removed_actions = excluded.removed_actions;
+    removed_actions = excluded.removed_actions,
+    termination_reason = excluded.termination_reason;
 
 -- name: GetWorkflowSummary :one
-SELECT id, name, description, type, tags, metadata, created_at, started_at, completed_at, duration, state, success, error
+SELECT id, name, description, type, tags, metadata, created_at, started_at, completed_at, duration, state, success, error, termination_reason
 FROM workflow_runs
 WHERE id = ?;
 
 -- name: ListWorkflowsFiltered :many
-SELECT id, name, description, type, tags, metadata, created_at, started_at, completed_at, duration, state, success, error
+SELECT id, name, description, type, tags, metadata, created_at, started_at, completed_at, duration, state, success, error, termination_reason
 FROM workflow_runs
 WHERE
     (
@@ -142,6 +145,6 @@ WHERE workflow_id = ?
 ORDER BY created_at ASC;
 
 -- name: GetExecutionSummary :one
-SELECT final_store, disabled_stages, disabled_actions, removed_stages, removed_actions
+SELECT final_store, disabled_stages, disabled_actions, removed_stages, removed_actions, termination_reason
 FROM execution_summaries
 WHERE workflow_id = ?;

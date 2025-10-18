@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/davidroman0O/gostage/v3/diagnostics"
-	"github.com/sasha-s/go-deadlock"
+	"github.com/davidroman0O/gostage/v3/internal/locks"
 )
 
 // HealthStatus represents pool health state.
@@ -26,7 +26,7 @@ type HealthEvent struct {
 
 // HealthDispatcher manages subscriptions for health events.
 type HealthDispatcher struct {
-	mu   deadlock.RWMutex
+	mu   locks.RWMutex
 	subs map[int64]func(HealthEvent)
 	next int64
 }

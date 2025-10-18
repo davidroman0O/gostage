@@ -94,6 +94,9 @@ func TestCoreLifecycleNodeAPI(t *testing.T) {
 	if result.Attempt != 1 {
 		t.Fatalf("expected attempt=1, got %d", result.Attempt)
 	}
+	if result.Reason != gostage.TerminationReasonSuccess {
+		t.Fatalf("expected success reason, got %s", result.Reason)
+	}
 
 	stats, err := node.Stats()
 	if err != nil {
@@ -120,7 +123,6 @@ func TestCoreLifecycleNodeAPI(t *testing.T) {
 	if success, ok := summaryEvent.Metadata["success"].(bool); !ok || !success {
 		t.Fatalf("expected success telemetry, got %+v", summaryEvent.Metadata)
 	}
-
 	healthEvt := healthBuf.Next(t, "healthy", 2*time.Second)
 	if healthEvt.Pool == "" {
 		t.Fatalf("expected pool name in health event")
@@ -129,9 +131,12 @@ func TestCoreLifecycleNodeAPI(t *testing.T) {
 	if node.State == nil {
 		t.Fatalf("expected state facade")
 	}
-	summary := testkit.AwaitWorkflowSummary(t, node.State, backends.Observer, ctx, runID)
+	summary := testkit.AwaitWorkflowSummaryWithReason(t, node.State, ctx, runID, state.TerminationReasonSuccess)
 	if summary.State != state.WorkflowCompleted {
 		t.Fatalf("expected completed state, got %s", summary.State)
+	}
+	if summary.TerminationReason != state.TerminationReasonSuccess {
+		t.Fatalf("expected summary reason success, got %s", summary.TerminationReason)
 	}
 
 	list, err := node.State.ListWorkflows(ctx, state.StateFilter{States: []state.WorkflowState{state.WorkflowCompleted}, Tags: []string{"primary"}, Limit: 5})
@@ -198,11 +203,11 @@ func TestCoreLifecycleStatsCountersWithRetry(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	policy := gostage.FailurePolicyFunc(func(_ context.Context, info gostage.FailureContext) gostage.FailureDecision {
+	policy := gostage.FailurePolicyFunc(func(_ context.Context, info gostage.FailureContext) gostage.FailureOutcome {
 		if info.Attempt < 2 {
-			return gostage.FailureDecisionRetry
+			return gostage.RetryOutcome()
 		}
-		return gostage.FailureDecisionAck
+		return gostage.AckOutcome()
 	})
 
 	node, diag, err := gostage.Run(ctx, gostage.WithFailurePolicy(policy))
@@ -231,6 +236,9 @@ func TestCoreLifecycleStatsCountersWithRetry(t *testing.T) {
 	}
 	if result.Attempt != 2 {
 		t.Fatalf("expected attempt=2, got %d", result.Attempt)
+	}
+	if result.Reason != gostage.TerminationReasonSuccess {
+		t.Fatalf("expected success reason, got %s", result.Reason)
 	}
 
 	snapshot, err := node.Stats()
@@ -287,8 +295,14 @@ func TestCoreLifecycleStatsCountersFailure(t *testing.T) {
 	if result.Success {
 		t.Fatalf("expected failure result, got %+v", result)
 	}
+	if result.Error == nil {
+		t.Fatalf("expected error in failure result")
+	}
 	if result.Attempt != 1 {
 		t.Fatalf("expected attempt=1, got %d", result.Attempt)
+	}
+	if result.Reason != gostage.TerminationReasonFailure {
+		t.Fatalf("expected failure reason, got %s", result.Reason)
 	}
 
 	snapshot, err := node.Stats()

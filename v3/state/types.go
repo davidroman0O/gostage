@@ -50,6 +50,7 @@ type ResultSummary struct {
 	DisabledActions map[string]bool
 	RemovedStages   map[string]string
 	RemovedActions  map[string]string
+	Reason          TerminationReason
 }
 
 type QueueStats struct {
@@ -81,6 +82,17 @@ const (
 	WorkflowRemoved   WorkflowState = "removed"
 )
 
+type TerminationReason string
+
+const (
+	TerminationReasonUnknown     TerminationReason = "unknown"
+	TerminationReasonSuccess     TerminationReason = "success"
+	TerminationReasonFailure     TerminationReason = "failure"
+	TerminationReasonUserCancel  TerminationReason = "user_cancel"
+	TerminationReasonPolicyCancel TerminationReason = "policy_cancel"
+	TerminationReasonTimeout     TerminationReason = "timeout"
+)
+
 type WorkflowRecord struct {
 	ID          WorkflowID
 	Name        string
@@ -93,8 +105,9 @@ type WorkflowRecord struct {
 	StartedAt   *time.Time
 	CompletedAt *time.Time
 	Duration    time.Duration
-	Success     bool
-	Error       string
+	Success           bool
+	Error             string
+	TerminationReason TerminationReason
 	Definition  SubWorkflowDef
 	Stages      map[string]*StageRecord
 }
@@ -173,6 +186,7 @@ type ExecutionReport struct {
 	Status       WorkflowState
 	Success      bool
 	ErrorMessage string
+	Reason       TerminationReason
 	StartedAt    time.Time
 	CompletedAt  time.Time
 	Duration     time.Duration
@@ -224,6 +238,7 @@ type WorkflowStatusUpdate struct {
 	Duration    *time.Duration
 	Success     *bool
 	Error       *string
+	Reason      *TerminationReason
 }
 
 // StageStatusUpdate describes a stage state change.

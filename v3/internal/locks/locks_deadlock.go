@@ -1,4 +1,6 @@
-package gostage
+//go:build gostage_deadlock
+
+package locks
 
 import (
 	"fmt"
@@ -6,6 +8,13 @@ import (
 	"time"
 
 	deadlock "github.com/sasha-s/go-deadlock"
+)
+
+type (
+	Mutex     = deadlock.Mutex
+	RWMutex   = deadlock.RWMutex
+	WaitGroup = deadlock.WaitGroup
+	Once      = deadlock.Once
 )
 
 func init() {

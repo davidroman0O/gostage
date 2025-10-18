@@ -7,12 +7,12 @@ import (
 	"sort"
 	"time"
 
-	deadlock "github.com/sasha-s/go-deadlock"
+	"github.com/davidroman0O/gostage/v3/internal/locks"
 )
 
 // CaptureObserver records manager events for use in tests.
 type CaptureObserver struct {
-	mu deadlock.Mutex
+	mu locks.Mutex
 
 	workflows map[WorkflowID]WorkflowRecord
 	stages    map[WorkflowID]map[string]StageRecord
@@ -413,6 +413,9 @@ func (r *captureStateReader) WorkflowSummary(ctx context.Context, id WorkflowID)
 		summary.WorkflowRecord.Success = res.Success
 		summary.WorkflowRecord.Error = res.Error
 		summary.WorkflowRecord.Duration = res.Duration
+		if res.Reason != "" {
+			summary.WorkflowRecord.TerminationReason = res.Reason
+		}
 		if !res.CompletedAt.IsZero() {
 			completed := res.CompletedAt
 			summary.CompletedAt = &completed

@@ -168,6 +168,9 @@ func TestCancellationInFlightWorkflow(t *testing.T) {
 	if res.Error == nil || res.Error.Error() != context.Canceled.Error() {
 		t.Fatalf("expected context canceled error, got %+v", res.Error)
 	}
+	if res.Reason != gostage.TerminationReasonUserCancel {
+		t.Fatalf("expected user cancel reason, got %s", res.Reason)
+	}
 
 	snapAfter, err := node.Stats()
 	if err != nil {
@@ -181,10 +184,17 @@ func TestCancellationInFlightWorkflow(t *testing.T) {
 	if success, ok := evt.Metadata["success"].(bool); ok && success {
 		t.Fatalf("expected unsuccessful summary telemetry, got %+v", evt.Metadata)
 	}
-
-	summary := testkit.AwaitWorkflowSummary(t, node.State, backends.Observer, ctx, runID)
+	summary := testkit.AwaitWorkflowSummaryWithReason(t, node.State, ctx, runID, state.TerminationReasonUserCancel)
 	if summary.State != state.WorkflowCancelled {
 		t.Fatalf("expected cancelled state, got %s", summary.State)
+	}
+	if summary.TerminationReason != state.TerminationReasonUserCancel {
+		t.Fatalf("expected summary reason user_cancel, got %s", summary.TerminationReason)
+	}
+	if snap := backends.Observer.Snapshot(); snap.Summaries != nil {
+		if obs, ok := snap.Summaries[runID]; ok && obs.Reason != state.TerminationReasonUserCancel {
+			t.Fatalf("observer summary reason mismatch: got %s", obs.Reason)
+		}
 	}
 
 	if len(summary.Stages) == 0 {
@@ -269,11 +279,11 @@ func TestRetryPolicyUpdatesSummary(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	policy := gostage.FailurePolicyFunc(func(_ context.Context, info gostage.FailureContext) gostage.FailureDecision {
+	policy := gostage.FailurePolicyFunc(func(_ context.Context, info gostage.FailureContext) gostage.FailureOutcome {
 		if info.Attempt < 2 {
-			return gostage.FailureDecisionRetry
+			return gostage.RetryOutcome()
 		}
-		return gostage.FailureDecisionAck
+		return gostage.AckOutcome()
 	})
 
 	node, diag, err := gostage.Run(ctx, append(testkit.MemoryOptions(backends), gostage.WithFailurePolicy(policy))...)
@@ -307,12 +317,14 @@ func TestRetryPolicyUpdatesSummary(t *testing.T) {
 	if result.Attempt != 2 {
 		t.Fatalf("expected attempt=2, got %d", result.Attempt)
 	}
+	if result.Reason != gostage.TerminationReasonSuccess {
+		t.Fatalf("expected success reason, got %s", result.Reason)
+	}
 
 	summaryEvent := telemetryBuf.Next(t, telemetry.EventWorkflowSummary, 3*time.Second)
 	if success, _ := summaryEvent.Metadata["success"].(bool); !success {
 		t.Fatalf("expected summary success, got %+v", summaryEvent.Metadata)
 	}
-
 	stats, err := node.Stats()
 	if err != nil {
 		t.Fatalf("stats: %v", err)
@@ -321,12 +333,97 @@ func TestRetryPolicyUpdatesSummary(t *testing.T) {
 		t.Fatalf("unexpected counters %+v", stats)
 	}
 
-	summary := testkit.AwaitWorkflowSummary(t, node.State, backends.Observer, ctx, runID)
+	summary := testkit.AwaitWorkflowSummaryWithReason(t, node.State, ctx, runID, state.TerminationReasonSuccess)
 	if summary.State != state.WorkflowCompleted {
 		t.Fatalf("expected completed state, got %s", summary.State)
+	}
+	if summary.TerminationReason != state.TerminationReasonSuccess {
+		t.Fatalf("expected summary reason success, got %s", summary.TerminationReason)
 	}
 	snap := backends.Observer.Snapshot()
 	if sum, ok := snap.Summaries[runID]; !ok || sum.Attempt != 2 {
 		t.Fatalf("expected capture summary attempt=2, got %+v", sum)
+	}
+}
+
+func TestFailurePolicyCancelSetsReason(t *testing.T) {
+	testkit.ResetRegistry(t)
+
+	gostage.MustRegisterAction("policy.fail", func() gostage.ActionFunc {
+		return func(rt.Context) error {
+			return errors.New("hard failure")
+		}
+	})
+
+	def := workflow.Definition{
+		Name: "PolicyCancel",
+		Stages: []workflow.Stage{{
+			Name:    "stage",
+			Actions: []workflow.Action{{Ref: "policy.fail"}},
+		}},
+	}
+	workflowID, _ := gostage.MustRegisterWorkflow(def)
+
+	backends := testkit.NewMemoryBackends()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	policy := gostage.FailurePolicyFunc(func(_ context.Context, info gostage.FailureContext) gostage.FailureOutcome {
+		if info.Attempt > 1 {
+			t.Fatalf("unexpected retry attempt %d", info.Attempt)
+		}
+		return gostage.CancelOutcome(state.TerminationReasonPolicyCancel)
+	})
+
+	node, diag, err := gostage.Run(ctx, append(testkit.MemoryOptions(backends), gostage.WithFailurePolicy(policy))...)
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	collector := testkit.StartDiagnosticsCollector(t, diag)
+	t.Cleanup(collector.Close)
+	t.Cleanup(func() { _ = node.Close() })
+
+	telemetryBuf := testkit.StartTelemetryBuffer(ctx, t, node, 16)
+	t.Cleanup(telemetryBuf.Close)
+
+	runID, err := node.Submit(ctx, gostage.WorkflowRef(workflowID))
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	waitCtx, cancelWait := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelWait()
+	result, err := node.Wait(waitCtx, runID)
+	if err != nil {
+		for _, evt := range collector.Events() {
+			t.Logf("diag: component=%s severity=%s err=%v", evt.Component, evt.Severity, evt.Err)
+		}
+		t.Fatalf("wait: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected failure result, got %+v", result)
+	}
+	if result.Error == nil {
+		t.Fatalf("expected error in result")
+	}
+	if result.Reason != gostage.TerminationReasonPolicyCancel {
+		t.Fatalf("expected policy cancel reason, got %s", result.Reason)
+	}
+
+	summaryEvent := telemetryBuf.Next(t, telemetry.EventWorkflowSummary, 3*time.Second)
+	if success, _ := summaryEvent.Metadata["success"].(bool); success {
+		t.Fatalf("expected unsuccessful summary metadata, got %+v", summaryEvent.Metadata)
+	}
+	if snap := backends.Observer.Snapshot(); snap.Workflows != nil {
+		if wf, ok := snap.Workflows[runID]; ok && wf.State != state.WorkflowCancelled {
+			t.Fatalf("observer workflow state mismatch: %s", wf.State)
+		}
+	}
+	summary := testkit.AwaitWorkflowSummaryWithReason(t, node.State, ctx, runID, state.TerminationReasonPolicyCancel)
+	if summary.State != state.WorkflowCancelled {
+		t.Fatalf("expected cancelled state, got %s", summary.State)
+	}
+	if summary.TerminationReason != state.TerminationReasonPolicyCancel {
+		t.Fatalf("expected summary reason policy_cancel, got %s", summary.TerminationReason)
 	}
 }

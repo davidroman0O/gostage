@@ -3,12 +3,12 @@ package workflow
 import (
 	"time"
 
+	"github.com/davidroman0O/gostage/v3/internal/locks"
 	internalstore "github.com/davidroman0O/gostage/v3/internal/store"
 	"github.com/davidroman0O/gostage/v3/registry"
 	rt "github.com/davidroman0O/gostage/v3/runtime"
 	store "github.com/davidroman0O/gostage/v3/store"
 	"github.com/google/uuid"
-	deadlock "github.com/sasha-s/go-deadlock"
 )
 
 const actionMutationSource = "runtime.ActionMutation"
@@ -29,7 +29,7 @@ type RuntimeWorkflow struct {
 }
 
 type workflowRuntime struct {
-	mu deadlock.RWMutex
+	mu locks.RWMutex
 
 	dynamicStages []RuntimeStageAddition
 	disabled      map[string]RuntimeToggle
@@ -205,7 +205,7 @@ type RuntimeStage struct {
 }
 
 type stageRuntime struct {
-	mu deadlock.RWMutex
+	mu locks.RWMutex
 
 	dynamicActions []RuntimeActionAddition
 	disabled       map[string]RuntimeToggle
