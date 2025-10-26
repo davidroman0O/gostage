@@ -25,13 +25,18 @@ type ActionRun struct {
 }
 
 type ExecutionSummary struct {
-	WorkflowID        string `json:"workflow_id"`
-	FinalStore        []byte `json:"final_store"`
-	DisabledStages    []byte `json:"disabled_stages"`
-	DisabledActions   []byte `json:"disabled_actions"`
-	RemovedStages     []byte `json:"removed_stages"`
-	RemovedActions    []byte `json:"removed_actions"`
-	TerminationReason string `json:"termination_reason"`
+	WorkflowID        string         `json:"workflow_id"`
+	FinalStore        []byte         `json:"final_store"`
+	DisabledStages    []byte         `json:"disabled_stages"`
+	DisabledActions   []byte         `json:"disabled_actions"`
+	RemovedStages     []byte         `json:"removed_stages"`
+	RemovedActions    []byte         `json:"removed_actions"`
+	Success           int64          `json:"success"`
+	Error             sql.NullString `json:"error"`
+	Attempt           sql.NullInt64  `json:"attempt"`
+	Duration          sql.NullInt64  `json:"duration"`
+	CompletedAt       sql.NullTime   `json:"completed_at"`
+	TerminationReason string         `json:"termination_reason"`
 }
 
 type QueueAudit struct {

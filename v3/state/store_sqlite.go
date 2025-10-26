@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/davidroman0O/gostage/v3/internal/locks"
 	"github.com/davidroman0O/gostage/v3/state/sqlc"
@@ -52,7 +53,9 @@ func (s *SQLiteStore) UpdateWorkflowStatus(ctx context.Context, update WorkflowS
 		Error:             toOptionalNullString(update.Error),
 		TerminationReason: toOptionalNullString(reasonPtr),
 	}
-	return s.queries.UpdateWorkflowStatus(ctx, params)
+	return retryWhileBusy(ctx, 5, func() error {
+		return s.queries.UpdateWorkflowStatus(ctx, params)
+	})
 }
 
 func (s *SQLiteStore) upsertWorkflow(ctx context.Context, rec WorkflowRecord) error {
@@ -180,18 +183,40 @@ func (s *SQLiteStore) StoreSummary(ctx context.Context, id WorkflowID, summary R
 	if err != nil {
 		return err
 	}
-	if err := s.queries.UpsertExecutionSummary(ctx, sqlc.UpsertExecutionSummaryParams{
+	reason := summary.Reason
+	if reason == "" {
+		reason = TerminationReasonUnknown
+	}
+	completedPtr := (*time.Time)(nil)
+	if !summary.CompletedAt.IsZero() {
+		completed := summary.CompletedAt
+		completedPtr = &completed
+	}
+	attempt := sql.NullInt64{}
+	if summary.Attempt > 0 {
+		attempt = sql.NullInt64{Int64: int64(summary.Attempt), Valid: true}
+	}
+	params := sqlc.UpsertExecutionSummaryParams{
 		WorkflowID:        string(id),
 		FinalStore:        storeBytes,
 		DisabledStages:    disabledStages,
 		DisabledActions:   disabledActions,
 		RemovedStages:     removedStages,
 		RemovedActions:    removedActions,
-		TerminationReason: string(summary.Reason),
+		Success:           boolToInt64(summary.Success),
+		Error:             toNullString(summary.Error),
+		Attempt:           attempt,
+		Duration:          toNullDuration(summary.Duration),
+		CompletedAt:       toNullTime(completedPtr),
+		TerminationReason: string(reason),
+	}
+	if err := retryWhileBusy(ctx, 5, func() error {
+		return s.queries.UpsertExecutionSummary(ctx, params)
 	}); err != nil {
 		return err
 	}
 	s.mu.Lock()
+	summary.Reason = reason
 	s.summaries[id] = summary
 	waiters := s.waiters[id]
 	delete(s.waiters, id)
@@ -268,16 +293,37 @@ func (s *SQLiteStore) fetchSummary(ctx context.Context, id WorkflowID) (ResultSu
 	if len(rec.RemovedActions) > 0 {
 		_ = json.Unmarshal(rec.RemovedActions, &removedActions)
 	}
+	duration := time.Duration(0)
+	if rec.Duration.Valid {
+		duration = time.Duration(rec.Duration.Int64)
+	}
+	completedAt := time.Time{}
+	if rec.CompletedAt.Valid {
+		completedAt = rec.CompletedAt.Time
+	}
+	attempt := 0
+	if rec.Attempt.Valid {
+		attempt = int(rec.Attempt.Int64)
+	}
+	errorMsg := ""
+	if rec.Error.Valid {
+		errorMsg = rec.Error.String
+	}
 	reason := TerminationReason(rec.TerminationReason)
 	if reason == "" {
 		reason = TerminationReasonUnknown
 	}
 	return ResultSummary{
+		Success:         rec.Success != 0,
+		Error:           errorMsg,
+		Attempt:         attempt,
 		Output:          storeMap,
 		DisabledStages:  disabledStages,
 		DisabledActions: disabledActions,
 		RemovedStages:   removedStages,
 		RemovedActions:  removedActions,
+		Duration:        duration,
+		CompletedAt:     completedAt,
 		Reason:          reason,
 	}, nil
 }

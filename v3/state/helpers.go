@@ -1,7 +1,9 @@
 package state
 
 import (
+	"context"
 	"database/sql"
+	"strings"
 	"time"
 )
 
@@ -84,4 +86,38 @@ func cloneAnyMap(src map[string]any) map[string]any {
 		dup[k] = v
 	}
 	return dup
+}
+
+func isBusyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "database is locked") || strings.Contains(msg, "SQLITE_BUSY")
+}
+
+func retryWhileBusy(ctx context.Context, attempts int, fn func() error) error {
+	if attempts <= 0 {
+		attempts = 1
+	}
+	backoff := 10 * time.Millisecond
+	var err error
+	for i := 0; i < attempts; i++ {
+		err = fn()
+		if err == nil || !isBusyError(err) {
+			return err
+		}
+		if ctx != nil {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+		}
+		time.Sleep(backoff)
+		if backoff < 200*time.Millisecond {
+			backoff *= 2
+		}
+	}
+	return err
 }

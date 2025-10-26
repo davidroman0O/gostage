@@ -14,6 +14,7 @@ import (
 	"github.com/davidroman0O/gostage/v3/pools"
 	"github.com/davidroman0O/gostage/v3/registry"
 	"github.com/davidroman0O/gostage/v3/runner"
+	"github.com/davidroman0O/gostage/v3/spawner"
 	"github.com/davidroman0O/gostage/v3/state"
 	"github.com/davidroman0O/gostage/v3/telemetry"
 	"github.com/davidroman0O/gostage/v3/workflow"
@@ -62,7 +63,21 @@ type dispatcher struct {
 }
 
 type poolBinding struct {
-	pool *pools.Local
+	pool   *pools.Local
+	remote *remoteBinding
+}
+
+type remoteBinding struct {
+	spawner     *spawnerBinding
+	poolCfg     PoolConfig
+	coordinator *remoteCoordinator
+	pool        *remotePool
+}
+
+type spawnerBinding struct {
+	name    string
+	cfg     SpawnerConfig
+	process *spawner.ProcessSpawner
 }
 
 func newDispatcher(ctx context.Context, queue state.Queue, store state.Store, manager state.Manager, runner *runner.Runner, telemetryDisp *node.TelemetryDispatcher, diag node.DiagnosticsWriter, health *node.HealthDispatcher, logger telemetry.Logger, claimInterval, jitter time.Duration, maxInFlight int, failure FailurePolicy, poolBindings []*poolBinding) *dispatcher {
@@ -187,6 +202,17 @@ func (d *dispatcher) pollOnce() {
 		d.emitWorkflowEvent(telemetry.EventWorkflowClaimed, claimed.ID, claimed.Attempt, map[string]any{
 			"pool": pool.Name(),
 		}, nil)
+		if binding.remote != nil && binding.remote.coordinator != nil {
+			if err := binding.remote.coordinator.dispatch(binding, claimed, release); err != nil {
+				release()
+				d.reportError("dispatcher.remote", fmt.Errorf("dispatch workflow %s: %w", claimed.ID, err))
+				d.publishHealth(pool.Name(), node.HealthUnavailable, err.Error())
+				if relErr := d.queue.Release(d.ctx, claimed.ID); relErr != nil {
+					d.reportError("dispatcher.remote.release", fmt.Errorf("release workflow %s: %w", claimed.ID, relErr))
+				}
+			}
+			continue
+		}
 		d.inflight.Add(1)
 		d.wg.Add(1)
 		go d.execute(pool, release, claimed)
@@ -207,7 +233,8 @@ func (d *dispatcher) execute(pool *pools.Local, release func(), claimed *state.C
 		"pool": pool.Name(),
 	}, nil)
 
-	result, err := d.runWorkflow(execCtx, pool, claimed)
+	initialStore := extractInitialStore(claimed.Metadata)
+	result, err := d.runWorkflow(execCtx, pool, claimed, initialStore)
 	if err != nil {
 		d.reportError("dispatcher.run", err)
 		d.publishHealth(pool.Name(), node.HealthUnavailable, err.Error())
@@ -273,12 +300,6 @@ func (d *dispatcher) execute(pool *pools.Local, release func(), claimed *state.C
 
 	result.report.Reason = result.reason
 	summary := result.toSummary()
-	if err := d.queue.Ack(d.ctx, claimed.ID, summary); err != nil {
-		d.reportError("dispatcher.ack", fmt.Errorf("ack workflow %s: %w", claimed.ID, err))
-		d.publishHealth(pool.Name(), node.HealthUnavailable, err.Error())
-	} else {
-		d.recordCompletion(result.state)
-	}
 	if d.manager != nil {
 		if result.report.Attempt == 0 {
 			result.report.Attempt = summary.Attempt
@@ -291,17 +312,21 @@ func (d *dispatcher) execute(pool *pools.Local, release func(), claimed *state.C
 			d.reportError("dispatcher.store", fmt.Errorf("store summary %s: %w", claimed.ID, err))
 		}
 	}
+	if err := d.queue.Ack(d.ctx, claimed.ID, summary); err != nil {
+		d.reportError("dispatcher.ack", fmt.Errorf("ack workflow %s: %w", claimed.ID, err))
+		d.publishHealth(pool.Name(), node.HealthUnavailable, err.Error())
+	} else {
+		d.recordCompletion(result.state)
+	}
 }
 
-func (d *dispatcher) runWorkflow(ctx context.Context, pool *pools.Local, claimed *state.ClaimedWorkflow) (runResult, error) {
+func (d *dispatcher) runWorkflow(ctx context.Context, pool *pools.Local, claimed *state.ClaimedWorkflow, initialStore map[string]any) (runResult, error) {
 	def := claimed.Definition.Clone()
 	def.ID = string(claimed.ID)
 	wf, err := workflow.Materialize(def, registry.Default())
 	if err != nil {
 		return runResult{}, fmt.Errorf("materialize workflow %s: %w", def.ID, err)
 	}
-
-	initialStore := extractInitialStore(claimed.Metadata)
 
 	opts := runner.RunOptions{
 		Context:      ctx,
@@ -328,6 +353,17 @@ func (d *dispatcher) runWorkflow(ctx context.Context, pool *pools.Local, claimed
 	}, res.Error)
 
 	return runResult{claimed: claimed, result: res, report: report, state: finalState}, nil
+}
+
+func (d *dispatcher) suppressWorkflowTelemetry(id state.WorkflowID, kinds ...telemetry.EventKind) {
+	if d == nil || len(kinds) == 0 {
+		return
+	}
+	if suppressor, ok := d.manager.(interface {
+		SuppressWorkflowEvents(string, ...telemetry.EventKind)
+	}); ok {
+		suppressor.SuppressWorkflowEvents(string(id), kinds...)
+	}
 }
 
 func (d *dispatcher) stop() {
@@ -557,9 +593,6 @@ func (r runResult) toSummary() state.ResultSummary {
 		CompletedAt:     completedAt,
 		Reason:          reason,
 	}
-	if r.reason == "" {
-		fmt.Println("DEBUG summary missing reason", r.state, r.result.Success, r.result.Error)
-	}
 	if summary.Attempt == 0 {
 		switch {
 		case r.report.Attempt > 0:
@@ -584,6 +617,7 @@ func extractInitialStore(metadata map[string]any) map[string]any {
 	if !ok {
 		return nil
 	}
+	delete(metadata, metadataInitialStore)
 	if value, ok := raw.(map[string]any); ok {
 		return copyMap(value)
 	}

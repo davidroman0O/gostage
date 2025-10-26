@@ -80,6 +80,11 @@ CREATE TABLE IF NOT EXISTS execution_summaries (
     disabled_actions BLOB,
     removed_stages BLOB,
     removed_actions BLOB,
+    success INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    attempt INTEGER,
+    duration INTEGER,
+    completed_at DATETIME,
     termination_reason TEXT NOT NULL DEFAULT 'unknown',
     FOREIGN KEY (workflow_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
 );

@@ -46,7 +46,8 @@ func (fn childOptionFunc) apply(opts *childOptions) {
 }
 
 type childOptions struct {
-	pools []PoolConfig
+	pools    []PoolConfig
+	metadata map[string]string
 }
 
 const (
@@ -130,14 +131,30 @@ func WithPool(cfg PoolConfig) Option {
 // WithChildPool registers a pool that will be exposed when running in child mode.
 func WithChildPool(cfg PoolConfig) ChildOption {
 	return childOptionFunc(func(o *childOptions) {
-		o.pools = append(o.pools, cfg)
+		o.pools = append(o.pools, copyPoolConfig(cfg))
+	})
+}
+
+// WithChildMetadata attaches metadata that will be injected into the child
+// registration if the spawner does not supply its own metadata payload.
+func WithChildMetadata(values map[string]string) ChildOption {
+	return childOptionFunc(func(o *childOptions) {
+		if len(values) == 0 {
+			return
+		}
+		if o.metadata == nil {
+			o.metadata = make(map[string]string, len(values))
+		}
+		for k, v := range values {
+			o.metadata[k] = v
+		}
 	})
 }
 
 // WithSpawner records a spawner configuration. Spawner wiring arrives in later phases.
 func WithSpawner(cfg SpawnerConfig) Option {
 	return optionFunc(func(o *options) {
-		o.spawners = append(o.spawners, cfg)
+		o.spawners = append(o.spawners, copySpawnerConfig(cfg))
 	})
 }
 
@@ -160,4 +177,25 @@ func WithFailurePolicy(policy FailurePolicy) Option {
 	return optionFunc(func(o *options) {
 		o.failurePolicy = policy
 	})
+}
+
+func copySpawnerConfig(cfg SpawnerConfig) SpawnerConfig {
+	copyCfg := cfg
+	if len(cfg.Args) > 0 {
+		copyCfg.Args = append([]string(nil), cfg.Args...)
+	}
+	if len(cfg.Env) > 0 {
+		copyCfg.Env = append([]string(nil), cfg.Env...)
+	}
+	if len(cfg.Tags) > 0 {
+		copyCfg.Tags = append([]string(nil), cfg.Tags...)
+	}
+	if len(cfg.Metadata) > 0 {
+		meta := make(map[string]string, len(cfg.Metadata))
+		for k, v := range cfg.Metadata {
+			meta[k] = v
+		}
+		copyCfg.Metadata = meta
+	}
+	return copyCfg
 }

@@ -16,6 +16,7 @@ import (
 type parentNode struct {
 	base       *node.Node
 	dispatcher *dispatcher
+	remote     *remoteCoordinator
 
 	queue      state.Queue
 	queueOwned bool
@@ -237,6 +238,9 @@ func (n *parentNode) Close() error {
 		n.closed.Store(true)
 		if n.dispatcher != nil {
 			n.dispatcher.stop()
+		}
+		if n.remote != nil {
+			n.remote.shutdown()
 		}
 		if n.base != nil {
 			_ = n.base.Close()

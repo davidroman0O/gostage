@@ -138,6 +138,9 @@ func TestCoreLifecycleNodeAPI(t *testing.T) {
 	if summary.TerminationReason != state.TerminationReasonSuccess {
 		t.Fatalf("expected summary reason success, got %s", summary.TerminationReason)
 	}
+	if _, ok := summary.Metadata["gostage.initial_store"]; ok {
+		t.Fatalf("initial store leaked into workflow metadata: %+v", summary.Metadata)
+	}
 
 	list, err := node.State.ListWorkflows(ctx, state.StateFilter{States: []state.WorkflowState{state.WorkflowCompleted}, Tags: []string{"primary"}, Limit: 5})
 	if err != nil {
@@ -145,6 +148,9 @@ func TestCoreLifecycleNodeAPI(t *testing.T) {
 	}
 	if len(list) == 0 {
 		t.Fatalf("expected workflow listing")
+	}
+	if _, ok := list[0].Metadata["gostage.initial_store"]; ok {
+		t.Fatalf("initial store leaked into list metadata: %+v", list[0].Metadata)
 	}
 
 	history, err := node.State.ActionHistory(ctx, runID)

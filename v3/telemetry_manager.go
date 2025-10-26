@@ -2,6 +2,7 @@ package gostage
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/davidroman0O/gostage/v3/node"
@@ -12,6 +13,8 @@ import (
 type telemetryManager struct {
 	delegate   state.Manager
 	dispatcher *node.TelemetryDispatcher
+	mu         sync.RWMutex
+	suppressed map[string]map[telemetry.EventKind]struct{}
 }
 
 func wrapWithTelemetry(delegate state.Manager, dispatcher *node.TelemetryDispatcher) state.Manager {
@@ -285,6 +288,7 @@ func (m *telemetryManager) StoreExecutionSummary(ctx context.Context, workflowID
 		Error:      report.ErrorMessage,
 		Metadata:   metadata,
 	})
+	m.clearSuppressed(workflowID)
 	return nil
 }
 
@@ -292,8 +296,48 @@ func (m *telemetryManager) emit(evt telemetry.Event) {
 	if m.dispatcher == nil {
 		return
 	}
+	if evt.WorkflowID != "" {
+		m.mu.RLock()
+		if kinds, ok := m.suppressed[evt.WorkflowID]; ok {
+			if _, skip := kinds[evt.Kind]; skip {
+				m.mu.RUnlock()
+				return
+			}
+		}
+		m.mu.RUnlock()
+	}
 	if evt.Timestamp.IsZero() {
 		evt.Timestamp = time.Now()
 	}
 	_ = m.dispatcher.Dispatch(evt)
+}
+
+func (m *telemetryManager) SuppressWorkflowEvents(workflowID string, kinds ...telemetry.EventKind) {
+	if workflowID == "" || len(kinds) == 0 {
+		return
+	}
+	m.mu.Lock()
+	if m.suppressed == nil {
+		m.suppressed = make(map[string]map[telemetry.EventKind]struct{})
+	}
+	set, ok := m.suppressed[workflowID]
+	if !ok {
+		set = make(map[telemetry.EventKind]struct{}, len(kinds))
+		m.suppressed[workflowID] = set
+	}
+	for _, kind := range kinds {
+		if kind != "" {
+			set[kind] = struct{}{}
+		}
+	}
+	m.mu.Unlock()
+}
+
+func (m *telemetryManager) clearSuppressed(workflowID string) {
+	if workflowID == "" {
+		return
+	}
+	m.mu.Lock()
+	delete(m.suppressed, workflowID)
+	m.mu.Unlock()
 }

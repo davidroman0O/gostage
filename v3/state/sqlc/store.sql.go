@@ -11,18 +11,23 @@ import (
 )
 
 const getExecutionSummary = `-- name: GetExecutionSummary :one
-SELECT final_store, disabled_stages, disabled_actions, removed_stages, removed_actions, termination_reason
+SELECT final_store, disabled_stages, disabled_actions, removed_stages, removed_actions, success, error, attempt, duration, completed_at, termination_reason
 FROM execution_summaries
 WHERE workflow_id = ?
 `
 
 type GetExecutionSummaryRow struct {
-	FinalStore        []byte `json:"final_store"`
-	DisabledStages    []byte `json:"disabled_stages"`
-	DisabledActions   []byte `json:"disabled_actions"`
-	RemovedStages     []byte `json:"removed_stages"`
-	RemovedActions    []byte `json:"removed_actions"`
-	TerminationReason string `json:"termination_reason"`
+	FinalStore        []byte         `json:"final_store"`
+	DisabledStages    []byte         `json:"disabled_stages"`
+	DisabledActions   []byte         `json:"disabled_actions"`
+	RemovedStages     []byte         `json:"removed_stages"`
+	RemovedActions    []byte         `json:"removed_actions"`
+	Success           int64          `json:"success"`
+	Error             sql.NullString `json:"error"`
+	Attempt           sql.NullInt64  `json:"attempt"`
+	Duration          sql.NullInt64  `json:"duration"`
+	CompletedAt       sql.NullTime   `json:"completed_at"`
+	TerminationReason string         `json:"termination_reason"`
 }
 
 func (q *Queries) GetExecutionSummary(ctx context.Context, workflowID string) (GetExecutionSummaryRow, error) {
@@ -34,6 +39,11 @@ func (q *Queries) GetExecutionSummary(ctx context.Context, workflowID string) (G
 		&i.DisabledActions,
 		&i.RemovedStages,
 		&i.RemovedActions,
+		&i.Success,
+		&i.Error,
+		&i.Attempt,
+		&i.Duration,
+		&i.CompletedAt,
 		&i.TerminationReason,
 	)
 	return i, err
@@ -411,9 +421,20 @@ func (q *Queries) UpdateWorkflowStatus(ctx context.Context, arg UpdateWorkflowSt
 
 const upsertExecutionSummary = `-- name: UpsertExecutionSummary :exec
 INSERT INTO execution_summaries (
-    workflow_id, final_store, disabled_stages, disabled_actions, removed_stages, removed_actions, termination_reason
+    workflow_id,
+    final_store,
+    disabled_stages,
+    disabled_actions,
+    removed_stages,
+    removed_actions,
+    success,
+    error,
+    attempt,
+    duration,
+    completed_at,
+    termination_reason
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
 ON CONFLICT(workflow_id) DO UPDATE SET
     final_store = excluded.final_store,
@@ -421,17 +442,27 @@ ON CONFLICT(workflow_id) DO UPDATE SET
     disabled_actions = excluded.disabled_actions,
     removed_stages = excluded.removed_stages,
     removed_actions = excluded.removed_actions,
+    success = excluded.success,
+    error = excluded.error,
+    attempt = excluded.attempt,
+    duration = excluded.duration,
+    completed_at = excluded.completed_at,
     termination_reason = excluded.termination_reason
 `
 
 type UpsertExecutionSummaryParams struct {
-	WorkflowID        string `json:"workflow_id"`
-	FinalStore        []byte `json:"final_store"`
-	DisabledStages    []byte `json:"disabled_stages"`
-	DisabledActions   []byte `json:"disabled_actions"`
-	RemovedStages     []byte `json:"removed_stages"`
-	RemovedActions    []byte `json:"removed_actions"`
-	TerminationReason string `json:"termination_reason"`
+	WorkflowID        string         `json:"workflow_id"`
+	FinalStore        []byte         `json:"final_store"`
+	DisabledStages    []byte         `json:"disabled_stages"`
+	DisabledActions   []byte         `json:"disabled_actions"`
+	RemovedStages     []byte         `json:"removed_stages"`
+	RemovedActions    []byte         `json:"removed_actions"`
+	Success           int64          `json:"success"`
+	Error             sql.NullString `json:"error"`
+	Attempt           sql.NullInt64  `json:"attempt"`
+	Duration          sql.NullInt64  `json:"duration"`
+	CompletedAt       sql.NullTime   `json:"completed_at"`
+	TerminationReason string         `json:"termination_reason"`
 }
 
 func (q *Queries) UpsertExecutionSummary(ctx context.Context, arg UpsertExecutionSummaryParams) error {
@@ -442,6 +473,11 @@ func (q *Queries) UpsertExecutionSummary(ctx context.Context, arg UpsertExecutio
 		arg.DisabledActions,
 		arg.RemovedStages,
 		arg.RemovedActions,
+		arg.Success,
+		arg.Error,
+		arg.Attempt,
+		arg.Duration,
+		arg.CompletedAt,
 		arg.TerminationReason,
 	)
 	return err

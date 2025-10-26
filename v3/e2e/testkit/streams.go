@@ -48,6 +48,25 @@ func (b *TelemetryBuffer) Next(t *testing.T, kind telemetry.EventKind, timeout t
 	}
 }
 
+// Collect drains telemetry events for the provided timeout and returns them.
+func (b *TelemetryBuffer) Collect(t *testing.T, timeout time.Duration) []telemetry.Event {
+	t.Helper()
+	if timeout <= 0 {
+		timeout = 50 * time.Millisecond
+	}
+	events := make([]telemetry.Event, 0)
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case evt := <-b.events:
+			events = append(events, evt)
+		case <-timer.C:
+			return events
+		}
+	}
+}
+
 // Close stops the subscription and drains the buffer.
 func (b *TelemetryBuffer) Close() {
 	if b == nil {

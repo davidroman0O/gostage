@@ -1,6 +1,7 @@
 package node
 
 import (
+	"strings"
 	"time"
 
 	"github.com/davidroman0O/gostage/v3/diagnostics"
@@ -68,18 +69,40 @@ type DiagnosticsHealthWriter struct {
 	diag DiagnosticsWriter
 }
 
+func NewDiagnosticsHealthWriter(diag DiagnosticsWriter) DiagnosticsHealthWriter {
+	return DiagnosticsHealthWriter{diag: diag}
+}
+
 func (d DiagnosticsHealthWriter) Handle(evt HealthEvent) {
-	if evt.Status == HealthDegraded || evt.Status == HealthUnavailable {
-		if d.diag != nil {
-			d.diag.Write(diagnostics.Event{
-				Component: "node.health",
-				Severity:  diagnostics.SeverityWarning,
-				Metadata: map[string]any{
-					"pool":   evt.Pool,
-					"status": evt.Status,
-					"detail": evt.Detail,
-				},
-			})
-		}
+	if evt.Status != HealthDegraded && evt.Status != HealthUnavailable {
+		return
 	}
+	if evt.Status == HealthUnavailable && isBenignShutdown(evt.Detail) {
+		return
+	}
+	if d.diag != nil {
+		d.diag.Write(diagnostics.Event{
+			Component: "node.health",
+			Severity:  diagnostics.SeverityWarning,
+			Metadata: map[string]any{
+				"pool":   evt.Pool,
+				"status": evt.Status,
+				"detail": evt.Detail,
+			},
+		})
+	}
+}
+
+func isBenignShutdown(detail string) bool {
+	if detail == "" {
+		return false
+	}
+	lower := strings.ToLower(detail)
+	if strings.Contains(lower, "context canceled") {
+		return true
+	}
+	if strings.Contains(lower, "child closing") {
+		return true
+	}
+	return false
 }

@@ -263,7 +263,9 @@ func (q *SQLiteQueue) workerFor(id WorkflowID) string {
 
 func (q *SQLiteQueue) Release(ctx context.Context, id WorkflowID) error {
 	worker := q.workerFor(id)
-	if err := q.queries.ReleaseWorkflow(ctx, string(id)); err != nil {
+	if err := retryWhileBusy(ctx, 5, func() error {
+		return q.queries.ReleaseWorkflow(ctx, string(id))
+	}); err != nil {
 		return err
 	}
 	q.recordAudit(ctx, id, "release", 0, worker, nil)
@@ -273,7 +275,9 @@ func (q *SQLiteQueue) Release(ctx context.Context, id WorkflowID) error {
 
 func (q *SQLiteQueue) Ack(ctx context.Context, id WorkflowID, summary ResultSummary) error {
 	worker := q.workerFor(id)
-	if err := q.queries.AckWorkflow(ctx, string(id)); err != nil {
+	if err := retryWhileBusy(ctx, 5, func() error {
+		return q.queries.AckWorkflow(ctx, string(id))
+	}); err != nil {
 		return err
 	}
 	q.recordAudit(ctx, id, "ack", summary.Attempt, worker, nil)
@@ -283,7 +287,9 @@ func (q *SQLiteQueue) Ack(ctx context.Context, id WorkflowID, summary ResultSumm
 
 func (q *SQLiteQueue) Cancel(ctx context.Context, id WorkflowID) error {
 	worker := q.workerFor(id)
-	if err := q.queries.CancelWorkflow(ctx, string(id)); err != nil {
+	if err := retryWhileBusy(ctx, 5, func() error {
+		return q.queries.CancelWorkflow(ctx, string(id))
+	}); err != nil {
 		return err
 	}
 	q.recordAudit(ctx, id, "cancel", 0, worker, nil)

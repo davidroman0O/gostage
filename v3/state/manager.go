@@ -318,9 +318,17 @@ func (m *StoreManager) StageRemoved(ctx context.Context, workflowID, stageID, cr
 func (m *StoreManager) StoreExecutionSummary(ctx context.Context, workflowID string, report ExecutionReport) error {
 	id := WorkflowID(workflowID)
 	summary := resultSummaryFromReport(report)
-	if err := m.store.StoreSummary(ctx, id, summary); err != nil {
-		return err
-	}
+
+	var (
+		update       WorkflowStatusUpdate
+		notifyStatus WorkflowState
+		reasonVal    TerminationReason
+		durationVal  time.Duration
+		successVal   bool
+		errorVal     string
+		haveSnapshot bool
+	)
+
 	m.mu.Lock()
 	if snap, ok := m.workflows[id]; ok {
 		copySummary := summary
@@ -388,22 +396,44 @@ func (m *StoreManager) StoreExecutionSummary(ctx context.Context, workflowID str
 			}
 		}
 		finalState := snap.record.State
-		reason := summary.Reason
-		if reason == "" {
-			reason = TerminationReasonUnknown
+		if finalState == "" {
+			finalState = WorkflowCompleted
 		}
+		reasonVal = summary.Reason
+		if reasonVal == "" {
+			reasonVal = TerminationReasonUnknown
+		}
+		durationVal = snap.record.Duration
+		successVal = snap.record.Success
+		errorVal = snap.record.Error
+		update = WorkflowStatusUpdate{
+			ID:          id,
+			Status:      finalState,
+			StartedAt:   snap.record.StartedAt,
+			CompletedAt: snap.record.CompletedAt,
+			Duration:    &durationVal,
+			Success:     &successVal,
+			Error:       &errorVal,
+			Reason:      &reasonVal,
+		}
+		notifyStatus = finalState
+		haveSnapshot = true
 		m.mu.Unlock()
-		if err := m.store.UpdateWorkflowStatus(ctx, WorkflowStatusUpdate{
-			ID:     id,
-			Status: finalState,
-			Reason: &reason,
-		}); err != nil {
-			return err
-		}
-		m.notifyWorkflowStatus(ctx, string(id), finalState)
 	} else {
 		m.mu.Unlock()
 	}
+
+	if haveSnapshot {
+		if err := m.store.UpdateWorkflowStatus(ctx, update); err != nil {
+			return err
+		}
+		m.notifyWorkflowStatus(ctx, string(id), notifyStatus)
+	}
+
+	if err := m.store.StoreSummary(ctx, id, summary); err != nil {
+		return err
+	}
+
 	m.notifyExecutionSummary(ctx, workflowID, summary)
 	return nil
 }

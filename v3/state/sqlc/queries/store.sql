@@ -83,9 +83,20 @@ WHERE workflow_id = sqlc.arg(workflow_id)
 
 -- name: UpsertExecutionSummary :exec
 INSERT INTO execution_summaries (
-    workflow_id, final_store, disabled_stages, disabled_actions, removed_stages, removed_actions, termination_reason
+    workflow_id,
+    final_store,
+    disabled_stages,
+    disabled_actions,
+    removed_stages,
+    removed_actions,
+    success,
+    error,
+    attempt,
+    duration,
+    completed_at,
+    termination_reason
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
 ON CONFLICT(workflow_id) DO UPDATE SET
     final_store = excluded.final_store,
@@ -93,6 +104,11 @@ ON CONFLICT(workflow_id) DO UPDATE SET
     disabled_actions = excluded.disabled_actions,
     removed_stages = excluded.removed_stages,
     removed_actions = excluded.removed_actions,
+    success = excluded.success,
+    error = excluded.error,
+    attempt = excluded.attempt,
+    duration = excluded.duration,
+    completed_at = excluded.completed_at,
     termination_reason = excluded.termination_reason;
 
 -- name: GetWorkflowSummary :one
@@ -145,6 +161,6 @@ WHERE workflow_id = ?
 ORDER BY created_at ASC;
 
 -- name: GetExecutionSummary :one
-SELECT final_store, disabled_stages, disabled_actions, removed_stages, removed_actions, termination_reason
+SELECT final_store, disabled_stages, disabled_actions, removed_stages, removed_actions, success, error, attempt, duration, completed_at, termination_reason
 FROM execution_summaries
 WHERE workflow_id = ?;

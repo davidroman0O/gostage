@@ -1,0 +1,145 @@
+syntax = "proto3";
+
+package gostage.v3.process;
+
+option go_package = "github.com/davidroman0O/gostage/v3/process/proto;processproto";
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+// ControlEnvelope wraps all messages exchanged over the bidirectional
+// parent/child control stream. Each envelope carries a single typed payload.
+message ControlEnvelope {
+  string message_id = 1;
+  oneof body {
+    RegisterNode register = 2;
+    RegisterAck register_ack = 3;
+    LeaseGrant lease_grant = 4;
+    LeaseAck lease_ack = 5;
+    CancelWorkflow cancel = 6;
+    Heartbeat heartbeat = 7;
+    Shutdown shutdown = 8;
+    TelemetryForward telemetry = 9;
+    DiagnosticForward diagnostic = 10;
+    ChildConfigUpdate config_update = 11;
+  }
+}
+
+// RegisterNode is sent by a child process when it connects to the parent.
+message RegisterNode {
+  string node_id = 1;
+  string child_type = 2;
+  repeated ChildPool pools = 3;
+  map<string, string> metadata = 4;
+  RuntimeInfo runtime = 5;
+  string auth_token = 6;
+}
+
+// RegisterAck confirms registration (parent -> child) and conveys
+// connection parameters such as heartbeat interval.
+message RegisterAck {
+  google.protobuf.Duration heartbeat_interval = 1;
+  google.protobuf.Duration heartbeat_timeout = 2;
+}
+
+// ChildPool mirrors gostage PoolConfig fields relevant to remote children.
+message ChildPool {
+  string name = 1;
+  uint32 slots = 2;
+  repeated string tags = 3;
+  map<string, string> metadata = 4;
+}
+
+message RuntimeInfo {
+  string version = 1;
+  string go_version = 2;
+  string os = 3;
+  string arch = 4;
+  string binary = 5;
+  string git_commit = 6;
+}
+
+// LeaseGrant delivers a workflow to a child for execution.
+message LeaseGrant {
+  string workflow_id = 1;
+  string lease_id = 2;
+  int32 attempt = 3;
+  string workflow_ref = 4;
+  bytes definition_json = 5;
+  bytes store_json = 6;
+  bytes metadata_json = 7;
+  int32 priority = 8;
+}
+
+// LeaseAck is sent by the child when a workflow finishes executing.
+message LeaseAck {
+  string workflow_id = 1;
+  string lease_id = 2;
+  ResultSummary summary = 3;
+}
+
+// CancelWorkflow requests a running child to cancel execution.
+message CancelWorkflow {
+  string workflow_id = 1;
+}
+
+// Heartbeat is exchanged periodically to keep the connection alive.
+message Heartbeat {
+  google.protobuf.Timestamp observed_at = 1;
+  string node_id = 2;
+}
+
+// Shutdown indicates either side intends to close the connection gracefully.
+message Shutdown {
+  string reason = 1;
+}
+
+// TelemetryForward transports telemetry events emitted by the child
+// so the parent can fan them out to registered sinks.
+message TelemetryForward {
+  bytes event_json = 1;
+}
+
+// DiagnosticForward transports diagnostics from the child into the parent's
+// diagnostic stream.
+message DiagnosticForward {
+  google.protobuf.Timestamp occurred_at = 1;
+  string component = 2;
+  string severity = 3;
+  string error = 4;
+  bytes metadata_json = 5;
+}
+
+// ChildConfigUpdate lets the parent push configuration changes to a child.
+message ChildConfigUpdate {
+  bytes metadata_json = 1;
+}
+
+// ResultSummary mirrors state.ResultSummary in a transport friendly form.
+message ResultSummary {
+  bool success = 1;
+  string error = 2;
+  int32 attempt = 3;
+  bytes output_json = 4;
+  google.protobuf.Duration duration = 5;
+  google.protobuf.Timestamp completed_at = 6;
+  map<string, bool> disabled_stages = 7;
+  map<string, bool> disabled_actions = 8;
+  map<string, string> removed_stages = 9;
+  map<string, string> removed_actions = 10;
+  TerminationReason reason = 11;
+}
+
+enum TerminationReason {
+  TERMINATION_UNKNOWN = 0;
+  TERMINATION_SUCCESS = 1;
+  TERMINATION_FAILURE = 2;
+  TERMINATION_USER_CANCEL = 3;
+  TERMINATION_POLICY_CANCEL = 4;
+  TERMINATION_TIMEOUT = 5;
+}
+
+// ProcessBridge exposes the bidirectional control stream between parent and child.
+service ProcessBridge {
+  rpc Control(stream ControlEnvelope) returns (stream ControlEnvelope);
+}

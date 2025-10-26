@@ -3,6 +3,7 @@ package gostage
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/davidroman0O/gostage/v3/node"
 	"github.com/davidroman0O/gostage/v3/state"
@@ -113,5 +114,71 @@ func TestTelemetryManagerEmitsActionProgress(t *testing.T) {
 	}
 	if evt.Metadata["message"] != "halfway" {
 		t.Fatalf("expected message 'halfway', got %v", evt.Metadata["message"])
+	}
+}
+
+func TestTelemetryManagerSuppressWorkflowEvents(t *testing.T) {
+	store := state.NewMemoryStore()
+	manager, err := state.NewStoreManager(store)
+	if err != nil {
+		t.Fatalf("store manager: %v", err)
+	}
+
+	dispatcher := node.NewTelemetryDispatcher(context.Background(), nil, node.TelemetryDispatcherConfig{})
+	defer dispatcher.Close()
+
+	sink := telemetry.NewChannelSink(8)
+	_ = dispatcher.Register(sink)
+
+	wrapped := wrapWithTelemetry(manager, dispatcher)
+
+	suppressor, ok := wrapped.(interface {
+		SuppressWorkflowEvents(string, ...telemetry.EventKind)
+	})
+	if !ok {
+		t.Fatalf("wrapped manager missing suppression support")
+	}
+
+	wf := state.WorkflowRecord{
+		ID:   state.WorkflowID("wf-suppress"),
+		Name: "suppress",
+	}
+	if err := wrapped.WorkflowRegistered(context.Background(), wf); err != nil {
+		t.Fatalf("workflow registered: %v", err)
+	}
+	<-sink.C() // drain registration
+
+	suppressor.SuppressWorkflowEvents(string(wf.ID), telemetry.EventWorkflowStarted, telemetry.EventWorkflowSummary)
+
+	if err := wrapped.WorkflowStatus(context.Background(), string(wf.ID), state.WorkflowRunning); err != nil {
+		t.Fatalf("workflow status running: %v", err)
+	}
+	select {
+	case evt := <-sink.C():
+		t.Fatalf("unexpected telemetry event during suppression: %s", evt.Kind)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	report := state.ExecutionReport{
+		WorkflowID:   string(wf.ID),
+		WorkflowName: wf.Name,
+		Status:       state.WorkflowCompleted,
+		Success:      true,
+	}
+	if err := wrapped.StoreExecutionSummary(context.Background(), string(wf.ID), report); err != nil {
+		t.Fatalf("store execution summary: %v", err)
+	}
+	select {
+	case evt := <-sink.C():
+		t.Fatalf("unexpected summary telemetry during suppression: %s", evt.Kind)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	if err := wrapped.WorkflowStatus(context.Background(), string(wf.ID), state.WorkflowCompleted); err != nil {
+		t.Fatalf("workflow status completed: %v", err)
+	}
+	evt := <-sink.C()
+	if evt.Kind != telemetry.EventWorkflowCompleted {
+		t.Fatalf("expected workflow.completed after suppression cleared, got %s", evt.Kind)
 	}
 }

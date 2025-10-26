@@ -73,10 +73,15 @@ func TestSQLiteStoreWaitResult(t *testing.T) {
 		t.Fatalf("record action: %v", err)
 	}
 
+	summaryCompletedAt := time.Now().UTC().Truncate(time.Millisecond)
 	summary := ResultSummary{
 		Success:        true,
 		Output:         map[string]any{"status": "ok"},
 		DisabledStages: map[string]bool{stage.ID: false},
+		Attempt:        2,
+		Duration:       1500 * time.Millisecond,
+		CompletedAt:    summaryCompletedAt,
+		Reason:         TerminationReasonSuccess,
 	}
 
 	go func() {
@@ -94,6 +99,37 @@ func TestSQLiteStoreWaitResult(t *testing.T) {
 	}
 	if !res.Success || res.Output["status"] != "ok" {
 		t.Fatalf("summary mismatch: %#v", res)
+	}
+	if res.Attempt != summary.Attempt {
+		t.Fatalf("expected attempt %d, got %d", summary.Attempt, res.Attempt)
+	}
+	if res.Duration != summary.Duration {
+		t.Fatalf("expected duration %s, got %s", summary.Duration, res.Duration)
+	}
+	if res.Reason != TerminationReasonSuccess {
+		t.Fatalf("expected reason success, got %s", res.Reason)
+	}
+	if diff := res.CompletedAt.Sub(summaryCompletedAt); diff > time.Millisecond || diff < -time.Millisecond {
+		t.Fatalf("expected completed_at within 1ms, got diff %s (%s vs %s)", diff, res.CompletedAt, summaryCompletedAt)
+	}
+
+	// Simulate a restart by constructing a fresh store and waiting again.
+	storeRestart, err := NewSQLiteStore(db)
+	if err != nil {
+		t.Fatalf("new store restart: %v", err)
+	}
+	resRestart, err := storeRestart.WaitResult(ctx, wfID)
+	if err != nil {
+		t.Fatalf("wait result after restart: %v", err)
+	}
+	if !resRestart.Success || resRestart.Attempt != summary.Attempt || resRestart.Duration != summary.Duration {
+		t.Fatalf("restart summary mismatch: %#v", resRestart)
+	}
+	if resRestart.Reason != TerminationReasonSuccess {
+		t.Fatalf("expected restart reason success, got %s", resRestart.Reason)
+	}
+	if diff := resRestart.CompletedAt.Sub(summaryCompletedAt); diff > time.Millisecond || diff < -time.Millisecond {
+		t.Fatalf("expected restart completed_at within 1ms, got diff %s (%s vs %s)", diff, resRestart.CompletedAt, summaryCompletedAt)
 	}
 
 	// Update workflow state to completed.

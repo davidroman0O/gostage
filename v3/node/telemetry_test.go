@@ -161,6 +161,31 @@ func TestTelemetryDispatcherFailFast(t *testing.T) {
 	}
 }
 
+func TestDiagnosticsHealthWriterSkipsBenignShutdown(t *testing.T) {
+	rec := &recorderDiag{}
+	writer := DiagnosticsHealthWriter{diag: rec}
+	writer.Handle(HealthEvent{
+		Pool:   "remote",
+		Status: HealthUnavailable,
+		Detail: "rpc error: code = Canceled desc = context canceled",
+	})
+	if len(rec.events) != 0 {
+		t.Fatalf("expected benign shutdown to be ignored, got %#v", rec.events)
+	}
+
+	writer.Handle(HealthEvent{
+		Pool:   "remote",
+		Status: HealthUnavailable,
+		Detail: "database is locked (5)",
+	})
+	if len(rec.events) != 1 {
+		t.Fatalf("expected warning for non-benign detail; got %d events", len(rec.events))
+	}
+	if rec.events[0].Severity != diagnostics.SeverityWarning {
+		t.Fatalf("expected warning severity, got %v", rec.events[0].Severity)
+	}
+}
+
 func TestTelemetryDispatcherBlockTimeout(t *testing.T) {
 	cfg := TelemetryDispatcherConfig{BufferSize: 1, OverflowStrategy: OverflowStrategyBlock, OverflowTimeout: 20 * time.Millisecond}
 	d := newStoppedDispatcher(cfg, nil)

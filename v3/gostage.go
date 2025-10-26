@@ -5,15 +5,19 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/davidroman0O/gostage/v3/broker"
+	"github.com/davidroman0O/gostage/v3/child"
 	"github.com/davidroman0O/gostage/v3/diagnostics"
+	"github.com/davidroman0O/gostage/v3/internal/locks"
 	"github.com/davidroman0O/gostage/v3/node"
 	"github.com/davidroman0O/gostage/v3/pools"
 	"github.com/davidroman0O/gostage/v3/registry"
 	"github.com/davidroman0O/gostage/v3/runner"
 	"github.com/davidroman0O/gostage/v3/runtime/local"
+	"github.com/davidroman0O/gostage/v3/spawner"
 	"github.com/davidroman0O/gostage/v3/state"
 	"github.com/davidroman0O/gostage/v3/telemetry"
 )
@@ -72,6 +76,55 @@ var (
 	// ErrSubmissionRejected indicates the node rejected a submission prior to enqueueing.
 	ErrSubmissionRejected = errors.New("gostage: submission rejected")
 )
+
+var (
+	childDetect  = child.Detect
+	newChildNode = child.NewNode
+)
+
+type childHandlerRegistration struct {
+	childType string
+	handler   ChildHandler
+	options   childOptions
+}
+
+type childNodeWrapper struct {
+	node *child.Node
+}
+
+func (w childNodeWrapper) Run(ctx context.Context) error {
+	return w.node.Run(ctx)
+}
+
+func (w childNodeWrapper) Diagnostics() <-chan diagnostics.Event {
+	return w.node.Diagnostics()
+}
+
+func (w childNodeWrapper) StreamTelemetry(ctx context.Context, fn TelemetryHandler) CancelFunc {
+	cancel := w.node.StreamTelemetry(ctx, func(evt telemetry.Event) {
+		if fn != nil {
+			fn(evt)
+		}
+	})
+	return CancelFunc(cancel)
+}
+
+func (w childNodeWrapper) Close() error {
+	return w.node.Close()
+}
+
+var (
+	childHandlersMu     locks.RWMutex
+	defaultChildHandler *childHandlerRegistration
+	namedChildHandlers  = make(map[string]*childHandlerRegistration)
+)
+
+// IsChildProcess reports whether the current process is running in child mode.
+// It mirrors the detection path used by Run so callers can guard parent-only setup.
+func IsChildProcess() bool {
+	_, childMode, _ := childDetect(os.Args[1:], os.Getenv)
+	return childMode
+}
 
 // Node is the public handle returned by Run. It embeds the runtime behaviour
 // while exposing the read-only State facade as a field for ergonomic access.
@@ -197,6 +250,8 @@ type SpawnerConfig struct {
 	WorkingDir     string
 	AuthToken      string
 	Tags           []string
+	Metadata       map[string]string
+	ChildType      string
 	TLS            TLSFiles
 	MaxRestarts    int
 	RestartBackoff time.Duration
@@ -214,6 +269,8 @@ type DispatcherConfig struct {
 type SQLiteConfig struct {
 	Path            string
 	WAL             bool
+	DisableWAL      bool
+	BusyTimeout     time.Duration
 	ApplyMigrations bool
 	DB              *sql.DB
 }
@@ -229,6 +286,14 @@ func Run(ctx context.Context, opts ...Option) (*Node, <-chan DiagnosticEvent, er
 			continue
 		}
 		opt.apply(cfg)
+	}
+
+	childCfg, childMode, err := childDetect(os.Args[1:], os.Getenv)
+	if err != nil {
+		return nil, nil, fmt.Errorf("gostage: detect child mode: %w", err)
+	}
+	if childMode {
+		return runChildProcess(ctx, childCfg)
 	}
 
 	logger := cfg.logger
@@ -249,12 +314,27 @@ func Run(ctx context.Context, opts ...Option) (*Node, <-chan DiagnosticEvent, er
 
 	if sqliteCfg := cfg.sqlite; sqliteCfg != nil {
 		var err error
+		busyTimeout := sqliteCfg.BusyTimeout
+		if busyTimeout <= 0 {
+			busyTimeout = 15 * time.Second
+		}
+		busyTimeoutMS := int(busyTimeout / time.Millisecond)
+		if busyTimeoutMS <= 0 {
+			busyTimeoutMS = 1
+		}
+		enableWAL := !sqliteCfg.DisableWAL
+		if sqliteCfg.WAL {
+			enableWAL = true
+		}
 		sqliteDB = sqliteCfg.DB
 		if sqliteDB == nil {
 			if sqliteCfg.Path == "" {
 				return nil, nil, fmt.Errorf("gostage: sqlite path required when no *sql.DB supplied")
 			}
-			dsn := fmt.Sprintf("file:%s?_busy_timeout=5000&_foreign_keys=on", sqliteCfg.Path)
+			dsn := fmt.Sprintf("file:%s?mode=rwc&_busy_timeout=%d&_foreign_keys=on", sqliteCfg.Path, busyTimeoutMS)
+			if enableWAL {
+				dsn += "&_journal_mode=WAL"
+			}
 			sqliteDB, err = sql.Open("sqlite", dsn)
 			if err != nil {
 				return nil, nil, fmt.Errorf("gostage: open sqlite: %w", err)
@@ -267,7 +347,13 @@ func Run(ctx context.Context, opts ...Option) (*Node, <-chan DiagnosticEvent, er
 			}
 			return nil, nil, fmt.Errorf("gostage: enable foreign keys: %w", err)
 		}
-		if sqliteCfg.WAL {
+		if _, err := sqliteDB.Exec(fmt.Sprintf("PRAGMA busy_timeout=%d", busyTimeoutMS)); err != nil {
+			if sqliteOwned {
+				_ = sqliteDB.Close()
+			}
+			return nil, nil, fmt.Errorf("gostage: set busy timeout: %w", err)
+		}
+		if enableWAL {
 			if _, err := sqliteDB.Exec("PRAGMA journal_mode=WAL"); err != nil {
 				if sqliteOwned {
 					_ = sqliteDB.Close()
@@ -351,20 +437,8 @@ func Run(ctx context.Context, opts ...Option) (*Node, <-chan DiagnosticEvent, er
 	base := node.New(ctx, cfg.telemetrySinks, cfg.telemetryCfg)
 	health := node.NewHealthDispatcher()
 	if diagWriter := base.DiagnosticsWriter(); diagWriter != nil {
-		_ = health.Subscribe(func(evt node.HealthEvent) {
-			if evt.Status == node.HealthDegraded || evt.Status == node.HealthUnavailable {
-				diagWriter.Write(diagnostics.Event{
-					OccurredAt: time.Now(),
-					Component:  "node.health",
-					Severity:   diagnostics.SeverityWarning,
-					Metadata: map[string]any{
-						"pool":   evt.Pool,
-						"status": evt.Status,
-						"detail": evt.Detail,
-					},
-				})
-			}
-		})
+		writer := node.NewDiagnosticsHealthWriter(diagWriter)
+		_ = health.Subscribe(writer.Handle)
 	}
 
 	managerWithTelemetry := wrapWithTelemetry(manager, base.TelemetryDispatcher())
@@ -384,11 +458,19 @@ func Run(ctx context.Context, opts ...Option) (*Node, <-chan DiagnosticEvent, er
 	}
 
 	dispatcher := newDispatcher(ctx, queue, store, managerWithTelemetry, r, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, logger, cfg.dispatcher.ClaimInterval, cfg.dispatcher.Jitter, cfg.dispatcher.MaxInFlight, cfg.failurePolicy, poolBindings)
+	remoteCoord, err := newRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, logger, poolBindings)
+	if err != nil {
+		if sqliteOwned {
+			_ = sqliteDB.Close()
+		}
+		return nil, nil, err
+	}
 	dispatcher.start()
 
 	impl := &parentNode{
 		base:       base,
 		dispatcher: dispatcher,
+		remote:     remoteCoord,
 		queue:      queue,
 		queueOwned: queueOwned,
 		store:      store,
@@ -405,11 +487,11 @@ func Run(ctx context.Context, opts ...Option) (*Node, <-chan DiagnosticEvent, er
 	}, base.Diagnostics(), nil
 }
 
-func indexSpawners(cfgs []SpawnerConfig) (map[string]SpawnerConfig, error) {
+func indexSpawners(cfgs []SpawnerConfig) (map[string]*spawnerBinding, error) {
 	if len(cfgs) == 0 {
-		return map[string]SpawnerConfig{}, nil
+		return map[string]*spawnerBinding{}, nil
 	}
-	index := make(map[string]SpawnerConfig, len(cfgs))
+	index := make(map[string]*spawnerBinding, len(cfgs))
 	for _, cfg := range cfgs {
 		if cfg.Name == "" || cfg.BinaryPath == "" {
 			return nil, errors.Join(ErrInvalidSpawnerConfig, fmt.Errorf("spawner %q requires name and binary path", cfg.Name))
@@ -417,12 +499,27 @@ func indexSpawners(cfgs []SpawnerConfig) (map[string]SpawnerConfig, error) {
 		if _, exists := index[cfg.Name]; exists {
 			return nil, errors.Join(ErrDuplicateSpawner, fmt.Errorf("spawner %q defined multiple times", cfg.Name))
 		}
-		index[cfg.Name] = cfg
+		copyCfg := copySpawnerConfig(cfg)
+		procCfg := spawner.Config{
+			BinaryPath:     copyCfg.BinaryPath,
+			Args:           append([]string(nil), copyCfg.Args...),
+			Env:            append([]string(nil), copyCfg.Env...),
+			WorkingDir:     copyCfg.WorkingDir,
+			MaxRestarts:    copyCfg.MaxRestarts,
+			RestartBackoff: copyCfg.RestartBackoff,
+			ShutdownGrace:  copyCfg.ShutdownGrace,
+		}
+		binding := &spawnerBinding{
+			name:    copyCfg.Name,
+			cfg:     copyCfg,
+			process: spawner.NewProcessSpawner(procCfg),
+		}
+		index[copyCfg.Name] = binding
 	}
 	return index, nil
 }
 
-func buildPools(cfgs []PoolConfig, spawners map[string]SpawnerConfig) ([]*poolBinding, error) {
+func buildPools(cfgs []PoolConfig, spawners map[string]*spawnerBinding) ([]*poolBinding, error) {
 	if len(cfgs) == 0 {
 		cfgs = []PoolConfig{{Slots: 1}}
 	}
@@ -443,12 +540,6 @@ func buildPools(cfgs []PoolConfig, spawners map[string]SpawnerConfig) ([]*poolBi
 			return nil, errors.Join(ErrInvalidPoolConfig, fmt.Errorf("pool %q must specify Slots > 0", name))
 		}
 
-		if cfg.Spawner != "" {
-			if _, ok := spawners[cfg.Spawner]; !ok {
-				return nil, errors.Join(ErrUnknownSpawner, fmt.Errorf("pool %q references unknown spawner %q", name, cfg.Spawner))
-			}
-		}
-
 		selector := state.Selector{
 			All:  append([]string(nil), cfg.Selector.All...),
 			Any:  append([]string(nil), cfg.Selector.Any...),
@@ -458,20 +549,202 @@ func buildPools(cfgs []PoolConfig, spawners map[string]SpawnerConfig) ([]*poolBi
 			selector.All = append([]string(nil), cfg.Tags...)
 		}
 		pool := pools.NewLocal(name, selector, slots)
-		bindings = append(bindings, &poolBinding{pool: pool})
+		binding := &poolBinding{pool: pool}
+		if cfg.Spawner != "" {
+			spBinding, ok := spawners[cfg.Spawner]
+			if !ok {
+				return nil, errors.Join(ErrUnknownSpawner, fmt.Errorf("pool %q references unknown spawner %q", name, cfg.Spawner))
+			}
+			binding.remote = &remoteBinding{
+				spawner: spBinding,
+				poolCfg: copyPoolConfig(cfg),
+			}
+		}
+		bindings = append(bindings, binding)
 	}
 	return bindings, nil
+}
+
+func copyPoolConfig(cfg PoolConfig) PoolConfig {
+	copyCfg := cfg
+	if len(cfg.Tags) > 0 {
+		copyCfg.Tags = append([]string(nil), cfg.Tags...)
+	}
+	copyCfg.Selector = Selector{
+		All:  append([]string(nil), cfg.Selector.All...),
+		Any:  append([]string(nil), cfg.Selector.Any...),
+		None: append([]string(nil), cfg.Selector.None...),
+	}
+	if len(cfg.Metadata) > 0 {
+		meta := make(map[string]any, len(cfg.Metadata))
+		for k, v := range cfg.Metadata {
+			meta[k] = v
+		}
+		copyCfg.Metadata = meta
+	}
+	return copyCfg
 }
 
 // ChildHandler represents the entrypoint executed when the binary re-enters as a child.
 type ChildHandler func(context.Context, ChildNode) error
 
-var registeredChildHandlers []ChildHandler
-
-// HandleChild registers a child-mode handler. Child execution wiring arrives in later phases.
+// HandleChild registers the default child-mode handler executed when the binary
+// starts in child mode without a specific child type.
 func HandleChild(handler ChildHandler, opts ...ChildOption) {
+	registerChildHandler("", handler, opts...)
+}
+
+// HandleChildNamed registers a child handler for a specific childType. The
+// spawner selects the handler by providing the same child type via
+// SpawnerConfig.ChildType or process flags.
+func HandleChildNamed(childType string, handler ChildHandler, opts ...ChildOption) {
+	registerChildHandler(childType, handler, opts...)
+}
+
+func runChildProcess(ctx context.Context, detected child.Config) (*Node, <-chan DiagnosticEvent, error) {
+	reg := resolveChildHandler(detected.ChildType)
+	if reg == nil {
+		return nil, nil, fmt.Errorf("gostage: no child handler registered for type %q", detected.ChildType)
+	}
+	cfg := mergeChildConfig(detected, reg)
+	childNode := newChildNode(cfg)
+	wrapper := childNodeWrapper{node: childNode}
+	err := reg.handler(ctx, wrapper)
+	if closeErr := wrapper.Close(); closeErr != nil {
+		if err == nil {
+			err = closeErr
+		} else {
+			err = errors.Join(err, closeErr)
+		}
+	}
+	return nil, nil, err
+}
+
+func registerChildHandler(childType string, handler ChildHandler, opts ...ChildOption) {
 	if handler == nil {
 		return
 	}
-	registeredChildHandlers = append(registeredChildHandlers, handler)
+	reg := &childHandlerRegistration{
+		childType: childType,
+		handler:   handler,
+		options:   childOptions{},
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt.apply(&reg.options)
+		}
+	}
+	childHandlersMu.Lock()
+	defer childHandlersMu.Unlock()
+	if childType == "" {
+		defaultChildHandler = reg
+		return
+	}
+	if namedChildHandlers == nil {
+		namedChildHandlers = make(map[string]*childHandlerRegistration)
+	}
+	namedChildHandlers[childType] = reg
+}
+
+func resolveChildHandler(childType string) *childHandlerRegistration {
+	childHandlersMu.RLock()
+	defer childHandlersMu.RUnlock()
+	if childType != "" {
+		if reg, ok := namedChildHandlers[childType]; ok {
+			return reg.clone()
+		}
+	}
+	if defaultChildHandler == nil {
+		return nil
+	}
+	return defaultChildHandler.clone()
+}
+
+func (reg *childHandlerRegistration) clone() *childHandlerRegistration {
+	if reg == nil {
+		return nil
+	}
+	clone := &childHandlerRegistration{
+		childType: reg.childType,
+		handler:   reg.handler,
+		options:   reg.options.clone(),
+	}
+	return clone
+}
+
+func (opts childOptions) clone() childOptions {
+	clone := childOptions{}
+	if len(opts.pools) > 0 {
+		clone.pools = make([]PoolConfig, len(opts.pools))
+		for i, pool := range opts.pools {
+			clone.pools[i] = copyPoolConfig(pool)
+		}
+	}
+	if len(opts.metadata) > 0 {
+		clone.metadata = copyStringStringMap(opts.metadata)
+	}
+	return clone
+}
+
+func copyStringStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]string, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func mergeChildConfig(base child.Config, reg *childHandlerRegistration) child.Config {
+	if reg == nil {
+		return base
+	}
+	cfg := base
+	if len(cfg.Pools) == 0 && len(reg.options.pools) > 0 {
+		cfg.Pools = childPoolSpecsFromOptions(reg.options.pools)
+	}
+	if len(cfg.Metadata) == 0 && len(reg.options.metadata) > 0 {
+		cfg.Metadata = copyStringStringMap(reg.options.metadata)
+	}
+	return cfg
+}
+
+func childPoolSpecsFromOptions(pools []PoolConfig) []child.PoolSpec {
+	if len(pools) == 0 {
+		return nil
+	}
+	specs := make([]child.PoolSpec, 0, len(pools))
+	for _, pool := range pools {
+		slots := pool.Slots
+		if slots <= 0 {
+			slots = 1
+		}
+		spec := child.PoolSpec{
+			Name:     pool.Name,
+			Slots:    uint32(slots),
+			Tags:     append([]string(nil), pool.Tags...),
+			Metadata: poolMetadataToStrings(pool.Metadata),
+		}
+		specs = append(specs, spec)
+	}
+	return specs
+}
+
+func poolMetadataToStrings(values map[string]any) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for k, v := range values {
+		if v == nil {
+			continue
+		}
+		out[k] = fmt.Sprint(v)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
