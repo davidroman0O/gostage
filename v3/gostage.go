@@ -442,6 +442,8 @@ func Run(ctx context.Context, opts ...Option) (*Node, <-chan DiagnosticEvent, er
 		_ = health.Subscribe(writer.Handle)
 	}
 
+	clock := manager.Clock()
+
 	managerWithTelemetry := wrapWithTelemetry(manager, base.TelemetryDispatcher())
 
 	broker := broker.NewLocal(managerWithTelemetry)
@@ -458,8 +460,8 @@ func Run(ctx context.Context, opts ...Option) (*Node, <-chan DiagnosticEvent, er
 		return nil, nil, err
 	}
 
-	dispatcher := newDispatcher(ctx, queue, store, managerWithTelemetry, r, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, logger, cfg.dispatcher.ClaimInterval, cfg.dispatcher.Jitter, cfg.dispatcher.MaxInFlight, cfg.failurePolicy, poolBindings)
-	remoteCoord, err := newRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, logger, poolBindings)
+	dispatcher := newDispatcher(ctx, queue, store, managerWithTelemetry, r, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, logger, cfg.dispatcher.ClaimInterval, cfg.dispatcher.Jitter, cfg.dispatcher.MaxInFlight, cfg.failurePolicy, poolBindings, clock)
+	remoteCoord, err := newRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, logger, poolBindings, clock)
 	if err != nil {
 		if sqliteOwned {
 			_ = sqliteDB.Close()

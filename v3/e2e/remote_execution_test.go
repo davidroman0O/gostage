@@ -903,6 +903,69 @@ func TestRemoteExecutionFailureAndMutations(t *testing.T) {
 		t.Fatalf("expected removedActions persisted to include %s: %#v", removedActionKey, removedActionsMap)
 	}
 
+	summary, err := node.State.WorkflowSummary(ctx, state.WorkflowID(mutationsRunID))
+	if err != nil {
+		t.Fatalf("state summary for mutation run: %v", err)
+	}
+	actionHistory, err := node.State.ActionHistory(ctx, state.WorkflowID(mutationsRunID))
+	if err != nil {
+		t.Fatalf("action history for mutation run: %v", err)
+	}
+	expectStageStatus := func(stageID string, expected state.WorkflowState) {
+		if summary.Stages != nil {
+			if rec, ok := summary.Stages[stageID]; ok {
+				if rec.Status != expected {
+					t.Fatalf("expected stage %s status=%s, got %s", stageID, expected, rec.Status)
+				}
+				return
+			}
+		}
+		var dbStatus string
+		if err := db.QueryRowContext(ctx,
+			`SELECT state FROM stage_runs WHERE workflow_id = ? AND stage_id = ?`,
+			mutationsRunID, stageID,
+		).Scan(&dbStatus); err != nil {
+			t.Fatalf("query stage_runs for %s: %v", stageID, err)
+		}
+		if dbStatus != string(expected) {
+			t.Fatalf("expected stage %s status=%s in DB, got %s", stageID, expected, dbStatus)
+		}
+	}
+	expectActionStatus := func(stageID, actionID string, expected state.WorkflowState) {
+		if summary.Stages != nil {
+			if stageRec, ok := summary.Stages[stageID]; ok && stageRec.Actions != nil {
+				if actionRec, ok := stageRec.Actions[actionID]; ok {
+					if actionRec.Status != expected {
+						t.Fatalf("expected action %s/%s status=%s, got %s", stageID, actionID, expected, actionRec.Status)
+					}
+					return
+				}
+			}
+		}
+		for _, rec := range actionHistory {
+			if rec.StageID == stageID && rec.ActionID == actionID {
+				if rec.State != expected {
+					t.Fatalf("expected action %s/%s state=%s, got %s", stageID, actionID, expected, rec.State)
+				}
+				return
+			}
+		}
+		var dbStatus string
+		if err := db.QueryRowContext(ctx,
+			`SELECT state FROM action_runs WHERE workflow_id = ? AND stage_id = ? AND action_id = ?`,
+			mutationsRunID, stageID, actionID,
+		).Scan(&dbStatus); err != nil {
+			t.Fatalf("query action_runs for %s/%s: %v", stageID, actionID, err)
+		}
+		if dbStatus != string(expected) {
+			t.Fatalf("expected action %s/%s status=%s in DB, got %s", stageID, actionID, expected, dbStatus)
+		}
+	}
+	expectStageStatus(remoteSkipStageID, state.WorkflowSkipped)
+	expectActionStatus(remoteSkipStageID, remoteSkipActionID, state.WorkflowSkipped)
+	expectActionStatus(remoteControlStageID, remoteRemovableActionID, state.WorkflowRemoved)
+	expectStageStatus(dynamicStageValue, state.WorkflowRemoved)
+
 	if events := diag.Events(); len(events) > 0 {
 		for _, evt := range events {
 			if evt.Severity == diagnostics.SeverityError || evt.Severity == diagnostics.SeverityCritical {

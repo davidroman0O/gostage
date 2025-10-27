@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -60,6 +61,7 @@ type dispatcher struct {
 	failed    atomic.Int64
 	cancelled atomic.Int64
 	wg        sync.WaitGroup
+	clock     func() time.Time
 }
 
 type poolBinding struct {
@@ -80,7 +82,7 @@ type spawnerBinding struct {
 	process *spawner.ProcessSpawner
 }
 
-func newDispatcher(ctx context.Context, queue state.Queue, store state.Store, manager state.Manager, runner *runner.Runner, telemetryDisp *node.TelemetryDispatcher, diag node.DiagnosticsWriter, health *node.HealthDispatcher, logger telemetry.Logger, claimInterval, jitter time.Duration, maxInFlight int, failure FailurePolicy, poolBindings []*poolBinding) *dispatcher {
+func newDispatcher(ctx context.Context, queue state.Queue, store state.Store, manager state.Manager, runner *runner.Runner, telemetryDisp *node.TelemetryDispatcher, diag node.DiagnosticsWriter, health *node.HealthDispatcher, logger telemetry.Logger, claimInterval, jitter time.Duration, maxInFlight int, failure FailurePolicy, poolBindings []*poolBinding, clock func() time.Time) *dispatcher {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -102,6 +104,10 @@ func newDispatcher(ctx context.Context, queue state.Queue, store state.Store, ma
 		maxInFlight:   maxInFlight,
 		failurePolicy: failure,
 	}
+	if clock == nil {
+		clock = time.Now
+	}
+	d.clock = clock
 	if d.claimInterval <= 0 {
 		d.claimInterval = defaultClaimInterval
 	}
@@ -125,7 +131,7 @@ func (d *dispatcher) emitWorkflowEvent(kind telemetry.EventKind, id state.Workfl
 		Kind:       kind,
 		WorkflowID: string(id),
 		Attempt:    attempt,
-		Timestamp:  time.Now(),
+		Timestamp:  d.now(),
 		Metadata:   copyMap(metadata),
 	}
 	if err != nil {
@@ -240,7 +246,7 @@ func (d *dispatcher) execute(pool *pools.Local, release func(), claimed *state.C
 		d.publishHealth(pool.Name(), node.HealthUnavailable, err.Error())
 	} else if d.diagnostics != nil {
 		d.diagnostics.Write(diagnostics.Event{
-			OccurredAt: time.Now(),
+			OccurredAt: d.now(),
 			Component:  "dispatcher.run",
 			Severity:   diagnostics.SeverityInfo,
 			Metadata: map[string]any{
@@ -335,7 +341,7 @@ func (d *dispatcher) runWorkflow(ctx context.Context, pool *pools.Local, claimed
 		InitialStore: initialStore,
 		Attempt:      claimed.Attempt,
 	}
-	start := time.Now()
+	start := d.now()
 	res := d.runner.Run(wf, opts)
 	finalState := runner.StatusCompleted
 	if !res.Success {
@@ -353,7 +359,7 @@ func (d *dispatcher) runWorkflow(ctx context.Context, pool *pools.Local, claimed
 		"pool":    pool.Name(),
 	}, res.Error)
 
-	return runResult{claimed: claimed, result: res, report: report, state: finalState}, nil
+	return runResult{claimed: claimed, result: res, report: report, state: finalState, clock: d.clock}, nil
 }
 
 func (d *dispatcher) suppressWorkflowTelemetry(id state.WorkflowID, kinds ...telemetry.EventKind) {
@@ -410,7 +416,7 @@ func (d *dispatcher) publishHealth(pool string, status node.HealthStatus, detail
 	if d.health == nil {
 		return
 	}
-	now := time.Now()
+	now := d.now()
 	d.healthMu.Lock()
 	if d.healthStates == nil {
 		d.healthStates = make(map[string]node.HealthStatus)
@@ -558,7 +564,7 @@ func (d *dispatcher) reportError(component string, err error) {
 	}
 	if d.diagnostics != nil {
 		d.diagnostics.Write(diagnostics.Event{
-			OccurredAt: time.Now(),
+			OccurredAt: d.now(),
 			Component:  component,
 			Severity:   diagnostics.SeverityError,
 			Err:        err,
@@ -567,6 +573,13 @@ func (d *dispatcher) reportError(component string, err error) {
 	if d.logger != nil {
 		d.logger.Error(component, "error", err)
 	}
+}
+
+func (d *dispatcher) now() time.Time {
+	if d != nil && d.clock != nil {
+		return d.clock()
+	}
+	return time.Now()
 }
 
 func (d *dispatcher) completeRemote(claimed *state.ClaimedWorkflow, pool *pools.Local, summary state.ResultSummary, release func()) {
@@ -635,13 +648,14 @@ func (d *dispatcher) completeRemote(claimed *state.ClaimedWorkflow, pool *pools.
 		},
 		state:  runner.StatusCompleted,
 		reason: summary.Reason,
+		clock:  d.clock,
 	}
 
 	if run.report.StartedAt.IsZero() {
 		run.report.StartedAt = claimed.ClaimedAt
 	}
 	if run.report.CompletedAt.IsZero() {
-		run.report.CompletedAt = time.Now()
+		run.report.CompletedAt = d.now()
 	}
 
 	if !summary.Success {
@@ -744,12 +758,17 @@ type runResult struct {
 	report  state.ExecutionReport
 	state   runner.ExecutionStatus
 	reason  state.TerminationReason
+	clock   func() time.Time
 }
 
 func (r runResult) toSummary() state.ResultSummary {
 	completedAt := r.report.CompletedAt
 	if completedAt.IsZero() {
-		completedAt = time.Now()
+		if r.clock != nil {
+			completedAt = r.clock()
+		} else {
+			completedAt = time.Now()
+		}
 	}
 	reason := normalizeReason(r.reason, r.state, r.result.Success)
 	summary := state.ResultSummary{
@@ -832,6 +851,22 @@ func (d *dispatcher) applyRemoteStatuses(claimed *state.ClaimedWorkflow, summary
 	}
 	workflowID := string(claimed.ID)
 	ctx := d.ctx
+	actionStage := make(map[string]string)
+	for _, stage := range claimed.Definition.Stages {
+		stageID := stage.ID
+		if stageID == "" {
+			continue
+		}
+		for _, action := range stage.Actions {
+			actionID := action.ID
+			if actionID == "" {
+				actionID = action.Ref
+			}
+			if actionID != "" {
+				actionStage[actionID] = stageID
+			}
+		}
+	}
 	for _, st := range summary.StageStatuses {
 		if st.ID == "" {
 			continue
@@ -878,6 +913,44 @@ func (d *dispatcher) applyRemoteStatuses(claimed *state.ClaimedWorkflow, summary
 			if err := d.manager.ActionStatus(ctx, workflowID, act.StageID, act.ActionID, act.Status); err != nil {
 				d.reportError("dispatcher.remote.action_status", fmt.Errorf("update action %s/%s status: %w", act.StageID, act.ActionID, err))
 			}
+		}
+	}
+	for stageID := range summary.DisabledStages {
+		if stageID == "" {
+			continue
+		}
+		if err := d.manager.StageStatus(ctx, workflowID, stageID, state.WorkflowSkipped); err != nil {
+			d.reportError("dispatcher.remote.stage_status", fmt.Errorf("update stage %s skipped: %w", stageID, err))
+		}
+	}
+	for stageID := range summary.RemovedStages {
+		if stageID == "" {
+			continue
+		}
+		if err := d.manager.StageStatus(ctx, workflowID, stageID, state.WorkflowRemoved); err != nil {
+			d.reportError("dispatcher.remote.stage_status", fmt.Errorf("update stage %s removed: %w", stageID, err))
+		}
+	}
+	for actionID := range summary.DisabledActions {
+		stageID, ok := actionStage[actionID]
+		if !ok {
+			continue
+		}
+		if err := d.manager.ActionStatus(ctx, workflowID, stageID, actionID, state.WorkflowSkipped); err != nil {
+			d.reportError("dispatcher.remote.action_status", fmt.Errorf("update action %s/%s skipped: %w", stageID, actionID, err))
+		}
+	}
+	for key := range summary.RemovedActions {
+		parts := strings.SplitN(key, "::", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		stageID, actionID := parts[0], parts[1]
+		if stageID == "" || actionID == "" {
+			continue
+		}
+		if err := d.manager.ActionStatus(ctx, workflowID, stageID, actionID, state.WorkflowRemoved); err != nil {
+			d.reportError("dispatcher.remote.action_status", fmt.Errorf("update action %s/%s removed: %w", stageID, actionID, err))
 		}
 	}
 }

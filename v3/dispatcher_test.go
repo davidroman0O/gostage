@@ -77,7 +77,7 @@ func TestDispatcherMaxInFlight(t *testing.T) {
 	pool := pools.NewLocal("local", state.Selector{}, 2)
 	bindings := []*poolBinding{{pool: pool}}
 
-	dispatcher := newDispatcher(ctx, queue, store, manager, run, nil, nil, nil, telemetry.NoopLogger{}, 5*time.Millisecond, 0, 1, nil, bindings)
+	dispatcher := newDispatcher(ctx, queue, store, manager, run, nil, nil, nil, telemetry.NoopLogger{}, 5*time.Millisecond, 0, 1, nil, bindings, manager.Clock())
 	dispatcher.start()
 	defer dispatcher.stop()
 
@@ -113,7 +113,7 @@ func TestDispatcherPublishesHealthOnClaimError(t *testing.T) {
 		events <- evt
 	})
 
-	dispatcher := newDispatcher(ctx, queue, nil, nil, nil, nil, nil, health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{{pool: pools.NewLocal("local", state.Selector{}, 1)}})
+	dispatcher := newDispatcher(ctx, queue, nil, nil, nil, nil, nil, health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{{pool: pools.NewLocal("local", state.Selector{}, 1)}}, time.Now)
 	dispatcher.pollOnce()
 
 	select {
@@ -131,7 +131,7 @@ func TestDispatcherHealthTracksLastError(t *testing.T) {
 	health := node.NewHealthDispatcher()
 	pool := pools.NewLocal("local", state.Selector{}, 1)
 	bindings := []*poolBinding{{pool: pool}}
-	dispatcher := newDispatcher(ctx, nil, nil, nil, nil, nil, nil, health, telemetry.NoopLogger{}, 0, 0, 0, nil, bindings)
+	dispatcher := newDispatcher(ctx, nil, nil, nil, nil, nil, nil, health, telemetry.NoopLogger{}, 0, 0, 0, nil, bindings, time.Now)
 
 	events := make(chan node.HealthEvent, 2)
 	_ = health.Subscribe(func(evt node.HealthEvent) {
@@ -221,7 +221,7 @@ func TestDispatcherStoresSummaryBeforeAck(t *testing.T) {
 	run := runner.New(local.Factory{}, registry.Default(), br)
 
 	pool := pools.NewLocal("local", state.Selector{}, 1)
-	dispatcher := newDispatcher(ctx, queue, nil, manager, run, nil, nil, nil, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{{pool: pool}})
+	dispatcher := newDispatcher(ctx, queue, nil, manager, run, nil, nil, nil, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{{pool: pool}}, manager.Clock())
 
 	if _, err := queue.Enqueue(ctx, normalized.Clone(), state.PriorityDefault, nil); err != nil {
 		t.Fatalf("enqueue: %v", err)
@@ -278,7 +278,7 @@ func TestDispatcherSuppressesWorkflowTelemetry(t *testing.T) {
 	run := runner.New(local.Factory{}, registry.Default(), br, runner.WithDefaultLogger(telemetry.NoopLogger{}))
 
 	pool := pools.NewLocal("remote", state.Selector{}, 1)
-	dispatcher := newDispatcher(ctx, queue, store, managerWithTelemetry, run, telemetryDisp, nil, health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{{pool: pool}})
+	dispatcher := newDispatcher(ctx, queue, store, managerWithTelemetry, run, telemetryDisp, nil, health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{{pool: pool}}, manager.Clock())
 
 	wf := state.WorkflowRecord{
 		ID:   state.WorkflowID("wf-remote"),
@@ -445,7 +445,7 @@ func TestDispatcherCompleteRemoteAck(t *testing.T) {
 	}
 
 	pool := pools.NewLocal("remote", state.Selector{}, 1)
-	dispatcher := newDispatcher(ctx, queue, store, manager, nil, nil, nil, nil, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{{pool: pool}})
+	dispatcher := newDispatcher(ctx, queue, store, manager, nil, nil, nil, nil, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{{pool: pool}}, manager.Clock())
 
 	def := workflow.Definition{Name: "remote"}
 	def, _, err = workflow.EnsureIDs(def)
@@ -534,7 +534,7 @@ func TestDispatcherCompleteRemoteRetry(t *testing.T) {
 		}
 	})
 
-	dispatcher := newDispatcher(ctx, queue, nil, nil, nil, nil, nil, nil, telemetry.NoopLogger{}, 0, 0, 0, policy, []*poolBinding{{pool: pool}})
+	dispatcher := newDispatcher(ctx, queue, nil, nil, nil, nil, nil, nil, telemetry.NoopLogger{}, 0, 0, 0, policy, []*poolBinding{{pool: pool}}, time.Now)
 
 	def := workflow.Definition{Name: "remote-retry"}
 	def, _, err := workflow.EnsureIDs(def)
@@ -763,7 +763,7 @@ func TestFailurePolicyRetryReleasesWorkflow(t *testing.T) {
 	})
 
 	pool := pools.NewLocal("local", state.Selector{}, 1)
-	dispatcher := newDispatcher(ctx, queue, store, manager, run, nil, nil, nil, telemetry.NoopLogger{}, 5*time.Millisecond, 0, 1, policy, []*poolBinding{{pool: pool}})
+	dispatcher := newDispatcher(ctx, queue, store, manager, run, nil, nil, nil, telemetry.NoopLogger{}, 5*time.Millisecond, 0, 1, policy, []*poolBinding{{pool: pool}}, manager.Clock())
 	dispatcher.start()
 	defer dispatcher.stop()
 
@@ -911,7 +911,7 @@ func TestDispatcherEmitsCancelledEventOnExplicitCancel(t *testing.T) {
 	run := runner.New(local.Factory{}, registry.Default(), br)
 
 	pool := pools.NewLocal("local", state.Selector{}, 1)
-	dispatcher := newDispatcher(ctx, queue, store, manager, run, teleDispatcher, nil, nil, telemetry.NoopLogger{}, 5*time.Millisecond, 0, 0, nil, []*poolBinding{{pool: pool}})
+	dispatcher := newDispatcher(ctx, queue, store, manager, run, teleDispatcher, nil, nil, telemetry.NoopLogger{}, 5*time.Millisecond, 0, 0, nil, []*poolBinding{{pool: pool}}, baseManager.Clock())
 	dispatcher.start()
 	defer dispatcher.stop()
 

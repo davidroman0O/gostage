@@ -68,6 +68,15 @@ func (m *StoreManager) WorkflowRegistered(ctx context.Context, wf WorkflowRecord
 	return nil
 }
 
+// Clock exposes the time source used by the manager. Callers should prefer
+// this over time.Now() to keep timestamps aligned with persisted records.
+func (m *StoreManager) Clock() func() time.Time {
+	if m == nil || m.now == nil {
+		return time.Now
+	}
+	return m.now
+}
+
 // WorkflowStatus updates the workflow state and persists it.
 func (m *StoreManager) WorkflowStatus(ctx context.Context, workflowID string, status WorkflowState) error {
 	id := WorkflowID(workflowID)

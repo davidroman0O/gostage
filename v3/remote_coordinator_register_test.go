@@ -41,7 +41,7 @@ func buildRemoteCoordinatorForTest(t *testing.T, ctx context.Context, diag node.
 	health := node.NewHealthDispatcher()
 	base := node.New(ctx, nil, node.TelemetryDispatcherConfig{})
 
-	dispatcher := newDispatcher(ctx, queue, nil, nil, nil, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, 0, 0, 0, nil, bindings)
+	dispatcher := newDispatcher(ctx, queue, nil, nil, nil, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, 0, 0, 0, nil, bindings, time.Now)
 	rc := &remoteCoordinator{
 		ctx:         ctx,
 		cancel:      func() {},
@@ -54,6 +54,7 @@ func buildRemoteCoordinatorForTest(t *testing.T, ctx context.Context, diag node.
 		pools:       make(map[string]*remotePool),
 		jobs:        make(map[string]*remoteJob),
 		spawned:     make(map[string]*spawner.ProcessHandle),
+		clock:       time.Now,
 	}
 	for _, binding := range bindings {
 		rp := &remotePool{binding: binding}

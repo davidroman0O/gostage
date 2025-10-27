@@ -15,15 +15,25 @@ type telemetryManager struct {
 	dispatcher *node.TelemetryDispatcher
 	mu         sync.RWMutex
 	suppressed map[string]map[telemetry.EventKind]struct{}
+	clock      func() time.Time
 }
 
 func wrapWithTelemetry(delegate state.Manager, dispatcher *node.TelemetryDispatcher) state.Manager {
 	if dispatcher == nil {
 		return delegate
 	}
+	clock := time.Now
+	if delegate != nil {
+		if provider, ok := delegate.(interface{ Clock() func() time.Time }); ok {
+			if c := provider.Clock(); c != nil {
+				clock = c
+			}
+		}
+	}
 	return &telemetryManager{
 		delegate:   delegate,
 		dispatcher: dispatcher,
+		clock:      clock,
 	}
 }
 
@@ -307,9 +317,16 @@ func (m *telemetryManager) emit(evt telemetry.Event) {
 		m.mu.RUnlock()
 	}
 	if evt.Timestamp.IsZero() {
-		evt.Timestamp = time.Now()
+		evt.Timestamp = m.now()
 	}
 	_ = m.dispatcher.Dispatch(evt)
+}
+
+func (m *telemetryManager) now() time.Time {
+	if m != nil && m.clock != nil {
+		return m.clock()
+	}
+	return time.Now()
 }
 
 func (m *telemetryManager) SuppressWorkflowEvents(workflowID string, kinds ...telemetry.EventKind) {

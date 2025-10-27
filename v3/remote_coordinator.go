@@ -44,6 +44,7 @@ type remoteCoordinator struct {
 	diagnostics node.DiagnosticsWriter
 	health      *node.HealthDispatcher
 	logger      telemetry.Logger
+	clock       func() time.Time
 
 	server   *grpc.Server
 	listener net.Listener
@@ -85,6 +86,7 @@ func newRemoteCoordinator(
 	health *node.HealthDispatcher,
 	logger telemetry.Logger,
 	bindings []*poolBinding,
+	clock func() time.Time,
 ) (*remoteCoordinator, error) {
 	hasRemote := false
 	for _, binding := range bindings {
@@ -116,6 +118,11 @@ func newRemoteCoordinator(
 		pools:       make(map[string]*remotePool),
 		jobs:        make(map[string]*remoteJob),
 		spawned:     make(map[string]*spawner.ProcessHandle),
+	}
+	if clock == nil {
+		rc.clock = time.Now
+	} else {
+		rc.clock = clock
 	}
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -644,7 +651,7 @@ func (rc *remoteCoordinator) OnLog(ctx context.Context, conn *process.Connection
 		component = fmt.Sprintf("remote.log.%s", pool)
 	}
 	if entry.OccurredAt.IsZero() {
-		entry.OccurredAt = time.Now()
+		entry.OccurredAt = rc.now()
 	}
 
 	rc.reportDiagnostic(diagnostics.Event{
@@ -691,6 +698,13 @@ func (rc *remoteCoordinator) shutdown() {
 	rc.spawnMu.Unlock()
 }
 
+func (rc *remoteCoordinator) now() time.Time {
+	if rc != nil && rc.clock != nil {
+		return rc.clock()
+	}
+	return time.Now()
+}
+
 func (rc *remoteCoordinator) reportDiagnostic(evt diagnostics.Event) {
 	if rc.diagnostics != nil {
 		rc.diagnostics.Write(evt)
@@ -729,7 +743,7 @@ func (rc *remoteCoordinator) forwardChildLog(poolName string, evt diagnostics.Ev
 	meta["pool"] = poolName
 	meta["structured"] = false
 	rc.reportDiagnostic(diagnostics.Event{
-		OccurredAt: time.Now(),
+		OccurredAt: rc.now(),
 		Component:  fmt.Sprintf("remote.child.%s", poolName),
 		Severity:   evt.Severity,
 		Err:        evt.Err,
@@ -795,7 +809,7 @@ func workflowRecordFromClaimed(claimed *state.ClaimedWorkflow) state.WorkflowRec
 	}
 	created := claimed.CreatedAt
 	if created.IsZero() {
-		created = time.Now()
+		created = claimed.ClaimedAt
 	}
 	metadata := metadataWithoutInitialStore(claimed.Metadata)
 	defMeta := copyMap(claimed.Definition.Metadata)

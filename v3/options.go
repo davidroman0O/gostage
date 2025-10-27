@@ -64,17 +64,6 @@ func WithTelemetrySink(sink telemetry.Sink) Option {
 	})
 }
 
-// WithTelemetrySinks registers multiple telemetry sinks at once.
-func WithTelemetrySinks(sinks ...telemetry.Sink) Option {
-	return optionFunc(func(o *options) {
-		for _, sink := range sinks {
-			if sink != nil {
-				o.telemetrySinks = append(o.telemetrySinks, sink)
-			}
-		}
-	})
-}
-
 // WithTelemetryDispatcherConfig customises telemetry buffering/backpressure behaviour.
 func WithTelemetryDispatcherConfig(cfg TelemetryDispatcherConfig) Option {
 	return optionFunc(func(o *options) {
