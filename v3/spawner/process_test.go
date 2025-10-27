@@ -88,3 +88,35 @@ func TestProcessSpawnerSetReporter(t *testing.T) {
 		t.Fatalf("expected diagnostics events from helper process via set reporter")
 	}
 }
+
+func TestProcessSpawnerDisableOutputCapture(t *testing.T) {
+	reporter := &recordingReporter{}
+	cfg := Config{
+		BinaryPath:           os.Args[0],
+		Args:                 []string{"-test.run=TestHelperProcess", "--"},
+		Env:                  []string{"GO_WANT_HELPER_PROCESS=1"},
+		Reporter:             reporter,
+		DisableOutputCapture: true,
+	}
+	s := NewProcessSpawner(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	handle, err := s.Launch(ctx, LaunchConfig{Address: "127.0.0.1:4322"})
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	if err := handle.Wait(ctx); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+
+	if len(reporter.events) == 0 {
+		t.Fatalf("expected diagnostics events even with capture disabled")
+	}
+	for _, evt := range reporter.events {
+		if _, ok := evt.Metadata["line"]; ok {
+			t.Fatalf("unexpected line metadata when capture disabled: %#v", evt.Metadata)
+		}
+	}
+}

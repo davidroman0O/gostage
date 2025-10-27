@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +34,8 @@ import (
 	"github.com/davidroman0O/gostage/v3/workflow"
 )
 
+const logBufferSize = 256
+
 // Node represents the child process runtime that communicates with the parent bridge.
 type Node struct {
 	cfg Config
@@ -44,6 +47,11 @@ type Node struct {
 	diagW   *diagWriter
 
 	telemetry *node.TelemetryDispatcher
+
+	logs      chan *processproto.LogForward
+	logOnce   sync.Once
+	logCancel context.CancelFunc
+	logWG     sync.WaitGroup
 
 	heartbeatInterval time.Duration
 
@@ -58,6 +66,35 @@ type Node struct {
 	activeMu locks.Mutex
 	active   map[string]context.CancelFunc
 	pending  map[string]struct{}
+}
+
+type childLogger struct {
+	node *Node
+	name string
+}
+
+func (l childLogger) Debug(format string, args ...interface{}) { l.log("debug", format, args...) }
+func (l childLogger) Info(format string, args ...interface{})  { l.log("info", format, args...) }
+func (l childLogger) Warn(format string, args ...interface{})  { l.log("warn", format, args...) }
+func (l childLogger) Error(format string, args ...interface{}) { l.log("error", format, args...) }
+
+func (l childLogger) log(level, format string, args ...interface{}) {
+	if l.node == nil {
+		return
+	}
+
+	attrs := extractAttributeMap(&args)
+	message := format
+	if format == "" && len(args) > 0 {
+		message = fmt.Sprint(args...)
+		args = nil
+	} else if len(args) > 0 {
+		message = fmt.Sprintf(format, args...)
+	}
+	if message == "" {
+		return
+	}
+	l.node.emitLog(level, l.name, message, attrs)
 }
 
 // NewNode prepares a child node using the provided configuration. Call Run to
@@ -81,6 +118,65 @@ func NewNode(cfg Config) *Node {
 	n.diagW = &diagWriter{node: n}
 	n.telemetry = node.NewTelemetryDispatcher(context.Background(), n.diagW, node.TelemetryDispatcherConfig{})
 	return n
+}
+
+func (n *Node) startLogLoop(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	n.logOnce.Do(func() {
+		loopCtx, cancel := context.WithCancel(ctx)
+		n.logCancel = cancel
+		n.logs = make(chan *processproto.LogForward, logBufferSize)
+		n.logWG.Add(1)
+		go n.logLoop(loopCtx)
+	})
+}
+
+func (n *Node) logLoop(ctx context.Context) {
+	defer n.logWG.Done()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case entry := <-n.logs:
+			if entry == nil {
+				continue
+			}
+			msg := &processproto.ControlEnvelope{Body: &processproto.ControlEnvelope_Log{Log: entry}}
+			if err := n.sendEnvelope(ctx, msg); err != nil {
+				n.publishDiagnostic(diagnostics.Event{
+					Component: "child.log",
+					Severity:  diagnostics.SeverityWarning,
+					Err:       fmt.Errorf("send log: %w", err),
+					Metadata: map[string]any{
+						"level":   entry.GetLevel(),
+						"message": entry.GetMessage(),
+					},
+				})
+			}
+		}
+	}
+}
+
+func (n *Node) enqueueLog(entry *processproto.LogForward) {
+	if entry == nil || n.logs == nil {
+		return
+	}
+	select {
+	case n.logs <- entry:
+	default:
+		n.publishDiagnostic(diagnostics.Event{
+			Component: "child.log",
+			Severity:  diagnostics.SeverityWarning,
+			Metadata: map[string]any{
+				"dropped": true,
+				"level":   entry.GetLevel(),
+				"message": entry.GetMessage(),
+				"logger":  entry.GetLogger(),
+			},
+		})
+	}
 }
 
 // Run connects to the parent bridge and starts processing control messages until
@@ -155,6 +251,12 @@ func (n *Node) Close() error {
 
 	if n.cancel != nil {
 		n.cancel()
+	}
+
+	if n.logCancel != nil {
+		n.logCancel()
+		n.logWG.Wait()
+		n.logs = nil
 	}
 
 	if n.stream != nil {
@@ -266,6 +368,8 @@ func (n *Node) connect(ctx context.Context) error {
 		},
 	})
 
+	n.startLogLoop(ctx)
+
 	return nil
 }
 
@@ -296,7 +400,7 @@ func (n *Node) ensureRuntime() error {
 		return nil
 	}
 	br := newChildBroker()
-	n.runner = runner.New(local.Factory{}, registry.Default(), br, runner.WithDefaultLogger(telemetry.NoopLogger{}))
+	n.runner = runner.New(local.Factory{}, registry.Default(), br, runner.WithDefaultLogger(childLogger{node: n, name: "runtime"}))
 	return nil
 }
 
@@ -400,6 +504,8 @@ func (n *Node) executeLease(ctx context.Context, grant *processproto.LeaseGrant)
 		return
 	}
 
+	n.startLogLoop(ctx)
+
 	definition, err := workflow.FromJSON(grant.GetDefinitionJson())
 	if err != nil {
 		_ = n.respondFailure(ctx, grant, fmt.Errorf("child: decode definition: %w", err))
@@ -435,7 +541,7 @@ func (n *Node) executeLease(ctx context.Context, grant *processproto.LeaseGrant)
 	start := time.Now()
 	result := n.runner.Run(wf, runner.RunOptions{
 		Context:      execCtx,
-		Logger:       telemetry.NoopLogger{},
+		Logger:       childLogger{node: n, name: "runtime"},
 		InitialStore: initialStore,
 		Attempt:      int(grant.GetAttempt()),
 	})
@@ -451,6 +557,31 @@ func (n *Node) executeLease(ctx context.Context, grant *processproto.LeaseGrant)
 			reason = state.TerminationReasonFailure
 		}
 	}
+	stageStatuses := make([]state.StageStatusRecord, 0, len(result.Stages))
+	for _, stage := range result.Stages {
+		stageStatuses = append(stageStatuses, state.StageStatusRecord{
+			ID:          stage.ID,
+			Name:        stage.Name,
+			Description: stage.Description,
+			Tags:        append([]string(nil), stage.Tags...),
+			Dynamic:     stage.Dynamic,
+			CreatedBy:   stage.CreatedBy,
+			Status:      executionStatusToWorkflow(stage.Status),
+		})
+	}
+	actionStatuses := make([]state.ActionStatusRecord, 0, len(result.Actions))
+	for _, action := range result.Actions {
+		actionStatuses = append(actionStatuses, state.ActionStatusRecord{
+			StageID:     action.StageID,
+			ActionID:    action.Name,
+			Name:        action.Name,
+			Description: action.Description,
+			Tags:        append([]string(nil), action.Tags...),
+			Dynamic:     action.Dynamic,
+			CreatedBy:   action.CreatedBy,
+			Status:      executionStatusToWorkflow(action.Status),
+		})
+	}
 
 	summary := state.ResultSummary{
 		Success:         result.Success,
@@ -464,6 +595,8 @@ func (n *Node) executeLease(ctx context.Context, grant *processproto.LeaseGrant)
 		RemovedStages:   copyStringMap(result.RemovedStages),
 		RemovedActions:  copyStringMap(result.RemovedActions),
 		Reason:          reason,
+		StageStatuses:   stageStatuses,
+		ActionStatuses:  actionStatuses,
 	}
 
 	n.dispatchTelemetry(telemetry.Event{
@@ -717,6 +850,42 @@ func (n *Node) respondFailure(ctx context.Context, grant *processproto.LeaseGran
 	return nil
 }
 
+func (n *Node) emitLog(level, loggerName, msg string, attrs map[string]string) {
+	if n == nil || msg == "" {
+		return
+	}
+	entry := &processproto.LogForward{
+		OccurredAt:  timestampProtoNow(),
+		Level:       strings.ToLower(level),
+		Logger:      loggerName,
+		Message:     msg,
+		Attributes:  attrs,
+		ChildNodeId: n.nodeID,
+	}
+	n.enqueueLog(entry)
+}
+
+func extractAttributeMap(args *[]interface{}) map[string]string {
+	if args == nil || len(*args) == 0 {
+		return nil
+	}
+	last := (*args)[len(*args)-1]
+	switch v := last.(type) {
+	case map[string]string:
+		*args = (*args)[:len(*args)-1]
+		return copyStringMap(v)
+	case map[string]any:
+		attrs := make(map[string]string, len(v))
+		for k, val := range v {
+			attrs[k] = fmt.Sprint(val)
+		}
+		*args = (*args)[:len(*args)-1]
+		return attrs
+	default:
+		return nil
+	}
+}
+
 func encodeProtoSummary(sum state.ResultSummary) (*processproto.ResultSummary, error) {
 	var outputJSON []byte
 	var err error
@@ -742,6 +911,35 @@ func encodeProtoSummary(sum state.ResultSummary) (*processproto.ResultSummary, e
 	}
 	if !sum.CompletedAt.IsZero() {
 		proto.CompletedAt = timestampProto(sum.CompletedAt)
+	}
+	if len(sum.StageStatuses) > 0 {
+		proto.StageStatuses = make([]*processproto.StageStatus, 0, len(sum.StageStatuses))
+		for _, st := range sum.StageStatuses {
+			proto.StageStatuses = append(proto.StageStatuses, &processproto.StageStatus{
+				StageId:     st.ID,
+				Name:        st.Name,
+				Description: st.Description,
+				Tags:        append([]string(nil), st.Tags...),
+				Dynamic:     st.Dynamic,
+				CreatedBy:   st.CreatedBy,
+				Status:      string(st.Status),
+			})
+		}
+	}
+	if len(sum.ActionStatuses) > 0 {
+		proto.ActionStatuses = make([]*processproto.ActionStatus, 0, len(sum.ActionStatuses))
+		for _, act := range sum.ActionStatuses {
+			proto.ActionStatuses = append(proto.ActionStatuses, &processproto.ActionStatus{
+				StageId:     act.StageID,
+				ActionId:    act.ActionID,
+				Name:        act.Name,
+				Description: act.Description,
+				Tags:        append([]string(nil), act.Tags...),
+				Dynamic:     act.Dynamic,
+				CreatedBy:   act.CreatedBy,
+				Status:      string(act.Status),
+			})
+		}
 	}
 	return proto, nil
 }

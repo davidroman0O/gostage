@@ -33,14 +33,15 @@ func (fn LoggerReporter) Report(evt diagnostics.Event) {
 
 // Config controls process spawner behaviour.
 type Config struct {
-	BinaryPath     string
-	Args           []string
-	Env            []string
-	WorkingDir     string
-	MaxRestarts    int
-	RestartBackoff time.Duration
-	Reporter       Reporter
-	ShutdownGrace  time.Duration
+	BinaryPath           string
+	Args                 []string
+	Env                  []string
+	WorkingDir           string
+	MaxRestarts          int
+	RestartBackoff       time.Duration
+	Reporter             Reporter
+	ShutdownGrace        time.Duration
+	DisableOutputCapture bool
 }
 
 // LaunchConfig specifies runtime parameters for a child process.
@@ -153,13 +154,21 @@ func (s *ProcessSpawner) Launch(ctx context.Context, launch LaunchConfig) (*Proc
 	env = append(env, launch.ExtraEnv...)
 	cmd.Env = env
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("spawner: stdout pipe: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("spawner: stderr pipe: %w", err)
+	var stdout, stderr io.ReadCloser
+	if !s.cfg.DisableOutputCapture {
+		stdoutPipe, err := cmd.StdoutPipe()
+		if err != nil {
+			return nil, fmt.Errorf("spawner: stdout pipe: %w", err)
+		}
+		stderrPipe, err := cmd.StderrPipe()
+		if err != nil {
+			return nil, fmt.Errorf("spawner: stderr pipe: %w", err)
+		}
+		stdout = stdoutPipe
+		stderr = stderrPipe
+	} else {
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -174,8 +183,10 @@ func (s *ProcessSpawner) Launch(ctx context.Context, launch LaunchConfig) (*Proc
 		done:          make(chan error, 1),
 		shutdownGrace: s.cfg.ShutdownGrace,
 	}
-	go handle.capture("stdout", stdout)
-	go handle.capture("stderr", stderr)
+	if !s.cfg.DisableOutputCapture {
+		go handle.capture("stdout", stdout)
+		go handle.capture("stderr", stderr)
+	}
 	go handle.wait()
 
 	s.cfg.Reporter.Report(diagnostics.Event{

@@ -1,6 +1,9 @@
 package state
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // ManagerObserver receives callbacks when the StoreManager records lifecycle
 // events for workflows, stages, actions, and summaries. All methods are
@@ -112,5 +115,14 @@ func WithManagerObservers(obs ...ManagerObserver) ManagerOption {
 			return
 		}
 		m.observers = append(m.observers, obs...)
+	}
+}
+
+// WithManagerClock overrides the time source used by the StoreManager. Useful for tests.
+func WithManagerClock(clock func() time.Time) ManagerOption {
+	return func(m *StoreManager) {
+		if clock != nil {
+			m.now = clock
+		}
 	}
 }

@@ -243,19 +243,20 @@ type TLSFiles struct {
 
 // SpawnerConfig configures remote capacity provisioning.
 type SpawnerConfig struct {
-	Name           string
-	BinaryPath     string
-	Args           []string
-	Env            []string
-	WorkingDir     string
-	AuthToken      string
-	Tags           []string
-	Metadata       map[string]string
-	ChildType      string
-	TLS            TLSFiles
-	MaxRestarts    int
-	RestartBackoff time.Duration
-	ShutdownGrace  time.Duration
+	Name                 string
+	BinaryPath           string
+	Args                 []string
+	Env                  []string
+	WorkingDir           string
+	AuthToken            string
+	Tags                 []string
+	Metadata             map[string]string
+	ChildType            string
+	TLS                  TLSFiles
+	MaxRestarts          int
+	RestartBackoff       time.Duration
+	ShutdownGrace        time.Duration
+	DisableOutputCapture bool
 }
 
 // DispatcherConfig tunes the scheduler loop.
@@ -501,13 +502,14 @@ func indexSpawners(cfgs []SpawnerConfig) (map[string]*spawnerBinding, error) {
 		}
 		copyCfg := copySpawnerConfig(cfg)
 		procCfg := spawner.Config{
-			BinaryPath:     copyCfg.BinaryPath,
-			Args:           append([]string(nil), copyCfg.Args...),
-			Env:            append([]string(nil), copyCfg.Env...),
-			WorkingDir:     copyCfg.WorkingDir,
-			MaxRestarts:    copyCfg.MaxRestarts,
-			RestartBackoff: copyCfg.RestartBackoff,
-			ShutdownGrace:  copyCfg.ShutdownGrace,
+			BinaryPath:           copyCfg.BinaryPath,
+			Args:                 append([]string(nil), copyCfg.Args...),
+			Env:                  append([]string(nil), copyCfg.Env...),
+			WorkingDir:           copyCfg.WorkingDir,
+			MaxRestarts:          copyCfg.MaxRestarts,
+			RestartBackoff:       copyCfg.RestartBackoff,
+			ShutdownGrace:        copyCfg.ShutdownGrace,
+			DisableOutputCapture: copyCfg.DisableOutputCapture,
 		}
 		binding := &spawnerBinding{
 			name:    copyCfg.Name,
@@ -705,8 +707,17 @@ func mergeChildConfig(base child.Config, reg *childHandlerRegistration) child.Co
 	if len(cfg.Pools) == 0 && len(reg.options.pools) > 0 {
 		cfg.Pools = childPoolSpecsFromOptions(reg.options.pools)
 	}
-	if len(cfg.Metadata) == 0 && len(reg.options.metadata) > 0 {
-		cfg.Metadata = copyStringStringMap(reg.options.metadata)
+	if len(reg.options.metadata) > 0 {
+		merged := copyStringStringMap(cfg.Metadata)
+		if merged == nil {
+			merged = make(map[string]string, len(reg.options.metadata))
+		}
+		for k, v := range reg.options.metadata {
+			if _, exists := merged[k]; !exists {
+				merged[k] = v
+			}
+		}
+		cfg.Metadata = merged
 	}
 	return cfg
 }

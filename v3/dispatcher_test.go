@@ -342,6 +342,85 @@ func TestDispatcherSuppressesWorkflowTelemetry(t *testing.T) {
 	}
 }
 
+type metadataQueue struct {
+	mu             sync.Mutex
+	metadata       map[state.WorkflowID]map[string]any
+	releaseCount   int
+	ackCount       int
+	releaseMissing bool
+}
+
+func newMetadataQueue() *metadataQueue {
+	return &metadataQueue{
+		metadata: make(map[state.WorkflowID]map[string]any),
+	}
+}
+
+func (q *metadataQueue) Track(id state.WorkflowID, meta map[string]any) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.metadata[id] = cloneMap(meta)
+}
+
+func (q *metadataQueue) Enqueue(context.Context, workflow.Definition, state.Priority, map[string]any) (state.WorkflowID, error) {
+	panic("metadataQueue.Enqueue not implemented")
+}
+
+func (q *metadataQueue) Claim(context.Context, state.Selector, string) (*state.ClaimedWorkflow, error) {
+	panic("metadataQueue.Claim not implemented")
+}
+
+func (q *metadataQueue) Release(_ context.Context, id state.WorkflowID) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.releaseCount++
+	meta, ok := q.metadata[id]
+	if !ok || meta[metadataInitialStore] == nil {
+		q.releaseMissing = true
+	}
+	return nil
+}
+
+func (q *metadataQueue) Ack(_ context.Context, id state.WorkflowID, _ state.ResultSummary) error {
+	q.mu.Lock()
+	q.ackCount++
+	// keep metadata entry to simulate queue retention
+	if _, ok := q.metadata[id]; !ok {
+		q.metadata[id] = nil
+	}
+	q.mu.Unlock()
+	return nil
+}
+
+func (q *metadataQueue) Cancel(context.Context, state.WorkflowID) error { return nil }
+
+func (q *metadataQueue) Stats(context.Context) (state.QueueStats, error) {
+	return state.QueueStats{}, nil
+}
+
+func (q *metadataQueue) PendingCount(context.Context, state.Selector) (int, error) { return 0, nil }
+
+func (q *metadataQueue) AuditLog(context.Context, int) ([]state.QueueAuditRecord, error) {
+	return nil, nil
+}
+
+func (q *metadataQueue) Close() error { return nil }
+
+func cloneMap(src map[string]any) map[string]any {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]any, len(src))
+	for k, v := range src {
+		if inner, ok := v.(map[string]any); ok {
+			dst[k] = cloneMap(inner)
+		} else {
+			dst[k] = v
+		}
+	}
+	return dst
+}
+
 type errorQueue struct {
 	err error
 }
@@ -352,6 +431,168 @@ func (q *errorQueue) Enqueue(context.Context, workflow.Definition, state.Priorit
 
 func (q *errorQueue) Claim(context.Context, state.Selector, string) (*state.ClaimedWorkflow, error) {
 	return nil, q.err
+}
+
+func TestDispatcherCompleteRemoteAck(t *testing.T) {
+	ctx := context.Background()
+	registry.SetDefault(registry.NewSafeRegistry())
+
+	queue := state.NewMemoryQueue()
+	store := state.NewMemoryStore()
+	manager, err := state.NewStoreManager(store)
+	if err != nil {
+		t.Fatalf("store manager: %v", err)
+	}
+
+	pool := pools.NewLocal("remote", state.Selector{}, 1)
+	dispatcher := newDispatcher(ctx, queue, store, manager, nil, nil, nil, nil, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{{pool: pool}})
+
+	def := workflow.Definition{Name: "remote"}
+	def, _, err = workflow.EnsureIDs(def)
+	if err != nil {
+		t.Fatalf("ensure ids: %v", err)
+	}
+
+	initialMetadata := map[string]any{
+		metadataInitialStore: map[string]any{"seed": true},
+	}
+	id, err := queue.Enqueue(ctx, def, state.PriorityDefault, initialMetadata)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	claimed, err := queue.Claim(ctx, pool.Selector(), "worker-1")
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	dispatcher.registerCancel(claimed.ID, func() {})
+	dispatcher.unregisterCancel(claimed.ID)
+
+	dispatcher.inflight.Add(1)
+	dispatcher.wg.Add(1)
+
+	releaseCalled := false
+	summary := state.ResultSummary{
+		Success:     true,
+		Attempt:     claimed.Attempt,
+		Output:      map[string]any{"result": "ok"},
+		Duration:    250 * time.Millisecond,
+		CompletedAt: time.Now(),
+		Reason:      state.TerminationReasonSuccess,
+	}
+
+	dispatcher.completeRemote(claimed, pool, summary, func() { releaseCalled = true })
+	dispatcher.wg.Wait()
+
+	if !releaseCalled {
+		t.Fatalf("expected release to be invoked")
+	}
+
+	stats, err := queue.Stats(ctx)
+	if err != nil {
+		t.Fatalf("queue stats: %v", err)
+	}
+	if stats.Pending != 0 || stats.Claimed != 0 {
+		t.Fatalf("expected queue to be empty, got %+v", stats)
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	result, err := store.WaitResult(waitCtx, id)
+	if err != nil {
+		t.Fatalf("wait result: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success summary, got %+v", result)
+	}
+	if result.Output["result"] != "ok" {
+		t.Fatalf("expected stored output, got %+v", result.Output)
+	}
+	if result.Reason != state.TerminationReasonSuccess {
+		t.Fatalf("expected reason success, got %s", result.Reason)
+	}
+	if completed, failed, cancelled := dispatcher.statsCounters(); completed != 1 || failed != 0 || cancelled != 0 {
+		t.Fatalf("unexpected counters: %d/%d/%d", completed, failed, cancelled)
+	}
+	if dispatcher.inflight.Load() != 0 {
+		t.Fatalf("expected inflight to be zero")
+	}
+}
+
+func TestDispatcherCompleteRemoteRetry(t *testing.T) {
+	ctx := context.Background()
+	registry.SetDefault(registry.NewSafeRegistry())
+
+	queue := newMetadataQueue()
+
+	pool := pools.NewLocal("remote", state.Selector{}, 1)
+	policy := FailurePolicyFunc(func(context.Context, FailureContext) FailureOutcome {
+		return FailureOutcome{
+			Action: FailureActionRetry,
+			Reason: state.TerminationReasonFailure,
+		}
+	})
+
+	dispatcher := newDispatcher(ctx, queue, nil, nil, nil, nil, nil, nil, telemetry.NoopLogger{}, 0, 0, 0, policy, []*poolBinding{{pool: pool}})
+
+	def := workflow.Definition{Name: "remote-retry"}
+	def, _, err := workflow.EnsureIDs(def)
+	if err != nil {
+		t.Fatalf("ensure ids: %v", err)
+	}
+
+	id := state.WorkflowID("remote-retry")
+	claimed := &state.ClaimedWorkflow{
+		QueuedWorkflow: state.QueuedWorkflow{
+			ID:         id,
+			Definition: def.Clone(),
+			Attempt:    1,
+			Metadata: map[string]any{
+				metadataInitialStore: map[string]any{"seed": true},
+			},
+		},
+		ClaimedAt: time.Now(),
+	}
+	queue.Track(id, claimed.Metadata)
+
+	dispatcher.registerCancel(claimed.ID, func() {})
+	dispatcher.unregisterCancel(claimed.ID)
+
+	dispatcher.inflight.Add(1)
+	dispatcher.wg.Add(1)
+
+	releaseCalled := false
+	summary := state.ResultSummary{
+		Success: false,
+		Attempt: claimed.Attempt,
+		Error:   "boom",
+		Reason:  state.TerminationReasonFailure,
+	}
+
+	dispatcher.completeRemote(claimed, pool, summary, func() { releaseCalled = true })
+	dispatcher.wg.Wait()
+
+	if !releaseCalled {
+		t.Fatalf("expected release to be invoked")
+	}
+
+	if queue.releaseMissing {
+		t.Fatalf("initial store metadata was dropped before release")
+	}
+	if queue.releaseCount != 1 {
+		t.Fatalf("expected single release call, got %d", queue.releaseCount)
+	}
+	if queue.ackCount != 0 {
+		t.Fatalf("expected no ACK during retry, got %d", queue.ackCount)
+	}
+
+	if completed, failed, cancelled := dispatcher.statsCounters(); completed != 0 || failed != 0 || cancelled != 0 {
+		t.Fatalf("expected counters to remain zero, got %d/%d/%d", completed, failed, cancelled)
+	}
+	if dispatcher.inflight.Load() != 0 {
+		t.Fatalf("expected inflight to be zero")
+	}
 }
 
 func (q *errorQueue) Release(context.Context, state.WorkflowID) error { return nil }

@@ -29,11 +29,6 @@ func FromInternal(kv *internal.KVStore) Handle {
 	return Handle{kv: kv}
 }
 
-// Unwrap exposes the underlying internal store for packages that still need it.
-func Unwrap(h Handle) *internal.KVStore {
-	return h.kv
-}
-
 // IsZero reports whether the handle references a backing store.
 func (h Handle) IsZero() bool { return h.kv == nil }
 

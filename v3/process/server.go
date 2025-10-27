@@ -26,8 +26,20 @@ type Handler interface {
 	OnLeaseAck(ctx context.Context, conn *Connection, workflowID string, leaseID string, summary state.ResultSummary) error
 	OnTelemetry(ctx context.Context, conn *Connection, evt telemetry.Event) error
 	OnDiagnostic(ctx context.Context, conn *Connection, evt diagnostics.Event)
+	OnLog(ctx context.Context, conn *Connection, entry LogEntry) error
 	OnHeartbeat(ctx context.Context, conn *Connection, ts time.Time) error
 	OnShutdown(ctx context.Context, conn *Connection, reason string)
+}
+
+// LogEntry represents a structured log emitted by a child process.
+type LogEntry struct {
+	OccurredAt  time.Time
+	Level       string
+	Logger      string
+	Message     string
+	Attributes  map[string]string
+	Pool        string
+	ChildNodeID string
 }
 
 // Server hosts the gRPC bridge used by child processes to communicate with the
@@ -188,16 +200,16 @@ func (s *Server) Control(stream processproto.ProcessBridge_ControlServer) error 
 			return err
 		}
 		switch body := msg.Body.(type) {
-	case *processproto.ControlEnvelope_LeaseAck:
-		summary, convErr := convertSummary(body.LeaseAck.GetSummary())
-		if convErr != nil {
-			conn.Close(convErr.Error())
-			return convErr
-		}
-		if err := s.handler.OnLeaseAck(ctx, conn, body.LeaseAck.GetWorkflowId(), body.LeaseAck.GetLeaseId(), summary); err != nil {
-			conn.Close(err.Error())
-			return err
-		}
+		case *processproto.ControlEnvelope_LeaseAck:
+			summary, convErr := convertSummary(body.LeaseAck.GetSummary())
+			if convErr != nil {
+				conn.Close(convErr.Error())
+				return convErr
+			}
+			if err := s.handler.OnLeaseAck(ctx, conn, body.LeaseAck.GetWorkflowId(), body.LeaseAck.GetLeaseId(), summary); err != nil {
+				conn.Close(err.Error())
+				return err
+			}
 		case *processproto.ControlEnvelope_Telemetry:
 			evt, convErr := decodeTelemetry(body.Telemetry.GetEventJson())
 			if convErr != nil {
@@ -215,6 +227,16 @@ func (s *Server) Control(stream processproto.ProcessBridge_ControlServer) error 
 				return convErr
 			}
 			s.handler.OnDiagnostic(ctx, conn, diag)
+		case *processproto.ControlEnvelope_Log:
+			entry, convErr := decodeLogEntry(body.Log, conn.info.NodeID)
+			if convErr != nil {
+				conn.Close(convErr.Error())
+				return convErr
+			}
+			if err := s.handler.OnLog(ctx, conn, entry); err != nil {
+				conn.Close(err.Error())
+				return err
+			}
 		case *processproto.ControlEnvelope_Heartbeat:
 			hb := body.Heartbeat
 			ts := time.Now()
@@ -279,6 +301,43 @@ func convertSummary(in *processproto.ResultSummary) (state.ResultSummary, error)
 	} else {
 		res.Output = make(map[string]any)
 	}
+	if stageStatuses := in.GetStageStatuses(); len(stageStatuses) > 0 {
+		res.StageStatuses = make([]state.StageStatusRecord, 0, len(stageStatuses))
+		for _, st := range stageStatuses {
+			if st == nil {
+				continue
+			}
+			rec := state.StageStatusRecord{
+				ID:          st.GetStageId(),
+				Name:        st.GetName(),
+				Description: st.GetDescription(),
+				Tags:        append([]string(nil), st.GetTags()...),
+				Dynamic:     st.GetDynamic(),
+				CreatedBy:   st.GetCreatedBy(),
+				Status:      state.WorkflowState(st.GetStatus()),
+			}
+			res.StageStatuses = append(res.StageStatuses, rec)
+		}
+	}
+	if actionStatuses := in.GetActionStatuses(); len(actionStatuses) > 0 {
+		res.ActionStatuses = make([]state.ActionStatusRecord, 0, len(actionStatuses))
+		for _, act := range actionStatuses {
+			if act == nil {
+				continue
+			}
+			rec := state.ActionStatusRecord{
+				StageID:     act.GetStageId(),
+				ActionID:    act.GetActionId(),
+				Name:        act.GetName(),
+				Description: act.GetDescription(),
+				Tags:        append([]string(nil), act.GetTags()...),
+				Dynamic:     act.GetDynamic(),
+				CreatedBy:   act.GetCreatedBy(),
+				Status:      state.WorkflowState(act.GetStatus()),
+			}
+			res.ActionStatuses = append(res.ActionStatuses, rec)
+		}
+	}
 	return res, nil
 }
 
@@ -334,6 +393,29 @@ func decodeDiagnostic(msg *processproto.DiagnosticForward) (diagnostics.Event, e
 		evt.Err = errors.New(msg.GetError())
 	}
 	return evt, nil
+}
+
+func decodeLogEntry(msg *processproto.LogForward, fallbackNodeID string) (LogEntry, error) {
+	if msg == nil {
+		return LogEntry{}, errors.New("nil log message")
+	}
+	occurred := time.Now()
+	if msg.GetOccurredAt() != nil {
+		occurred = time.Unix(msg.GetOccurredAt().GetSeconds(), int64(msg.GetOccurredAt().GetNanos()))
+	}
+	entry := LogEntry{
+		OccurredAt:  occurred,
+		Level:       msg.GetLevel(),
+		Logger:      msg.GetLogger(),
+		Message:     msg.GetMessage(),
+		Attributes:  cloneStringMap(msg.GetAttributes()),
+		Pool:        msg.GetPool(),
+		ChildNodeID: msg.GetChildNodeId(),
+	}
+	if entry.ChildNodeID == "" {
+		entry.ChildNodeID = fallbackNodeID
+	}
+	return entry, nil
 }
 
 func cloneMetadata(src map[string]string) map[string]string {

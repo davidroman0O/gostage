@@ -43,6 +43,7 @@ func (h *testHandler) OnTelemetry(context.Context, *process.Connection, telemetr
 	return nil
 }
 func (h *testHandler) OnDiagnostic(context.Context, *process.Connection, diagnostics.Event) {}
+func (h *testHandler) OnLog(context.Context, *process.Connection, process.LogEntry) error   { return nil }
 func (h *testHandler) OnHeartbeat(context.Context, *process.Connection, time.Time) error    { return nil }
 func (h *testHandler) OnShutdown(context.Context, *process.Connection, string)              {}
 
@@ -141,6 +142,7 @@ func TestNodeRunConnectsAndEmitsDiagnostics(t *testing.T) {
 
 func TestHandleLeaseGrantExecutesWorkflow(t *testing.T) {
 	if err := registry.Default().RegisterAction("child.exec", func(ctx rt.Context) error {
+		ctx.Logger().Info("child exec log", map[string]any{"workflow": ctx.Workflow().ID()})
 		return nil
 	}, registry.ActionMetadata{}); err != nil {
 		t.Fatalf("register action: %v", err)
@@ -192,6 +194,32 @@ func TestHandleLeaseGrantExecutesWorkflow(t *testing.T) {
 	}
 	if !ack.GetSummary().GetSuccess() {
 		t.Fatalf("expected success summary, got %+v", ack.GetSummary())
+	}
+
+	var logEntry *processproto.LogForward
+	logDeadline := time.After(2 * time.Second)
+	for logEntry == nil {
+		for _, env := range stub.Snapshot() {
+			if log := env.GetLog(); log != nil {
+				logEntry = log
+				break
+			}
+		}
+		if logEntry != nil {
+			break
+		}
+		select {
+		case <-logDeadline:
+			t.Fatalf("expected structured log, got %#v", stub.Snapshot())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if logEntry.GetMessage() != "child exec log" {
+		t.Fatalf("unexpected log entry: %+v", logEntry)
+	}
+	if logEntry.GetAttributes()["workflow"] != "wf-1" {
+		t.Fatalf("expected workflow attribute, got %+v", logEntry.GetAttributes())
 	}
 }
 

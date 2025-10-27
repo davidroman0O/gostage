@@ -19,9 +19,9 @@ import (
 	"github.com/davidroman0O/gostage/v3/diagnostics"
 	"github.com/davidroman0O/gostage/v3/internal/locks"
 	"github.com/davidroman0O/gostage/v3/node"
+	"github.com/davidroman0O/gostage/v3/pools"
 	"github.com/davidroman0O/gostage/v3/process"
 	processproto "github.com/davidroman0O/gostage/v3/process/proto"
-	"github.com/davidroman0O/gostage/v3/runner"
 	"github.com/davidroman0O/gostage/v3/spawner"
 	"github.com/davidroman0O/gostage/v3/state"
 	"github.com/davidroman0O/gostage/v3/telemetry"
@@ -301,7 +301,7 @@ func (rc *remoteCoordinator) sendLease(worker *remoteWorker, claimed *state.Clai
 			return fmt.Errorf("encode initial store: %w", err)
 		}
 	}
-	metadataJSON, err := json.Marshal(claimed.Metadata)
+	metadataJSON, err := json.Marshal(metadataWithoutInitialStore(claimed.Metadata))
 	if err != nil {
 		return fmt.Errorf("encode metadata: %w", err)
 	}
@@ -584,61 +584,11 @@ func (rc *remoteCoordinator) OnLeaseAck(ctx context.Context, conn *process.Conne
 
 	rc.dispatcher.unregisterCancel(job.workflow.ID)
 
-	finalState := runner.StatusFailed
-	if summary.Success {
-		finalState = runner.StatusCompleted
-	} else {
-		switch summary.Reason {
-		case state.TerminationReasonUserCancel, state.TerminationReasonPolicyCancel, state.TerminationReasonTimeout:
-			finalState = runner.StatusCancelled
-		}
+	var pool *pools.Local
+	if job.pool != nil && job.pool.binding != nil {
+		pool = job.pool.binding.pool
 	}
-
-	if job.release != nil {
-		job.release()
-	}
-
-	if rc.dispatcher.manager != nil {
-		report := state.ExecutionReport{
-			WorkflowID:      string(job.workflow.ID),
-			WorkflowName:    job.workflow.Definition.Name,
-			WorkflowTags:    append([]string(nil), job.workflow.Definition.Tags...),
-			Description:     job.workflow.Definition.Description,
-			Status:          executionStatusToWorkflow(finalState),
-			Success:         summary.Success,
-			ErrorMessage:    summary.Error,
-			Reason:          summary.Reason,
-			StartedAt:       job.workflow.ClaimedAt,
-			Duration:        summary.Duration,
-			CompletedAt:     summary.CompletedAt,
-			FinalStore:      copyMap(summary.Output),
-			DisabledStages:  copyBoolMap(summary.DisabledStages),
-			DisabledActions: copyBoolMap(summary.DisabledActions),
-			RemovedStages:   copyStringMap(summary.RemovedStages),
-			RemovedActions:  copyStringMap(summary.RemovedActions),
-			Attempt:         summary.Attempt,
-		}
-		if report.CompletedAt.IsZero() {
-			report.CompletedAt = time.Now()
-		}
-		if err := rc.dispatcher.manager.StoreExecutionSummary(rc.ctx, string(job.workflow.ID), report); err != nil {
-			rc.dispatcher.reportError("dispatcher.remote.summary", fmt.Errorf("store execution summary %s: %w", job.workflow.ID, err))
-		}
-	} else if rc.dispatcher.store != nil {
-		if err := rc.dispatcher.store.StoreSummary(rc.ctx, job.workflow.ID, summary); err != nil {
-			rc.dispatcher.reportError("dispatcher.remote.store", fmt.Errorf("store summary %s: %w", job.workflow.ID, err))
-		}
-	}
-
-	if err := rc.queue.Ack(rc.ctx, job.workflow.ID, summary); err != nil {
-		rc.dispatcher.reportError("dispatcher.remote.ack", fmt.Errorf("ack workflow %s: %w", job.workflow.ID, err))
-		rc.dispatcher.publishHealth(job.pool.binding.pool.Name(), node.HealthUnavailable, err.Error())
-	} else {
-		rc.dispatcher.recordCompletion(finalState)
-	}
-
-	rc.dispatcher.inflight.Add(-1)
-	rc.dispatcher.wg.Done()
+	rc.dispatcher.completeRemote(job.workflow, pool, summary, job.release)
 	return nil
 }
 
@@ -652,6 +602,58 @@ func (rc *remoteCoordinator) OnTelemetry(ctx context.Context, conn *process.Conn
 
 func (rc *remoteCoordinator) OnDiagnostic(ctx context.Context, conn *process.Connection, evt diagnostics.Event) {
 	rc.reportDiagnostic(evt)
+}
+
+func (rc *remoteCoordinator) OnLog(ctx context.Context, conn *process.Connection, entry process.LogEntry) error {
+	severity := diagnostics.SeverityInfo
+	switch strings.ToLower(entry.Level) {
+	case "info", "", "debug", "trace":
+		severity = diagnostics.SeverityInfo
+	case "warn", "warning":
+		severity = diagnostics.SeverityWarning
+	case "error", "err", "fatal":
+		severity = diagnostics.SeverityError
+	case "panic":
+		severity = diagnostics.SeverityCritical
+	}
+
+	pool := entry.Pool
+	if pool == "" {
+		pool = rc.poolNameForConn(conn)
+	}
+
+	metadata := make(map[string]any, len(entry.Attributes)+4)
+	for k, v := range entry.Attributes {
+		metadata[k] = v
+	}
+	metadata["message"] = entry.Message
+	metadata["level"] = strings.ToLower(entry.Level)
+	if entry.Logger != "" {
+		metadata["logger"] = entry.Logger
+	}
+	metadata["structured"] = true
+	if entry.ChildNodeID != "" {
+		metadata["child_node_id"] = entry.ChildNodeID
+	}
+	if pool != "" {
+		metadata["pool"] = pool
+	}
+
+	component := "remote.log"
+	if pool != "" {
+		component = fmt.Sprintf("remote.log.%s", pool)
+	}
+	if entry.OccurredAt.IsZero() {
+		entry.OccurredAt = time.Now()
+	}
+
+	rc.reportDiagnostic(diagnostics.Event{
+		OccurredAt: entry.OccurredAt,
+		Component:  component,
+		Severity:   severity,
+		Metadata:   metadata,
+	})
+	return nil
 }
 
 func (rc *remoteCoordinator) OnHeartbeat(ctx context.Context, conn *process.Connection, ts time.Time) error {
@@ -698,6 +700,20 @@ func (rc *remoteCoordinator) reportDiagnostic(evt diagnostics.Event) {
 	}
 }
 
+func (rc *remoteCoordinator) poolNameForConn(conn *process.Connection) string {
+	if conn == nil {
+		return ""
+	}
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	for name, pool := range rc.pools {
+		if pool != nil && pool.worker != nil && pool.worker.conn == conn {
+			return name
+		}
+	}
+	return ""
+}
+
 func (rc *remoteCoordinator) forwardChildLog(poolName string, evt diagnostics.Event) {
 	if rc == nil {
 		return
@@ -711,6 +727,7 @@ func (rc *remoteCoordinator) forwardChildLog(poolName string, evt diagnostics.Ev
 		poolName = "unknown"
 	}
 	meta["pool"] = poolName
+	meta["structured"] = false
 	rc.reportDiagnostic(diagnostics.Event{
 		OccurredAt: time.Now(),
 		Component:  fmt.Sprintf("remote.child.%s", poolName),
@@ -780,7 +797,7 @@ func workflowRecordFromClaimed(claimed *state.ClaimedWorkflow) state.WorkflowRec
 	if created.IsZero() {
 		created = time.Now()
 	}
-	metadata := copyMap(claimed.Metadata)
+	metadata := metadataWithoutInitialStore(claimed.Metadata)
 	defMeta := copyMap(claimed.Definition.Metadata)
 	if len(defMeta) > 0 {
 		if metadata == nil {

@@ -51,6 +51,32 @@ type ResultSummary struct {
 	RemovedStages   map[string]string
 	RemovedActions  map[string]string
 	Reason          TerminationReason
+
+	StageStatuses  []StageStatusRecord
+	ActionStatuses []ActionStatusRecord
+}
+
+// StageStatusRecord captures the terminal state of a stage at summary time.
+type StageStatusRecord struct {
+	ID          string
+	Name        string
+	Description string
+	Tags        []string
+	Dynamic     bool
+	CreatedBy   string
+	Status      WorkflowState
+}
+
+// ActionStatusRecord captures the terminal state of an action at summary time.
+type ActionStatusRecord struct {
+	StageID     string
+	ActionID    string
+	Name        string
+	Description string
+	Tags        []string
+	Dynamic     bool
+	CreatedBy   string
+	Status      WorkflowState
 }
 
 type QueueStats struct {
@@ -85,31 +111,31 @@ const (
 type TerminationReason string
 
 const (
-	TerminationReasonUnknown     TerminationReason = "unknown"
-	TerminationReasonSuccess     TerminationReason = "success"
-	TerminationReasonFailure     TerminationReason = "failure"
-	TerminationReasonUserCancel  TerminationReason = "user_cancel"
+	TerminationReasonUnknown      TerminationReason = "unknown"
+	TerminationReasonSuccess      TerminationReason = "success"
+	TerminationReasonFailure      TerminationReason = "failure"
+	TerminationReasonUserCancel   TerminationReason = "user_cancel"
 	TerminationReasonPolicyCancel TerminationReason = "policy_cancel"
-	TerminationReasonTimeout     TerminationReason = "timeout"
+	TerminationReasonTimeout      TerminationReason = "timeout"
 )
 
 type WorkflowRecord struct {
-	ID          WorkflowID
-	Name        string
-	Description string
-	Type        string
-	Tags        []string
-	Metadata    map[string]any
-	CreatedAt   time.Time
-	State       WorkflowState
-	StartedAt   *time.Time
-	CompletedAt *time.Time
-	Duration    time.Duration
+	ID                WorkflowID
+	Name              string
+	Description       string
+	Type              string
+	Tags              []string
+	Metadata          map[string]any
+	CreatedAt         time.Time
+	State             WorkflowState
+	StartedAt         *time.Time
+	CompletedAt       *time.Time
+	Duration          time.Duration
 	Success           bool
 	Error             string
 	TerminationReason TerminationReason
-	Definition  SubWorkflowDef
-	Stages      map[string]*StageRecord
+	Definition        SubWorkflowDef
+	Stages            map[string]*StageRecord
 }
 
 type WorkflowSummary struct {

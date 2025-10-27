@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/davidroman0O/gostage/v3/e2e/testkit"
 	rt "github.com/davidroman0O/gostage/v3/runtime"
 	"github.com/davidroman0O/gostage/v3/state"
+	storepkg "github.com/davidroman0O/gostage/v3/store"
 	"github.com/davidroman0O/gostage/v3/telemetry"
 	"github.com/davidroman0O/gostage/v3/workflow"
 )
@@ -343,6 +345,107 @@ func TestRetryPolicyUpdatesSummary(t *testing.T) {
 	snap := backends.Observer.Snapshot()
 	if sum, ok := snap.Summaries[runID]; !ok || sum.Attempt != 2 {
 		t.Fatalf("expected capture summary attempt=2, got %+v", sum)
+	}
+}
+
+func TestRetryRetainsInitialStore(t *testing.T) {
+	testkit.ResetRegistry(t)
+
+	var attempts int
+	gostage.MustRegisterAction("retry.initial-store", func() gostage.ActionFunc {
+		return func(ctx rt.Context) error {
+			attempts++
+			val, err := storepkg.Get[string](ctx.Store(), "seed")
+			if err != nil || val != "value" {
+				return fmt.Errorf("missing seed value: %v (%v)", val, err)
+			}
+			if attempts == 1 {
+				return errors.New("fail first attempt")
+			}
+			return storepkg.Put(ctx.Store(), "final_attempt", attempts)
+		}
+	})
+
+	def := workflow.Definition{
+		Name: "RetryInitialStore",
+		Stages: []workflow.Stage{{
+			Name:    "stage",
+			Actions: []workflow.Action{{Ref: "retry.initial-store"}},
+		}},
+	}
+	workflowID, _ := gostage.MustRegisterWorkflow(def)
+
+	backends := testkit.NewMemoryBackends()
+	failurePolicy := gostage.FailurePolicyFunc(func(_ context.Context, info gostage.FailureContext) gostage.FailureOutcome {
+		if info.Attempt < 2 {
+			return gostage.RetryOutcome()
+		}
+		return gostage.AckOutcome()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	node, diag, err := gostage.Run(ctx, append(testkit.MemoryOptions(backends),
+		gostage.WithPool(gostage.PoolConfig{Name: "primary", Tags: []string{"primary"}, Slots: 1}),
+		gostage.WithFailurePolicy(failurePolicy),
+	)...)
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	collector := testkit.StartDiagnosticsCollector(t, diag)
+	t.Cleanup(func() {
+		if t.Failed() {
+			for _, evt := range collector.Events() {
+				t.Logf("diag: component=%s severity=%s err=%v metadata=%v", evt.Component, evt.Severity, evt.Err, evt.Metadata)
+			}
+		}
+		collector.Close()
+	})
+	t.Cleanup(func() { _ = node.Close() })
+
+	telemetryBuf := testkit.StartTelemetryBuffer(ctx, t, node, 64)
+	t.Cleanup(telemetryBuf.Close)
+
+	runID, err := node.Submit(ctx,
+		gostage.WorkflowRef(workflowID),
+		gostage.WithTags("primary"),
+		gostage.WithInitialStore(map[string]any{"seed": "value"}),
+	)
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	waitCtx, cancelWait := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelWait()
+	result, err := node.Wait(waitCtx, runID)
+	if err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got %+v", result)
+	}
+	if result.Attempt != 2 {
+		t.Fatalf("expected attempt 2, got %d", result.Attempt)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected two attempts, got %d", attempts)
+	}
+	if value, ok := result.Output["final_attempt"].(int); !ok || value != 2 {
+		t.Fatalf("final attempt value missing from result: %+v", result.Output)
+	}
+
+	startEvt := telemetryBuf.Next(t, telemetry.EventWorkflowStarted, 5*time.Second)
+	if startEvt.WorkflowID != string(runID) {
+		t.Fatalf("unexpected workflow.started event: %+v", startEvt)
+	}
+	retryEvt := telemetryBuf.Next(t, telemetry.EventWorkflowRetry, 5*time.Second)
+	if retryEvt.WorkflowID != string(runID) {
+		t.Fatalf("unexpected workflow.retry event: %+v", retryEvt)
+	}
+	execEvt := telemetryBuf.Next(t, telemetry.EventWorkflowExecution, 5*time.Second)
+	if success, _ := execEvt.Metadata["success"].(bool); !success {
+		t.Fatalf("expected successful execution metadata, got %+v", execEvt.Metadata)
 	}
 }
 

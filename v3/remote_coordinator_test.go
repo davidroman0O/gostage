@@ -13,6 +13,7 @@ import (
 	"github.com/davidroman0O/gostage/v3/diagnostics"
 	"github.com/davidroman0O/gostage/v3/node"
 	"github.com/davidroman0O/gostage/v3/pools"
+	"github.com/davidroman0O/gostage/v3/process"
 	processproto "github.com/davidroman0O/gostage/v3/process/proto"
 	"github.com/davidroman0O/gostage/v3/registry"
 	"github.com/davidroman0O/gostage/v3/runner"
@@ -173,6 +174,50 @@ func TestRemoteCoordinatorDispatchLifecycle(t *testing.T) {
 		t.Fatalf("expected worker to be idle")
 	}
 	remoteCoord.mu.Unlock()
+}
+
+func TestRemoteCoordinatorOnLogPublishesDiagnostics(t *testing.T) {
+	rec := &diagRecorder{}
+	rc := &remoteCoordinator{
+		diagnostics: rec,
+		logger:      telemetry.NoopLogger{},
+		pools:       make(map[string]*remotePool),
+	}
+
+	entry := process.LogEntry{
+		OccurredAt:  time.Now(),
+		Level:       "info",
+		Logger:      "child",
+		Message:     "structured log",
+		Attributes:  map[string]string{"key": "value"},
+		Pool:        "remote",
+		ChildNodeID: "child-1",
+	}
+
+	if err := rc.OnLog(context.Background(), nil, entry); err != nil {
+		t.Fatalf("OnLog returned error: %v", err)
+	}
+
+	events := rec.Events()
+	if len(events) == 0 {
+		t.Fatalf("expected diagnostic event, got none")
+	}
+	logEvent := events[len(events)-1]
+	if logEvent.Component != "remote.log.remote" {
+		t.Fatalf("unexpected component %q", logEvent.Component)
+	}
+	if logEvent.Metadata["message"] != entry.Message {
+		t.Fatalf("unexpected message metadata: %+v", logEvent.Metadata)
+	}
+	if logEvent.Metadata["structured"] != true {
+		t.Fatalf("expected structured flag, got %+v", logEvent.Metadata)
+	}
+	if logEvent.Metadata["key"] != "value" {
+		t.Fatalf("missing attributes: %+v", logEvent.Metadata)
+	}
+	if logEvent.Metadata["child_node_id"] != entry.ChildNodeID {
+		t.Fatalf("missing child_node_id: %+v", logEvent.Metadata)
+	}
 }
 
 func TestRemoteCoordinatorForwardChildLog(t *testing.T) {

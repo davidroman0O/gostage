@@ -268,6 +268,7 @@ func (d *dispatcher) execute(pool *pools.Local, release func(), claimed *state.C
 
 	switch outcome.Action {
 	case FailureActionRetry:
+		preserveInitialStoreForRetry(claimed, result.result.FinalStore)
 		d.emitWorkflowEvent(telemetry.EventWorkflowRetry, claimed.ID, claimed.Attempt, map[string]any{
 			"pool":   pool.Name(),
 			"error":  errorMessage(result.result.Error),
@@ -568,6 +569,175 @@ func (d *dispatcher) reportError(component string, err error) {
 	}
 }
 
+func (d *dispatcher) completeRemote(claimed *state.ClaimedWorkflow, pool *pools.Local, summary state.ResultSummary, release func()) {
+	if claimed == nil {
+		if release != nil {
+			release()
+		}
+		d.inflight.Add(-1)
+		d.wg.Done()
+		return
+	}
+
+	poolName := ""
+	if pool != nil {
+		poolName = pool.Name()
+	}
+
+	defer d.wg.Done()
+	defer d.inflight.Add(-1)
+	if release != nil {
+		defer release()
+	}
+
+	attempt := summary.Attempt
+	if attempt == 0 && claimed.Attempt > 0 {
+		attempt = claimed.Attempt
+	}
+
+	var runErr error
+	if summary.Error != "" {
+		runErr = errors.New(summary.Error)
+	}
+
+	run := runResult{
+		claimed: claimed,
+		result: runner.RunResult{
+			Success:         summary.Success,
+			Error:           runErr,
+			FinalStore:      copyMap(summary.Output),
+			DisabledStages:  copyBoolMap(summary.DisabledStages),
+			DisabledActions: copyBoolMap(summary.DisabledActions),
+			RemovedStages:   copyStringMap(summary.RemovedStages),
+			RemovedActions:  copyStringMap(summary.RemovedActions),
+			Attempt:         attempt,
+			Duration:        summary.Duration,
+		},
+		report: state.ExecutionReport{
+			WorkflowID:      string(claimed.ID),
+			WorkflowName:    claimed.Definition.Name,
+			WorkflowType:    claimed.Definition.Type,
+			WorkflowTags:    append([]string(nil), claimed.Definition.Tags...),
+			Description:     claimed.Definition.Description,
+			Status:          state.WorkflowPending,
+			Success:         summary.Success,
+			ErrorMessage:    summary.Error,
+			Reason:          summary.Reason,
+			StartedAt:       claimed.ClaimedAt,
+			Duration:        summary.Duration,
+			CompletedAt:     summary.CompletedAt,
+			FinalStore:      copyMap(summary.Output),
+			DisabledStages:  copyBoolMap(summary.DisabledStages),
+			DisabledActions: copyBoolMap(summary.DisabledActions),
+			RemovedStages:   copyStringMap(summary.RemovedStages),
+			RemovedActions:  copyStringMap(summary.RemovedActions),
+			Attempt:         attempt,
+		},
+		state:  runner.StatusCompleted,
+		reason: summary.Reason,
+	}
+
+	if run.report.StartedAt.IsZero() {
+		run.report.StartedAt = claimed.ClaimedAt
+	}
+	if run.report.CompletedAt.IsZero() {
+		run.report.CompletedAt = time.Now()
+	}
+
+	if !summary.Success {
+		switch summary.Reason {
+		case state.TerminationReasonUserCancel, state.TerminationReasonPolicyCancel, state.TerminationReasonTimeout:
+			run.state = runner.StatusCancelled
+		default:
+			run.state = runner.StatusFailed
+		}
+	}
+
+	if poolName != "" {
+		if summary.Success {
+			d.publishHealth(poolName, node.HealthHealthy, "workflow completed")
+		} else {
+			d.publishHealth(poolName, node.HealthDegraded, errorMessage(runErr))
+		}
+	}
+
+	d.applyRemoteStatuses(claimed, summary)
+
+	outcome := d.decideFailure(claimed, run)
+	finalState := run.state
+	if outcome.FinalState != "" {
+		finalState = outcome.FinalState
+	}
+	run.state = finalState
+	run.report.Status = executionStatusToWorkflow(run.state)
+	run.reason = normalizeReason(outcome.Reason, run.state, run.result.Success)
+
+	switch outcome.Action {
+	case FailureActionRetry:
+		preserveInitialStoreForRetry(claimed, run.result.FinalStore)
+		metadata := map[string]any{
+			"pool":   poolName,
+			"reason": run.reason,
+		}
+		if msg := errorMessage(runErr); msg != "" {
+			metadata["error"] = msg
+		}
+		d.emitWorkflowEvent(telemetry.EventWorkflowRetry, claimed.ID, attempt, metadata, runErr)
+		if err := d.queue.Release(d.ctx, claimed.ID); err != nil {
+			d.reportError("dispatcher.remote.release", fmt.Errorf("release workflow %s: %w", claimed.ID, err))
+			if poolName != "" {
+				d.publishHealth(poolName, node.HealthUnavailable, err.Error())
+			}
+		}
+		return
+	}
+
+	if run.state == runner.StatusCancelled {
+		metadata := map[string]any{
+			"pool": poolName,
+		}
+		if msg := errorMessage(runErr); msg != "" {
+			metadata["error"] = msg
+		}
+		switch run.reason {
+		case state.TerminationReasonPolicyCancel:
+			metadata["reason"] = "failure_policy"
+		case state.TerminationReasonTimeout:
+			metadata["reason"] = "timeout"
+		default:
+			metadata["reason"] = "explicit_request"
+		}
+		d.emitWorkflowEvent(telemetry.EventWorkflowCancelled, claimed.ID, attempt, metadata, runErr)
+	}
+
+	finalSummary := run.toSummary()
+	if finalSummary.Attempt == 0 {
+		finalSummary.Attempt = attempt
+	}
+
+	if d.manager != nil {
+		if run.report.Attempt == 0 {
+			run.report.Attempt = attempt
+		}
+		if err := d.manager.StoreExecutionSummary(d.ctx, string(claimed.ID), run.report); err != nil {
+			d.reportError("dispatcher.remote.summary", fmt.Errorf("store execution summary %s: %w", claimed.ID, err))
+		}
+	} else if d.store != nil {
+		if err := d.store.StoreSummary(d.ctx, claimed.ID, finalSummary); err != nil {
+			d.reportError("dispatcher.remote.store", fmt.Errorf("store summary %s: %w", claimed.ID, err))
+		}
+	}
+
+	if err := d.queue.Ack(d.ctx, claimed.ID, finalSummary); err != nil {
+		d.reportError("dispatcher.remote.ack", fmt.Errorf("ack workflow %s: %w", claimed.ID, err))
+		if poolName != "" {
+			d.publishHealth(poolName, node.HealthUnavailable, err.Error())
+		}
+	} else {
+		d.recordCompletion(run.state)
+	}
+}
+
 type runResult struct {
 	claimed *state.ClaimedWorkflow
 	result  runner.RunResult
@@ -593,6 +763,39 @@ func (r runResult) toSummary() state.ResultSummary {
 		CompletedAt:     completedAt,
 		Reason:          reason,
 	}
+	if stages := r.report.Stages; len(stages) > 0 {
+		summary.StageStatuses = make([]state.StageStatusRecord, 0, len(stages))
+		for _, stage := range stages {
+			rec := state.StageStatusRecord{
+				ID:          stage.ID,
+				Name:        stage.Name,
+				Description: stage.Description,
+				Tags:        append([]string(nil), stage.Tags...),
+				Dynamic:     stage.Dynamic,
+				CreatedBy:   stage.CreatedBy,
+				Status:      stage.Status,
+			}
+			summary.StageStatuses = append(summary.StageStatuses, rec)
+			if len(stage.Actions) > 0 {
+				if summary.ActionStatuses == nil {
+					summary.ActionStatuses = make([]state.ActionStatusRecord, 0)
+				}
+				for _, action := range stage.Actions {
+					actionRec := state.ActionStatusRecord{
+						StageID:     action.StageID,
+						ActionID:    action.Name,
+						Name:        action.Name,
+						Description: action.Description,
+						Tags:        append([]string(nil), action.Tags...),
+						Dynamic:     action.Dynamic,
+						CreatedBy:   action.CreatedBy,
+						Status:      action.Status,
+					}
+					summary.ActionStatuses = append(summary.ActionStatuses, actionRec)
+				}
+			}
+		}
+	}
 	if summary.Attempt == 0 {
 		switch {
 		case r.report.Attempt > 0:
@@ -610,18 +813,73 @@ func (r runResult) toSummary() state.ResultSummary {
 }
 
 func extractInitialStore(metadata map[string]any) map[string]any {
-	if metadata == nil {
+	if len(metadata) == 0 {
 		return nil
 	}
 	raw, ok := metadata[metadataInitialStore]
 	if !ok {
 		return nil
 	}
-	delete(metadata, metadataInitialStore)
 	if value, ok := raw.(map[string]any); ok {
 		return copyMap(value)
 	}
 	return nil
+}
+
+func (d *dispatcher) applyRemoteStatuses(claimed *state.ClaimedWorkflow, summary state.ResultSummary) {
+	if d == nil || d.manager == nil || claimed == nil {
+		return
+	}
+	workflowID := string(claimed.ID)
+	ctx := d.ctx
+	for _, st := range summary.StageStatuses {
+		if st.ID == "" {
+			continue
+		}
+		if st.Dynamic {
+			stageRec := state.StageRecord{
+				ID:          st.ID,
+				Name:        st.Name,
+				Description: st.Description,
+				Tags:        append([]string(nil), st.Tags...),
+				Dynamic:     st.Dynamic,
+				CreatedBy:   st.CreatedBy,
+				Status:      st.Status,
+			}
+			if err := d.manager.StageRegistered(ctx, workflowID, stageRec); err != nil {
+				d.reportError("dispatcher.remote.stage_registered", fmt.Errorf("register stage %s: %w", st.ID, err))
+			}
+		}
+		if st.Status != "" {
+			if err := d.manager.StageStatus(ctx, workflowID, st.ID, st.Status); err != nil {
+				d.reportError("dispatcher.remote.stage_status", fmt.Errorf("update stage %s status: %w", st.ID, err))
+			}
+		}
+	}
+	for _, act := range summary.ActionStatuses {
+		if act.StageID == "" || act.ActionID == "" {
+			continue
+		}
+		if act.Dynamic {
+			actionRec := state.ActionRecord{
+				Ref:         act.ActionID,
+				Name:        act.Name,
+				Description: act.Description,
+				Tags:        append([]string(nil), act.Tags...),
+				Dynamic:     act.Dynamic,
+				CreatedBy:   act.CreatedBy,
+				Status:      act.Status,
+			}
+			if err := d.manager.ActionRegistered(ctx, workflowID, act.StageID, actionRec); err != nil {
+				d.reportError("dispatcher.remote.action_registered", fmt.Errorf("register action %s/%s: %w", act.StageID, act.ActionID, err))
+			}
+		}
+		if act.Status != "" {
+			if err := d.manager.ActionStatus(ctx, workflowID, act.StageID, act.ActionID, act.Status); err != nil {
+				d.reportError("dispatcher.remote.action_status", fmt.Errorf("update action %s/%s status: %w", act.StageID, act.ActionID, err))
+			}
+		}
+	}
 }
 
 func copyMap(src map[string]any) map[string]any {
@@ -672,6 +930,36 @@ func normalizeReason(reason state.TerminationReason, finalState runner.Execution
 	default:
 		return state.TerminationReasonFailure
 	}
+}
+
+func metadataWithoutInitialStore(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]any, len(src))
+	for k, v := range src {
+		if k == metadataInitialStore {
+			continue
+		}
+		dst[k] = v
+	}
+	if len(dst) == 0 {
+		return nil
+	}
+	return dst
+}
+
+func preserveInitialStoreForRetry(claimed *state.ClaimedWorkflow, store map[string]any) {
+	if claimed == nil {
+		return
+	}
+	if len(store) == 0 {
+		return
+	}
+	if claimed.Metadata == nil {
+		claimed.Metadata = make(map[string]any, 1)
+	}
+	claimed.Metadata[metadataInitialStore] = copyMap(store)
 }
 
 func executionStatusToWorkflow(status runner.ExecutionStatus) state.WorkflowState {

@@ -56,7 +56,10 @@ func TestMergeChildConfigUsesOptions(t *testing.T) {
 				Tags:     []string{"payments"},
 				Metadata: map[string]any{"zone": "us-east"},
 			}},
-			metadata: map[string]string{"region": "us"},
+			metadata: map[string]string{
+				"region":  "us",
+				"cluster": "blue",
+			},
 		},
 	}
 
@@ -84,5 +87,8 @@ func TestMergeChildConfigUsesOptions(t *testing.T) {
 	}
 	if merged.Metadata["region"] != "override" {
 		t.Fatalf("expected existing metadata to remain, got %v", merged.Metadata)
+	}
+	if merged.Metadata["cluster"] != "blue" {
+		t.Fatalf("expected handler metadata to augment, got %v", merged.Metadata)
 	}
 }

@@ -35,10 +35,15 @@ func (h *DiagnosticsHub) Write(evt diagnostics.Event) {
 	subs := append([]chan diagnostics.Event(nil), h.subscribers...)
 	h.mu.RUnlock()
 	for _, ch := range subs {
-		select {
-		case ch <- evt:
-		default:
-		}
+		func(target chan diagnostics.Event, event diagnostics.Event) {
+			defer func() {
+				recover()
+			}()
+			select {
+			case target <- event:
+			default:
+			}
+		}(ch, evt)
 	}
 }
 

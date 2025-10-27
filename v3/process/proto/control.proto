@@ -22,6 +22,7 @@ message ControlEnvelope {
     TelemetryForward telemetry = 9;
     DiagnosticForward diagnostic = 10;
     ChildConfigUpdate config_update = 11;
+    LogForward log = 12;
   }
 }
 
@@ -115,6 +116,17 @@ message ChildConfigUpdate {
   bytes metadata_json = 1;
 }
 
+// LogForward streams structured log entries from the child to the parent.
+message LogForward {
+  google.protobuf.Timestamp occurred_at = 1;
+  string level = 2;
+  string logger = 3;
+  string message = 4;
+  map<string, string> attributes = 5;
+  string pool = 6;
+  string child_node_id = 7;
+}
+
 // ResultSummary mirrors state.ResultSummary in a transport friendly form.
 message ResultSummary {
   bool success = 1;
@@ -128,6 +140,29 @@ message ResultSummary {
   map<string, string> removed_stages = 9;
   map<string, string> removed_actions = 10;
   TerminationReason reason = 11;
+  repeated StageStatus stage_statuses = 12;
+  repeated ActionStatus action_statuses = 13;
+}
+
+message StageStatus {
+  string stage_id = 1;
+  string name = 2;
+  string description = 3;
+  repeated string tags = 4;
+  bool dynamic = 5;
+  string created_by = 6;
+  string status = 7;
+}
+
+message ActionStatus {
+  string stage_id = 1;
+  string action_id = 2;
+  string name = 3;
+  string description = 4;
+  repeated string tags = 5;
+  bool dynamic = 6;
+  string created_by = 7;
+  string status = 8;
 }
 
 enum TerminationReason {

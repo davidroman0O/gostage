@@ -150,7 +150,7 @@ func (m *StoreManager) StageStatus(ctx context.Context, workflowID, stageID stri
 	}
 	stage := ensureStageRecord(&snap.record, stageID)
 	var startedAt, completedAt *time.Time
-	now := time.Now()
+	now := m.now()
 
 	if status == WorkflowRunning && stage.StartedAt == nil {
 		stage.StartedAt = cloneTimePointer(&now)
@@ -215,7 +215,7 @@ func (m *StoreManager) ActionStatus(ctx context.Context, workflowID, stageID, ac
 	stage := ensureStageRecord(&snap.record, stageID)
 	action := ensureActionRecord(stage, actionName)
 	var startedAt, completedAt *time.Time
-	now := time.Now()
+	now := m.now()
 
 	if status == WorkflowRunning && action.StartedAt == nil {
 		action.StartedAt = cloneTimePointer(&now)
@@ -532,6 +532,31 @@ func resultSummaryFromReport(report ExecutionReport) ResultSummary {
 	if reason == "" {
 		reason = TerminationReasonUnknown
 	}
+	stageStatuses := make([]StageStatusRecord, 0, len(report.Stages))
+	actionStatuses := make([]ActionStatusRecord, 0)
+	for _, stage := range report.Stages {
+		stageStatuses = append(stageStatuses, StageStatusRecord{
+			ID:          stage.ID,
+			Name:        stage.Name,
+			Description: stage.Description,
+			Tags:        append([]string(nil), stage.Tags...),
+			Dynamic:     stage.Dynamic,
+			CreatedBy:   stage.CreatedBy,
+			Status:      stage.Status,
+		})
+		for _, action := range stage.Actions {
+			actionStatuses = append(actionStatuses, ActionStatusRecord{
+				StageID:     action.StageID,
+				ActionID:    action.Name,
+				Name:        action.Name,
+				Description: action.Description,
+				Tags:        append([]string(nil), action.Tags...),
+				Dynamic:     action.Dynamic,
+				CreatedBy:   action.CreatedBy,
+				Status:      action.Status,
+			})
+		}
+	}
 	return ResultSummary{
 		Success:         report.Success,
 		Error:           report.ErrorMessage,
@@ -544,6 +569,8 @@ func resultSummaryFromReport(report ExecutionReport) ResultSummary {
 		RemovedStages:   maps.Clone(report.RemovedStages),
 		RemovedActions:  maps.Clone(report.RemovedActions),
 		Reason:          reason,
+		StageStatuses:   stageStatuses,
+		ActionStatuses:  actionStatuses,
 	}
 }
 

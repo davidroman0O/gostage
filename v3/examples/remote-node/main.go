@@ -20,9 +20,10 @@ import (
 )
 
 const (
-	sqlitePath     = "remote-node.db"
-	spawnerName    = "remote-node-spawner"
-	remotePoolName = "remote-requests"
+	sqlitePath        = "remote-node.db"
+	spawnerName       = "remote-node-spawner"
+	remotePoolName    = "remote-requests"
+	disableCaptureEnv = "REMOTE_DISABLE_CAPTURE"
 )
 
 var remoteWorkflowID string
@@ -78,6 +79,14 @@ func main() {
 		_ = os.Remove(dbPath)
 	}
 
+	// Set REMOTE_DISABLE_CAPTURE=1 to rely solely on structured log forwarding.
+	disableCapture := parseDisableCapture()
+	if disableCapture {
+		log.Printf("stdout/stderr capture disabled via %s", disableCaptureEnv)
+	} else {
+		log.Printf("stdout/stderr capture enabled (unset %s to switch modes)", disableCaptureEnv)
+	}
+
 	node, diagnosticsCh, err := gostage.Run(ctx,
 		gostage.WithSQLite(gostage.SQLiteConfig{
 			Path:            dbPath,
@@ -85,7 +94,7 @@ func main() {
 			ApplyMigrations: true,
 		}),
 		gostage.WithTelemetrySink(telemetry.NewLoggerSink(log.New(os.Stdout, "[telemetry] ", log.LstdFlags))),
-		gostage.WithSpawner(buildSpawnerConfig()),
+		gostage.WithSpawner(buildSpawnerConfig(disableCapture)),
 		gostage.WithPool(gostage.PoolConfig{
 			Name:    remotePoolName,
 			Tags:    []string{"remote"},
@@ -154,15 +163,16 @@ func main() {
 	log.Printf("inspect %s for persisted state and telemetry rows after the run", dbPath)
 }
 
-func buildSpawnerConfig() gostage.SpawnerConfig {
+func buildSpawnerConfig(disableCapture bool) gostage.SpawnerConfig {
 	return gostage.SpawnerConfig{
-		Name:           spawnerName,
-		BinaryPath:     gostage.CurrentBinary(),
-		ChildType:      remotePoolName,
-		Metadata:       map[string]string{"role": "example"},
-		MaxRestarts:    1,
-		RestartBackoff: 2 * time.Second,
-		ShutdownGrace:  3 * time.Second,
+		Name:                 spawnerName,
+		BinaryPath:           gostage.CurrentBinary(),
+		ChildType:            remotePoolName,
+		Metadata:             map[string]string{"role": "example"},
+		MaxRestarts:          1,
+		RestartBackoff:       2 * time.Second,
+		ShutdownGrace:        3 * time.Second,
+		DisableOutputCapture: disableCapture,
 	}
 }
 
@@ -185,5 +195,18 @@ func waitForRemoteHealthy(events <-chan gostage.HealthEvent) {
 		case <-timer.C:
 			log.Fatalf("timed out waiting for remote pool %s to become healthy", remotePoolName)
 		}
+	}
+}
+
+func parseDisableCapture() bool {
+	value := os.Getenv(disableCaptureEnv)
+	if value == "" {
+		return false
+	}
+	switch value {
+	case "0", "false", "False", "FALSE", "no", "NO", "No":
+		return false
+	default:
+		return true
 	}
 }

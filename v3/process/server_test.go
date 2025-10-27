@@ -55,6 +55,7 @@ func (m *mockHandler) OnLeaseAck(ctx context.Context, conn *Connection, workflow
 
 func (m *mockHandler) OnTelemetry(context.Context, *Connection, telemetry.Event) error { return nil }
 func (m *mockHandler) OnDiagnostic(context.Context, *Connection, diagnostics.Event)    {}
+func (m *mockHandler) OnLog(context.Context, *Connection, LogEntry) error              { return nil }
 func (m *mockHandler) OnHeartbeat(context.Context, *Connection, time.Time) error       { return nil }
 func (m *mockHandler) OnShutdown(context.Context, *Connection, string)                 {}
 

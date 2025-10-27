@@ -380,6 +380,8 @@ func (c *CaptureObserver) Snapshot() CaptureSnapshot {
 		clone.DisabledActions = maps.Clone(summary.DisabledActions)
 		clone.RemovedStages = maps.Clone(summary.RemovedStages)
 		clone.RemovedActions = maps.Clone(summary.RemovedActions)
+		clone.StageStatuses = cloneStageStatusRecords(summary.StageStatuses)
+		clone.ActionStatuses = cloneActionStatusRecords(summary.ActionStatuses)
 		out.Summaries[id] = clone
 	}
 	return out
@@ -538,4 +540,30 @@ func (r *captureStateReader) ActionHistory(ctx context.Context, id WorkflowID) (
 		history = append(history, record)
 	}
 	return history, nil
+}
+
+func cloneStageStatusRecords(records []StageStatusRecord) []StageStatusRecord {
+	if len(records) == 0 {
+		return nil
+	}
+	dup := make([]StageStatusRecord, len(records))
+	for i, rec := range records {
+		clone := rec
+		clone.Tags = append([]string(nil), rec.Tags...)
+		dup[i] = clone
+	}
+	return dup
+}
+
+func cloneActionStatusRecords(records []ActionStatusRecord) []ActionStatusRecord {
+	if len(records) == 0 {
+		return nil
+	}
+	dup := make([]ActionStatusRecord, len(records))
+	for i, rec := range records {
+		clone := rec
+		clone.Tags = append([]string(nil), rec.Tags...)
+		dup[i] = clone
+	}
+	return dup
 }

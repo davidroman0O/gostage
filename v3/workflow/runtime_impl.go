@@ -196,7 +196,7 @@ type RuntimeStage struct {
 	description string
 	tags        []string
 	actions     []rt.Action
-	initial     *internalstore.KVStore
+	initial     store.Handle
 	middlewares []rt.StageMiddleware
 	actionMW    []rt.ActionMiddleware
 	disabled    map[string]bool
@@ -235,7 +235,7 @@ func newRuntimeStage(id, name, description string) *RuntimeStage {
 		description: description,
 		tags:        make([]string, 0),
 		actions:     make([]rt.Action, 0),
-		initial:     internalstore.NewKVStore(),
+		initial:     store.New(),
 		middlewares: make([]rt.StageMiddleware, 0),
 		actionMW:    make([]rt.ActionMiddleware, 0),
 		disabled:    make(map[string]bool),
@@ -275,16 +275,17 @@ func (s *RuntimeStage) WithActionMiddleware(mw ...rt.ActionMiddleware) {
 
 func (s *RuntimeStage) SetInitialStore(st store.Handle) {
 	if st.IsZero() {
-		st = store.New()
+		s.initial = store.New()
+		return
 	}
-	s.initial = store.Unwrap(st)
+	s.initial = store.Clone(st)
 }
 
 func (s *RuntimeStage) ID() string                 { return s.id }
 func (s *RuntimeStage) Name() string               { return s.name }
 func (s *RuntimeStage) Description() string        { return s.description }
 func (s *RuntimeStage) Tags() []string             { return append([]string(nil), s.tags...) }
-func (s *RuntimeStage) InitialStore() store.Handle { return store.FromInternal(s.initial) }
+func (s *RuntimeStage) InitialStore() store.Handle { return s.initial }
 func (s *RuntimeStage) Middlewares() []rt.StageMiddleware {
 	return append([]rt.StageMiddleware(nil), s.middlewares...)
 }
