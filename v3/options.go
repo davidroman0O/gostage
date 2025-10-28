@@ -23,11 +23,12 @@ type options struct {
 	queue          state.Queue
 	store          state.Store
 	stateReader    StateReader
-	observers      []state.ManagerObserver
+	observers      []StateObserver
 	sqlite         *SQLiteConfig
 	pools          []PoolConfig
 	childPools     []PoolConfig
 	spawners       []SpawnerConfig
+	remoteBridge   RemoteBridgeConfig
 	dispatcher     DispatcherConfig
 	logger         telemetry.Logger
 	failurePolicy  FailurePolicy
@@ -46,8 +47,12 @@ func (fn childOptionFunc) apply(opts *childOptions) {
 }
 
 type childOptions struct {
-	pools    []PoolConfig
-	metadata map[string]string
+	pools     []PoolConfig
+	metadata  map[string]string
+	tls       *TLSFiles
+	authToken *string
+	logger    telemetry.Logger
+	tags      []string
 }
 
 const (
@@ -101,7 +106,7 @@ func WithStateReader(reader StateReader) Option {
 }
 
 // WithStateObserver registers a StoreManager observer hook chain.
-func WithStateObserver(observer state.ManagerObserver) Option {
+func WithStateObserver(observer StateObserver) Option {
 	if observer == nil {
 		return optionFunc(func(*options) {})
 	}
@@ -140,10 +145,59 @@ func WithChildMetadata(values map[string]string) ChildOption {
 	})
 }
 
+// ChildWithTLS overrides the TLS materials supplied to the child bootstrap.
+// All fields must reference readable files; empty values are ignored.
+func ChildWithTLS(files TLSFiles) ChildOption {
+	return childOptionFunc(func(o *childOptions) {
+		o.tls = &TLSFiles{
+			CertPath: files.CertPath,
+			KeyPath:  files.KeyPath,
+			CAPath:   files.CAPath,
+		}
+	})
+}
+
+// ChildWithAuth overrides the authentication token provided to the child.
+// An empty token clears any previously configured value.
+func ChildWithAuth(token string) ChildOption {
+	return childOptionFunc(func(o *childOptions) {
+		copied := token
+		o.authToken = &copied
+	})
+}
+
+// ChildWithLogger assigns a logger used by the child runtime when no logger is supplied by the parent spawner.
+func ChildWithLogger(logger telemetry.Logger) ChildOption {
+	return childOptionFunc(func(o *childOptions) {
+		o.logger = logger
+	})
+}
+
+// WithChildLogger is an alias for ChildWithLogger to match documentation naming.
+func WithChildLogger(logger telemetry.Logger) ChildOption { return ChildWithLogger(logger) }
+
+// ChildWithTags appends process-level tags associated with the child process.
+func ChildWithTags(tags ...string) ChildOption {
+	return childOptionFunc(func(o *childOptions) {
+		if len(tags) == 0 {
+			return
+		}
+		o.tags = appendUniqueStrings(o.tags, tags...)
+	})
+}
+
 // WithSpawner records a spawner configuration. Spawner wiring arrives in later phases.
 func WithSpawner(cfg SpawnerConfig) Option {
 	return optionFunc(func(o *options) {
 		o.spawners = append(o.spawners, copySpawnerConfig(cfg))
+	})
+}
+
+// WithRemoteBridge configures the parent-side listener used by remote children.
+func WithRemoteBridge(cfg RemoteBridgeConfig) Option {
+	copy := cfg
+	return optionFunc(func(o *options) {
+		o.remoteBridge = copy
 	})
 }
 

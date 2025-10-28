@@ -1,41 +1,45 @@
-package state
+package state_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
+
+	state "github.com/davidroman0O/gostage/v3/state"
+	statetest "github.com/davidroman0O/gostage/v3/state/testkit"
 )
 
 func TestCaptureObserverRecordsLifecycle(t *testing.T) {
-	store := NewMemoryStore()
-	observer := NewCaptureObserver()
-	manager, err := NewStoreManager(store, WithManagerObservers(observer))
+	store := state.NewMemoryStore()
+	observer := statetest.NewCaptureObserver()
+	manager, err := state.NewStoreManager(store, state.WithManagerObservers(observer))
 	if err != nil {
 		t.Fatalf("store manager: %v", err)
 	}
 
 	ctx := context.Background()
-	wf := WorkflowRecord{ID: WorkflowID("wf-1"), Name: "test"}
+	wf := state.WorkflowRecord{ID: state.WorkflowID("wf-1"), Name: "test"}
 	if err := manager.WorkflowRegistered(ctx, wf); err != nil {
 		t.Fatalf("workflow registered: %v", err)
 	}
-	if err := manager.WorkflowStatus(ctx, string(wf.ID), WorkflowRunning); err != nil {
+	if err := manager.WorkflowStatus(ctx, string(wf.ID), state.WorkflowRunning); err != nil {
 		t.Fatalf("workflow status: %v", err)
 	}
 
-	stage := StageRecord{ID: "stage-1", Name: "build", Tags: []string{"primary"}}
+	stage := state.StageRecord{ID: "stage-1", Name: "build", Tags: []string{"primary"}}
 	if err := manager.StageRegistered(ctx, string(wf.ID), stage); err != nil {
 		t.Fatalf("stage registered: %v", err)
 	}
-	if err := manager.StageStatus(ctx, string(wf.ID), stage.ID, WorkflowCompleted); err != nil {
+	if err := manager.StageStatus(ctx, string(wf.ID), stage.ID, state.WorkflowCompleted); err != nil {
 		t.Fatalf("stage status: %v", err)
 	}
 
-	action := ActionRecord{Name: "action-1", Description: "do", Tags: []string{"a"}}
+	action := state.ActionRecord{Name: "action-1", Description: "do", Tags: []string{"a"}}
 	if err := manager.ActionRegistered(ctx, string(wf.ID), stage.ID, action); err != nil {
 		t.Fatalf("action registered: %v", err)
 	}
-	if err := manager.ActionStatus(ctx, string(wf.ID), stage.ID, action.Name, WorkflowCompleted); err != nil {
+	if err := manager.ActionStatus(ctx, string(wf.ID), stage.ID, action.Name, state.WorkflowCompleted); err != nil {
 		t.Fatalf("action status: %v", err)
 	}
 	if err := manager.ActionProgress(ctx, string(wf.ID), stage.ID, action.Name, 75, "almost"); err != nil {
@@ -51,10 +55,10 @@ func TestCaptureObserverRecordsLifecycle(t *testing.T) {
 		t.Fatalf("stage removed: %v", err)
 	}
 
-	report := ExecutionReport{
+	report := state.ExecutionReport{
 		WorkflowID:   string(wf.ID),
 		WorkflowName: "test",
-		Status:       WorkflowCompleted,
+		Status:       state.WorkflowCompleted,
 		Success:      true,
 		CompletedAt:  time.Now(),
 		Duration:     time.Second,
@@ -89,18 +93,18 @@ func TestCaptureObserverRecordsLifecycle(t *testing.T) {
 	if stages == nil {
 		t.Fatalf("expected stage map")
 	}
-	if stages[stage.ID].Status != WorkflowRemoved {
+	if stages[stage.ID].Status != state.WorkflowRemoved {
 		t.Fatalf("expected stage removed status, got %v", stages[stage.ID].Status)
 	}
 
 	actions := snapshot.Actions[wf.ID]
-	key := actionKey(stage.ID, action.Name)
-	if actions[key].State != WorkflowRemoved {
+	key := fmt.Sprintf("%s::%s", stage.ID, action.Name)
+	if actions[key].State != state.WorkflowRemoved {
 		t.Fatalf("expected action removed state, got %v", actions[key].State)
 	}
 
 	progress := snapshot.Progress[wf.ID][key]
-	if progress.progress != 75 || progress.message != "almost" {
+	if progress.Progress != 75 || progress.Message != "almost" {
 		t.Fatalf("unexpected progress %+v", progress)
 	}
 	if len(snapshot.ActionEvents) == 0 {

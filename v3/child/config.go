@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/davidroman0O/gostage/v3/telemetry"
 )
 
 const (
@@ -51,6 +53,8 @@ type Config struct {
 	Pools             []PoolSpec
 	DialTimeout       time.Duration
 	HeartbeatInterval time.Duration
+	Logger            telemetry.Logger
+	Tags              []string
 }
 
 // GetenvFunc allows overriding environment lookups for testing.

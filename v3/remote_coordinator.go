@@ -2,16 +2,21 @@ package gostage
 
 import (
 	"context"
+	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"sort"
 	"strings"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
 
@@ -46,9 +51,11 @@ type remoteCoordinator struct {
 	logger      telemetry.Logger
 	clock       func() time.Time
 
-	server   *grpc.Server
-	listener net.Listener
-	address  string
+	server      *grpc.Server
+	listener    net.Listener
+	bindAddress string
+	address     string
+	tlsConfig   *tls.Config
 
 	mu    locks.Mutex
 	pools map[string]*remotePool
@@ -77,6 +84,14 @@ type remoteJob struct {
 	release  func()
 }
 
+type processSupervisor struct {
+	rc       *remoteCoordinator
+	spawner  *spawnerBinding
+	mu       locks.Mutex
+	handle   *spawner.ProcessHandle
+	restarts int
+}
+
 func newRemoteCoordinator(
 	ctx context.Context,
 	dispatcher *dispatcher,
@@ -87,6 +102,7 @@ func newRemoteCoordinator(
 	logger telemetry.Logger,
 	bindings []*poolBinding,
 	clock func() time.Time,
+	bridgeCfg RemoteBridgeConfig,
 ) (*remoteCoordinator, error) {
 	hasRemote := false
 	for _, binding := range bindings {
@@ -125,14 +141,40 @@ func newRemoteCoordinator(
 		rc.clock = clock
 	}
 
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	resolvedCfg := deriveRemoteBridgeDefaults(bridgeCfg, bindings)
+	bindAddr := resolvedCfg.BindAddress
+	if strings.TrimSpace(bindAddr) == "" {
+		bindAddr = "127.0.0.1:0"
+	}
+
+	lis, err := net.Listen("tcp", bindAddr)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("gostage: listen for remote bridge: %w", err)
 	}
 	rc.listener = lis
-	rc.address = lis.Addr().String()
-	rc.server = grpc.NewServer()
+	rc.bindAddress = lis.Addr().String()
+	rc.address = rc.bindAddress
+	if resolvedCfg.AdvertiseAddress != "" {
+		advertise := resolvedCfg.AdvertiseAddress
+		if !strings.Contains(advertise, ":") {
+			_, port, err := net.SplitHostPort(rc.bindAddress)
+			if err == nil && port != "" {
+				advertise = net.JoinHostPort(advertise, port)
+			}
+		}
+		rc.address = advertise
+	}
+
+	serverOpts, tlsCfg, err := buildBridgeServerOptions(resolvedCfg)
+	if err != nil {
+		_ = lis.Close()
+		cancel()
+		return nil, err
+	}
+	rc.tlsConfig = tlsCfg
+
+	rc.server = grpc.NewServer(serverOpts...)
 	processproto.RegisterProcessBridgeServer(rc.server, process.NewServer(rc))
 
 	rc.wg.Add(1)
@@ -196,9 +238,10 @@ func (rc *remoteCoordinator) launchSpawner(binding *poolBinding) error {
 	}
 
 	rc.spawnMu.Lock()
-	if handle, exists := rc.spawned[sp.name]; exists && handle != nil {
-		rc.spawnMu.Unlock()
-		return nil
+	sup := sp.supervisor
+	if sup == nil {
+		sup = &processSupervisor{rc: rc, spawner: sp}
+		sp.supervisor = sup
 	}
 	rc.spawnMu.Unlock()
 
@@ -238,15 +281,7 @@ func (rc *remoteCoordinator) launchSpawner(binding *poolBinding) error {
 		launch.Metadata["tags"] = strings.Join(sp.cfg.Tags, ",")
 	}
 
-	handle, err := sp.process.Launch(rc.ctx, launch)
-	if err != nil {
-		return fmt.Errorf("gostage: launch spawner %s: %w", sp.name, err)
-	}
-
-	rc.spawnMu.Lock()
-	rc.spawned[sp.name] = handle
-	rc.spawnMu.Unlock()
-	return nil
+	return sup.ensure(rc.ctx, launch)
 }
 
 func (rc *remoteCoordinator) dispatch(binding *poolBinding, claimed *state.ClaimedWorkflow, release func()) error {
@@ -292,6 +327,11 @@ func (rc *remoteCoordinator) dispatch(binding *poolBinding, claimed *state.Claim
 	if err := rc.sendLease(worker, claimed, initialStore); err != nil {
 		rc.failDispatch(jobKey, err)
 		return err
+	}
+	if rc.dispatcher != nil && rc.dispatcher.manager != nil {
+		if err := rc.dispatcher.manager.WorkflowStatus(rc.ctx, string(claimed.ID), state.WorkflowRunning); err != nil {
+			rc.dispatcher.reportError("dispatcher.remote.status", fmt.Errorf("mark workflow %s running: %w", claimed.ID, err))
+		}
 	}
 	return nil
 }
@@ -436,18 +476,36 @@ func (rc *remoteCoordinator) OnRegister(ctx context.Context, conn *process.Conne
 			unknown = append(unknown, name)
 			continue
 		}
-		pool.worker = &remoteWorker{
-			conn:     conn,
-			metadata: copyStringStringMap(conn.Info().Metadata),
-		}
-		matched = append(matched, pool)
 		if sp == nil {
 			sp = pool.binding.remote.spawner
 		}
+		matched = append(matched, pool)
 	}
 	if len(matched) == 0 {
 		rc.mu.Unlock()
 		return nil, status.Errorf(codes.InvalidArgument, "child must declare at least one known pool")
+	}
+	if sp != nil && strings.TrimSpace(sp.cfg.AuthToken) != "" {
+		provided := strings.TrimSpace(req.GetAuthToken())
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(sp.cfg.AuthToken)) != 1 {
+			rc.mu.Unlock()
+			rc.reportDiagnostic(diagnostics.Event{
+				Component: "remote.register",
+				Severity:  diagnostics.SeverityError,
+				Metadata: map[string]any{
+					"node_id":    req.GetNodeId(),
+					"child_type": req.GetChildType(),
+					"reason":     "invalid auth token",
+				},
+			})
+			return nil, status.Error(codes.PermissionDenied, "invalid auth token")
+		}
+	}
+	for _, pool := range matched {
+		pool.worker = &remoteWorker{
+			conn:     conn,
+			metadata: copyStringStringMap(conn.Info().Metadata),
+		}
 	}
 	if sp != nil {
 		for name, pool := range rc.pools {
@@ -686,6 +744,9 @@ func (rc *remoteCoordinator) shutdown() {
 	if rc.server != nil {
 		rc.server.GracefulStop()
 	}
+	if rc.listener != nil {
+		_ = rc.listener.Close()
+	}
 	rc.wg.Wait()
 
 	rc.spawnMu.Lock()
@@ -712,6 +773,135 @@ func (rc *remoteCoordinator) reportDiagnostic(evt diagnostics.Event) {
 	if rc.logger != nil && evt.Err != nil {
 		rc.logger.Error(evt.Component, "error", evt.Err)
 	}
+}
+
+func (rc *remoteCoordinator) setSpawnerHandle(sp *spawnerBinding, handle *spawner.ProcessHandle) {
+	if rc == nil || sp == nil {
+		return
+	}
+	rc.spawnMu.Lock()
+	if handle == nil {
+		delete(rc.spawned, sp.name)
+	} else {
+		rc.spawned[sp.name] = handle
+	}
+	rc.spawnMu.Unlock()
+}
+
+func (rc *remoteCoordinator) markSpawnerPools(sp *spawnerBinding, status node.HealthStatus, detail string) {
+	if rc == nil || rc.dispatcher == nil || sp == nil {
+		return
+	}
+	for name, pool := range rc.pools {
+		if pool == nil || pool.binding == nil || pool.binding.remote == nil || pool.binding.remote.spawner != sp {
+			continue
+		}
+		rc.dispatcher.publishHealth(name, status, detail)
+	}
+}
+
+func (ps *processSupervisor) ensure(ctx context.Context, launch spawner.LaunchConfig) error {
+	if ps == nil {
+		return errors.New("gostage: nil supervisor")
+	}
+	ps.mu.Lock()
+	handle := ps.handle
+	ps.mu.Unlock()
+	if handle != nil {
+		ps.rc.setSpawnerHandle(ps.spawner, handle)
+		return nil
+	}
+	return ps.start(ctx, launch, true)
+}
+
+func (ps *processSupervisor) start(ctx context.Context, launch spawner.LaunchConfig, reset bool) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if reset {
+		ps.mu.Lock()
+		ps.restarts = 0
+		ps.mu.Unlock()
+	}
+	handle, err := ps.spawner.process.Launch(ctx, launch)
+	if err != nil {
+		detail := fmt.Sprintf("launch failed: %v", err)
+		ps.rc.markSpawnerPools(ps.spawner, node.HealthUnavailable, detail)
+		ps.rc.reportDiagnostic(diagnostics.Event{
+			Component: fmt.Sprintf("remote.spawner.%s", ps.spawner.name),
+			Severity:  diagnostics.SeverityError,
+			Err:       err,
+			Metadata: map[string]any{
+				"restart": 0,
+			},
+		})
+		return fmt.Errorf("gostage: launch spawner %s: %w", ps.spawner.name, err)
+	}
+	ps.mu.Lock()
+	ps.handle = handle
+	ps.mu.Unlock()
+	ps.rc.setSpawnerHandle(ps.spawner, handle)
+	go ps.monitor(ctx, launch, handle)
+	return nil
+}
+
+func (ps *processSupervisor) monitor(ctx context.Context, launch spawner.LaunchConfig, handle *spawner.ProcessHandle) {
+	err := handle.Wait(ctx)
+	ps.mu.Lock()
+	if ps.handle == handle {
+		ps.handle = nil
+	}
+	ps.mu.Unlock()
+	ps.rc.setSpawnerHandle(ps.spawner, nil)
+
+	if ctx.Err() != nil {
+		return
+	}
+
+	ps.rc.markSpawnerPools(ps.spawner, node.HealthUnavailable, "child exited; restarting")
+
+	ps.mu.Lock()
+	ps.restarts++
+	restarts := ps.restarts
+	ps.mu.Unlock()
+
+	metadata := map[string]any{"restart": restarts}
+	if err != nil {
+		metadata["error"] = err.Error()
+	}
+
+	maxRestarts := ps.spawner.cfg.MaxRestarts
+	if maxRestarts > 0 && restarts > maxRestarts {
+		ps.rc.reportDiagnostic(diagnostics.Event{
+			Component: fmt.Sprintf("remote.spawner.%s", ps.spawner.name),
+			Severity:  diagnostics.SeverityCritical,
+			Err:       err,
+			Metadata:  metadata,
+		})
+		return
+	}
+
+	backoff := ps.spawner.cfg.RestartBackoff
+	if backoff <= 0 {
+		backoff = 100 * time.Millisecond
+	}
+
+	ps.rc.reportDiagnostic(diagnostics.Event{
+		Component: fmt.Sprintf("remote.spawner.%s", ps.spawner.name),
+		Severity:  diagnostics.SeverityWarning,
+		Err:       err,
+		Metadata:  metadata,
+	})
+
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+	}
+
+	_ = ps.start(ctx, launch, false)
 }
 
 func (rc *remoteCoordinator) poolNameForConn(conn *process.Connection) string {
@@ -767,6 +957,59 @@ func (rc *remoteCoordinator) enrichTelemetry(evt *telemetry.Event) {
 	if _, exists := evt.Metadata["pool"]; !exists {
 		evt.Metadata["pool"] = job.pool.binding.pool.Name()
 	}
+}
+
+func deriveRemoteBridgeDefaults(cfg RemoteBridgeConfig, bindings []*poolBinding) RemoteBridgeConfig {
+	copyCfg := cfg
+	if copyCfg.TLS.CertPath == "" && copyCfg.TLS.KeyPath == "" {
+		for _, binding := range bindings {
+			if binding == nil || binding.remote == nil || binding.remote.spawner == nil {
+				continue
+			}
+			spTLS := binding.remote.spawner.cfg.TLS
+			if spTLS.CertPath != "" && spTLS.KeyPath != "" {
+				copyCfg.TLS = spTLS
+				if spTLS.CAPath != "" && !copyCfg.RequireClientCert {
+					copyCfg.RequireClientCert = true
+				}
+				break
+			}
+		}
+	}
+	return copyCfg
+}
+
+func buildBridgeServerOptions(cfg RemoteBridgeConfig) ([]grpc.ServerOption, *tls.Config, error) {
+	tlsFiles := cfg.TLS
+	if tlsFiles.CertPath == "" && tlsFiles.KeyPath == "" {
+		return nil, nil, nil
+	}
+	if tlsFiles.CertPath == "" || tlsFiles.KeyPath == "" {
+		return nil, nil, fmt.Errorf("gostage: remote bridge TLS requires both cert and key")
+	}
+	cert, err := tls.LoadX509KeyPair(tlsFiles.CertPath, tlsFiles.KeyPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("gostage: load bridge certificate: %w", err)
+	}
+	serverTLS := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}
+	if tlsFiles.CAPath != "" {
+		caBytes, err := os.ReadFile(tlsFiles.CAPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("gostage: read bridge CA: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caBytes) {
+			return nil, nil, errors.New("gostage: bridge CA contains no certificates")
+		}
+		serverTLS.ClientCAs = pool
+		serverTLS.ClientAuth = tls.RequireAndVerifyClientCert
+	} else if cfg.RequireClientCert {
+		serverTLS.ClientAuth = tls.RequireAnyClientCert
+	}
+	return []grpc.ServerOption{grpc.Creds(credentials.NewTLS(serverTLS))}, serverTLS, nil
 }
 
 func (rc *remoteCoordinator) ensureWorkflowRegistered(claimed *state.ClaimedWorkflow) {
@@ -889,7 +1132,20 @@ func convertMetadata(input map[string]any) map[string]string {
 		if v == nil {
 			continue
 		}
-		out[k] = fmt.Sprint(v)
+		switch val := v.(type) {
+		case string:
+			out[k] = val
+		case fmt.Stringer:
+			out[k] = val.String()
+		case []byte:
+			out[k] = string(val)
+		default:
+			if data, err := json.Marshal(val); err == nil {
+				out[k] = string(data)
+			} else {
+				out[k] = fmt.Sprint(val)
+			}
+		}
 	}
 	return out
 }

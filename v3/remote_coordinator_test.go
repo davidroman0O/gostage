@@ -70,7 +70,7 @@ func TestRemoteCoordinatorDispatchLifecycle(t *testing.T) {
 	}
 
 	dispatcher := newDispatcher(ctx, queue, store, managerWithTelemetry, run, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{binding}, manager.Clock())
-	remoteCoord, err := newRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, telemetry.NoopLogger{}, []*poolBinding{binding}, manager.Clock())
+	remoteCoord, err := newRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, telemetry.NoopLogger{}, []*poolBinding{binding}, manager.Clock(), RemoteBridgeConfig{})
 	if err != nil {
 		t.Fatalf("remote coordinator: %v", err)
 	}

@@ -59,7 +59,7 @@ type LaunchConfig struct {
 // ProcessSpawner launches child processes using the host binary.
 type ProcessSpawner struct {
 	cfg Config
-	mu  sync.Mutex
+	mu  sync.RWMutex
 }
 
 // NewProcessSpawner constructs a spawner with the supplied config.
@@ -88,8 +88,8 @@ func (s *ProcessSpawner) SetReporter(rep Reporter) {
 
 // Reporter returns the currently configured diagnostics reporter.
 func (s *ProcessSpawner) Reporter() Reporter {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.cfg.Reporter
 }
 

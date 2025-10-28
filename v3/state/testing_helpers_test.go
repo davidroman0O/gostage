@@ -7,6 +7,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// openTestDB returns an in-memory SQLite database with migrations applied.
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:state_test?mode=memory&cache=shared")

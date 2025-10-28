@@ -3,6 +3,7 @@ package gostage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -25,11 +26,17 @@ import (
 // Public state aliases so callers don't reach into v3/state.
 type (
 	WorkflowID                = state.WorkflowID
+	WorkflowRecord            = state.WorkflowRecord
 	StateReader               = state.StateReader
 	StateFilter               = state.StateFilter
 	WorkflowSummary           = state.WorkflowSummary
 	ActionHistoryRecord       = state.ActionHistoryRecord
 	WorkflowState             = state.WorkflowState
+	StageRecord               = state.StageRecord
+	ActionRecord              = state.ActionRecord
+	ResultSummary             = state.ResultSummary
+	StateObserver             = state.ManagerObserver
+	StateObserverFuncs        = state.ObserverFuncs
 	TelemetryDispatcherConfig = node.TelemetryDispatcherConfig
 	TelemetryStats            = node.TelemetryStats
 	OverflowStrategy          = node.OverflowStrategy
@@ -241,6 +248,23 @@ type TLSFiles struct {
 	CAPath   string
 }
 
+// RemoteBridgeConfig controls the parent-side gRPC bridge used by remote children.
+type RemoteBridgeConfig struct {
+	// BindAddress is the host:port the parent listens on. Empty defaults to
+	// "127.0.0.1:0". If omitted port information, an ephemeral port is chosen.
+	BindAddress string
+	// AdvertiseAddress overrides the address shared with spawned children. When
+	// empty the listener address is advertised. If it omits the port component,
+	// the listener's port is appended automatically.
+	AdvertiseAddress string
+	// TLS supplies optional server credentials. When provided we enable TLS; if
+	// CAPath is set (or RequireClientCert is true) mutual TLS is enforced.
+	TLS TLSFiles
+	// RequireClientCert forces the bridge to request client certificates even
+	// when no CAPath is supplied.
+	RequireClientCert bool
+}
+
 // SpawnerConfig configures remote capacity provisioning.
 type SpawnerConfig struct {
 	Name                 string
@@ -342,24 +366,20 @@ func Run(ctx context.Context, opts ...Option) (*Node, <-chan DiagnosticEvent, er
 			}
 			sqliteOwned = true
 		}
-		if _, err := sqliteDB.Exec("PRAGMA foreign_keys=ON"); err != nil {
-			if sqliteOwned {
+		if sqliteOwned {
+			if _, err := sqliteDB.Exec("PRAGMA foreign_keys=ON"); err != nil {
 				_ = sqliteDB.Close()
+				return nil, nil, fmt.Errorf("gostage: enable foreign keys: %w", err)
 			}
-			return nil, nil, fmt.Errorf("gostage: enable foreign keys: %w", err)
-		}
-		if _, err := sqliteDB.Exec(fmt.Sprintf("PRAGMA busy_timeout=%d", busyTimeoutMS)); err != nil {
-			if sqliteOwned {
+			if _, err := sqliteDB.Exec(fmt.Sprintf("PRAGMA busy_timeout=%d", busyTimeoutMS)); err != nil {
 				_ = sqliteDB.Close()
+				return nil, nil, fmt.Errorf("gostage: set busy timeout: %w", err)
 			}
-			return nil, nil, fmt.Errorf("gostage: set busy timeout: %w", err)
-		}
-		if enableWAL {
-			if _, err := sqliteDB.Exec("PRAGMA journal_mode=WAL"); err != nil {
-				if sqliteOwned {
+			if enableWAL {
+				if _, err := sqliteDB.Exec("PRAGMA journal_mode=WAL"); err != nil {
 					_ = sqliteDB.Close()
+					return nil, nil, fmt.Errorf("gostage: enable WAL: %w", err)
 				}
-				return nil, nil, fmt.Errorf("gostage: enable WAL: %w", err)
 			}
 		}
 		if sqliteCfg.ApplyMigrations {
@@ -461,7 +481,7 @@ func Run(ctx context.Context, opts ...Option) (*Node, <-chan DiagnosticEvent, er
 	}
 
 	dispatcher := newDispatcher(ctx, queue, store, managerWithTelemetry, r, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, logger, cfg.dispatcher.ClaimInterval, cfg.dispatcher.Jitter, cfg.dispatcher.MaxInFlight, cfg.failurePolicy, poolBindings, clock)
-	remoteCoord, err := newRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, logger, poolBindings, clock)
+	remoteCoord, err := newRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, logger, poolBindings, clock, cfg.remoteBridge)
 	if err != nil {
 		if sqliteOwned {
 			_ = sqliteDB.Close()
@@ -687,6 +707,21 @@ func (opts childOptions) clone() childOptions {
 	if len(opts.metadata) > 0 {
 		clone.metadata = copyStringStringMap(opts.metadata)
 	}
+	if opts.tls != nil {
+		clone.tls = &TLSFiles{
+			CertPath: opts.tls.CertPath,
+			KeyPath:  opts.tls.KeyPath,
+			CAPath:   opts.tls.CAPath,
+		}
+	}
+	if opts.authToken != nil {
+		tokenCopy := *opts.authToken
+		clone.authToken = &tokenCopy
+	}
+	clone.logger = opts.logger
+	if len(opts.tags) > 0 {
+		clone.tags = append([]string(nil), opts.tags...)
+	}
 	return clone
 }
 
@@ -721,6 +756,24 @@ func mergeChildConfig(base child.Config, reg *childHandlerRegistration) child.Co
 		}
 		cfg.Metadata = merged
 	}
+	if reg.options.tls != nil {
+		cfg.TLS = child.TLSConfig{
+			CertPath: reg.options.tls.CertPath,
+			KeyPath:  reg.options.tls.KeyPath,
+			CAPath:   reg.options.tls.CAPath,
+		}
+	}
+	if reg.options.authToken != nil {
+		cfg.AuthToken = *reg.options.authToken
+	}
+	if reg.options.logger != nil && cfg.Logger == nil {
+		cfg.Logger = reg.options.logger
+	}
+	if len(reg.options.tags) > 0 {
+		existing := append([]string(nil), cfg.Tags...)
+		existing = appendUniqueStrings(existing, reg.options.tags...)
+		cfg.Tags = existing
+	}
 	return cfg
 }
 
@@ -754,7 +807,20 @@ func poolMetadataToStrings(values map[string]any) map[string]string {
 		if v == nil {
 			continue
 		}
-		out[k] = fmt.Sprint(v)
+		switch val := v.(type) {
+		case string:
+			out[k] = val
+		case fmt.Stringer:
+			out[k] = val.String()
+		case json.RawMessage:
+			out[k] = string(val)
+		default:
+			encoded, err := json.Marshal(v)
+			if err != nil {
+				panic(fmt.Sprintf("gostage: pool metadata key %q cannot be encoded: %v", k, err))
+			}
+			out[k] = string(encoded)
+		}
 	}
 	if len(out) == 0 {
 		return nil

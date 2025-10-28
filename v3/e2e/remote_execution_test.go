@@ -26,6 +26,7 @@ import (
 	"github.com/davidroman0O/gostage/v3/store"
 	"github.com/davidroman0O/gostage/v3/telemetry"
 	"github.com/davidroman0O/gostage/v3/workflow"
+	_ "modernc.org/sqlite"
 )
 
 const (
@@ -209,6 +210,7 @@ func filterChildArgs(args []string) []string {
 func runChildHarness(cfg child.Config) error {
 	recordChildInfo(cfg)
 	registerRemoteActions()
+	registerLifecycleActions()
 	node := child.NewNode(cfg)
 	diag := node.Diagnostics()
 	go func() {
@@ -753,6 +755,7 @@ func TestRemoteExecutionFailureAndMutations(t *testing.T) {
 	t.Cleanup(func() { _ = node.Close() })
 
 	waitForRemoteHealthy(t, healthBuf)
+	t.Logf("diag events after health: %d", len(diag.Events()))
 
 	waitEventForRun := func(kind telemetry.EventKind, workflowID gostage.WorkflowID) telemetry.Event {
 		t.Helper()
@@ -1030,8 +1033,12 @@ func TestRemoteExecutionCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
+	if node.State == nil {
+		t.Fatalf("expected state reader on node")
+	}
 
 	_ = telemetryBuf.Next(t, telemetry.EventWorkflowStarted, 10*time.Second)
+	testkit.WaitForWorkflowInState(t, node.State, state.WorkflowID(runID), state.WorkflowRunning)
 
 	cancelCtx, cancelCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelCancel()

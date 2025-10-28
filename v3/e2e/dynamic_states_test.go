@@ -1,21 +1,22 @@
 package e2e
 
 import (
-	"context"
-	"database/sql"
-	"fmt"
-	"path/filepath"
-	"testing"
-	"time"
+    "context"
+    "database/sql"
+    "fmt"
+    "path/filepath"
+    "testing"
+    "time"
 
-	"github.com/davidroman0O/gostage/v3"
-	"github.com/davidroman0O/gostage/v3/diagnostics"
-	"github.com/davidroman0O/gostage/v3/e2e/testkit"
-	rt "github.com/davidroman0O/gostage/v3/runtime"
-	"github.com/davidroman0O/gostage/v3/state"
-	storepkg "github.com/davidroman0O/gostage/v3/store"
-	"github.com/davidroman0O/gostage/v3/telemetry"
-	"github.com/davidroman0O/gostage/v3/workflow"
+    "github.com/davidroman0O/gostage/v3"
+    "github.com/davidroman0O/gostage/v3/diagnostics"
+    "github.com/davidroman0O/gostage/v3/e2e/testkit"
+    rt "github.com/davidroman0O/gostage/v3/runtime"
+    "github.com/davidroman0O/gostage/v3/state"
+    storepkg "github.com/davidroman0O/gostage/v3/store"
+    "github.com/davidroman0O/gostage/v3/telemetry"
+    "github.com/davidroman0O/gostage/v3/workflow"
+    _ "modernc.org/sqlite"
 )
 
 var dynamicWorkflowDefinition = workflow.Definition{

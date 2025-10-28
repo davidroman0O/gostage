@@ -16,6 +16,7 @@ import (
 	"github.com/davidroman0O/gostage/v3/store"
 	"github.com/davidroman0O/gostage/v3/telemetry"
 	"github.com/davidroman0O/gostage/v3/workflow"
+	_ "modernc.org/sqlite"
 )
 
 func TestSQLitePersistenceEndToEnd(t *testing.T) {

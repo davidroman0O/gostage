@@ -67,6 +67,44 @@ func buildRemoteCoordinatorForTest(t *testing.T, ctx context.Context, diag node.
 	return rc, health
 }
 
+func TestRemoteCoordinatorPoolMetadataEncoding(t *testing.T) {
+	ctx := context.Background()
+	diag := &diagCollector{}
+
+	spBinding := &spawnerBinding{name: "remote-spawner", cfg: SpawnerConfig{Name: "remote-spawner"}}
+	binding := &poolBinding{
+		pool: pools.NewLocal("remote", state.Selector{}, 1),
+		remote: &remoteBinding{
+			spawner: spBinding,
+			poolCfg: PoolConfig{
+				Name:  "remote",
+				Slots: 1,
+				Metadata: map[string]any{
+					"limits":  map[string]any{"cpu": 2},
+					"weights": []string{"a", "b"},
+					"enabled": true,
+				},
+			},
+		},
+	}
+
+	rc, _ := buildRemoteCoordinatorForTest(t, ctx, diag, []*poolBinding{binding})
+	specs := rc.poolSpecsForSpawner(spBinding)
+	if len(specs) != 1 {
+		t.Fatalf("expected 1 pool spec, got %d", len(specs))
+	}
+	meta := specs[0].Metadata
+	if meta["limits"] != `{"cpu":2}` {
+		t.Fatalf("expected JSON encoded limits metadata, got %q", meta["limits"])
+	}
+	if meta["weights"] != `["a","b"]` {
+		t.Fatalf("expected JSON encoded weights metadata, got %q", meta["weights"])
+	}
+	if meta["enabled"] != "true" {
+		t.Fatalf("expected boolean metadata encoded as true, got %q", meta["enabled"])
+	}
+}
+
 func waitHealthEvents(t *testing.T, ch <-chan node.HealthEvent, want int) []node.HealthEvent {
 	t.Helper()
 	events := make([]node.HealthEvent, 0, want)

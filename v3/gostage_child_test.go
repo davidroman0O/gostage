@@ -48,6 +48,7 @@ func TestRunChildModeExecutesHandler(t *testing.T) {
 }
 
 func TestMergeChildConfigUsesOptions(t *testing.T) {
+	logger := &stubLogger{}
 	reg := &childHandlerRegistration{
 		options: childOptions{
 			pools: []PoolConfig{{
@@ -60,6 +61,14 @@ func TestMergeChildConfigUsesOptions(t *testing.T) {
 				"region":  "us",
 				"cluster": "blue",
 			},
+			tls: &TLSFiles{
+				CertPath: "/tmp/cert.pem",
+				KeyPath:  "/tmp/key.pem",
+				CAPath:   "/tmp/ca.pem",
+			},
+			authToken: ptrToString("override-token"),
+			logger:    logger,
+			tags:      []string{"remote", "child"},
 		},
 	}
 
@@ -76,10 +85,30 @@ func TestMergeChildConfigUsesOptions(t *testing.T) {
 	if cfg.Metadata["region"] != "us" {
 		t.Fatalf("expected metadata applied, got %v", cfg.Metadata)
 	}
+	if cfg.AuthToken != "override-token" {
+		t.Fatalf("expected auth token override, got %q", cfg.AuthToken)
+	}
+	if cfg.TLS.CertPath != "/tmp/cert.pem" || cfg.TLS.KeyPath != "/tmp/key.pem" || cfg.TLS.CAPath != "/tmp/ca.pem" {
+		t.Fatalf("unexpected TLS override: %+v", cfg.TLS)
+	}
+	if cfg.Logger != logger {
+		t.Fatalf("expected logger override")
+	}
+	if len(cfg.Tags) != 2 {
+		t.Fatalf("expected tags override, got %+v", cfg.Tags)
+	}
 
 	base := child.Config{
-		Pools:    []child.PoolSpec{{Name: "existing"}},
-		Metadata: map[string]string{"region": "override"},
+		Pools:     []child.PoolSpec{{Name: "existing"}},
+		Metadata:  map[string]string{"region": "override"},
+		AuthToken: "base-token",
+		TLS: child.TLSConfig{
+			CertPath: "base-cert",
+			KeyPath:  "base-key",
+			CAPath:   "base-ca",
+		},
+		Logger: &stubLogger{},
+		Tags:   []string{"existing"},
 	}
 	merged := mergeChildConfig(base, reg)
 	if len(merged.Pools) != 1 || merged.Pools[0].Name != "existing" {
@@ -91,4 +120,27 @@ func TestMergeChildConfigUsesOptions(t *testing.T) {
 	if merged.Metadata["cluster"] != "blue" {
 		t.Fatalf("expected handler metadata to augment, got %v", merged.Metadata)
 	}
+	if merged.AuthToken != "override-token" {
+		t.Fatalf("expected auth token override, got %q", merged.AuthToken)
+	}
+	if merged.TLS.CertPath != "/tmp/cert.pem" || merged.TLS.KeyPath != "/tmp/key.pem" || merged.TLS.CAPath != "/tmp/ca.pem" {
+		t.Fatalf("expected TLS override, got %+v", merged.TLS)
+	}
+	if merged.Logger != base.Logger {
+		t.Fatalf("expected existing logger to remain")
+	}
+	if len(merged.Tags) != 3 {
+		t.Fatalf("expected tags merged, got %+v", merged.Tags)
+	}
 }
+
+func ptrToString(s string) *string {
+	return &s
+}
+
+type stubLogger struct{}
+
+func (stubLogger) Debug(string, ...interface{}) {}
+func (stubLogger) Info(string, ...interface{})  {}
+func (stubLogger) Warn(string, ...interface{})  {}
+func (stubLogger) Error(string, ...interface{}) {}

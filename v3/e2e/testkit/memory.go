@@ -3,6 +3,7 @@ package testkit
 import (
 	"github.com/davidroman0O/gostage/v3"
 	"github.com/davidroman0O/gostage/v3/state"
+	statetest "github.com/davidroman0O/gostage/v3/state/testkit"
 )
 
 // MemoryBackends bundles in-memory store, queue, and capture observer so tests
@@ -10,7 +11,7 @@ import (
 type MemoryBackends struct {
 	Store    state.Store
 	Queue    state.Queue
-	Observer *state.CaptureObserver
+	Observer *statetest.CaptureObserver
 }
 
 // NewMemoryBackends returns a fresh set of in-memory components.
@@ -18,7 +19,7 @@ func NewMemoryBackends() MemoryBackends {
 	return MemoryBackends{
 		Store:    state.NewMemoryStore(),
 		Queue:    state.NewMemoryQueue(),
-		Observer: state.NewCaptureObserver(),
+		Observer: statetest.NewCaptureObserver(),
 	}
 }
 

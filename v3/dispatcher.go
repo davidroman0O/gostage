@@ -80,6 +80,7 @@ type spawnerBinding struct {
 	name    string
 	cfg     SpawnerConfig
 	process *spawner.ProcessSpawner
+	supervisor *processSupervisor
 }
 
 func newDispatcher(ctx context.Context, queue state.Queue, store state.Store, manager state.Manager, runner *runner.Runner, telemetryDisp *node.TelemetryDispatcher, diag node.DiagnosticsWriter, health *node.HealthDispatcher, logger telemetry.Logger, claimInterval, jitter time.Duration, maxInFlight int, failure FailurePolicy, poolBindings []*poolBinding, clock func() time.Time) *dispatcher {

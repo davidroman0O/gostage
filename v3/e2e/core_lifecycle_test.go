@@ -1,11 +1,12 @@
 package e2e
 
 import (
-	"context"
-	"errors"
-	"sync/atomic"
-	"testing"
-	"time"
+    "context"
+    "errors"
+    "fmt"
+    "sync/atomic"
+    "testing"
+    "time"
 
 	"github.com/davidroman0O/gostage/v3"
 	"github.com/davidroman0O/gostage/v3/e2e/testkit"
@@ -187,15 +188,31 @@ func TestCoreLifecycleNodeAPI(t *testing.T) {
 func TestCoreLifecycleStatsCountersWithRetry(t *testing.T) {
 	testkit.ResetRegistry(t)
 
-	var runs atomic.Int32
-	gostage.MustRegisterAction("test.retry", func() gostage.ActionFunc {
-		return func(ctx rt.Context) error {
-			if runs.Add(1) == 1 {
-				return errors.New("transient failure")
-			}
-			return nil
-		}
-	})
+var runs atomic.Int32
+gostage.MustRegisterAction("test.retry", func() gostage.ActionFunc {
+    return func(ctx rt.Context) error {
+        wfStore := ctx.Workflow().Store()
+        if wfStore.IsZero() {
+            wfStore = ctx.Store()
+        }
+        if _, err := store.Get[string](wfStore, "info"); err != nil {
+            return fmt.Errorf("missing initial info: %w", err)
+        }
+        count, err := store.Get[int](wfStore, "count")
+        if err != nil {
+            count = 0
+        }
+        count++
+        if err := store.Put(wfStore, "count", count); err != nil {
+            return err
+        }
+        attempt := runs.Add(1)
+        if attempt == 1 {
+            return errors.New("transient failure")
+        }
+        return nil
+    }
+})
 
 	def := workflow.Definition{
 		Name: "Retryable",
@@ -226,7 +243,7 @@ func TestCoreLifecycleStatsCountersWithRetry(t *testing.T) {
 		}
 	}()
 
-	runID, err := node.Submit(ctx, gostage.WorkflowRef(workflowID))
+runID, err := node.Submit(ctx, gostage.WorkflowRef(workflowID), gostage.WithInitialStore(map[string]any{"info": "seed"}))
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -237,15 +254,35 @@ func TestCoreLifecycleStatsCountersWithRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wait: %v", err)
 	}
-	if !result.Success {
-		t.Fatalf("expected success after retry, got %+v", result)
-	}
-	if result.Attempt != 2 {
-		t.Fatalf("expected attempt=2, got %d", result.Attempt)
-	}
-	if result.Reason != gostage.TerminationReasonSuccess {
-		t.Fatalf("expected success reason, got %s", result.Reason)
-	}
+if !result.Success {
+    t.Fatalf("expected success after retry, got %+v", result)
+}
+if result.Attempt != 2 {
+    t.Fatalf("expected attempt=2, got %d", result.Attempt)
+}
+if result.Reason != gostage.TerminationReasonSuccess {
+    t.Fatalf("expected success reason, got %s", result.Reason)
+}
+if seed, ok := result.Output["info"].(string); !ok || seed != "seed" {
+    t.Fatalf("expected seed retained in final store, got %+v", result.Output["info"])
+}
+coerceInt := func(val any) (int, bool) {
+    switch v := val.(type) {
+    case int:
+        return v, true
+    case int32:
+        return int(v), true
+    case int64:
+        return int(v), true
+    case float64:
+        return int(v), true
+    default:
+        return 0, false
+    }
+}
+if count, ok := coerceInt(result.Output["count"]); !ok || count != 2 {
+    t.Fatalf("expected count=2 in final store, got %+v", result.Output["count"])
+}
 
 	snapshot, err := node.Stats()
 	if err != nil {
@@ -317,5 +354,102 @@ func TestCoreLifecycleStatsCountersFailure(t *testing.T) {
 	}
 	if snapshot.Completed != 0 || snapshot.Failed != 1 || snapshot.Cancelled != 0 {
 		t.Fatalf("unexpected counters %+v", snapshot)
+	}
+}
+
+func TestStateFacadeListsRunningWorkflow(t *testing.T) {
+	testkit.ResetRegistry(t)
+
+	blocker := make(chan struct{})
+	gostage.MustRegisterAction("state.running.block", func() gostage.ActionFunc {
+		return func(ctx rt.Context) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-blocker:
+				return nil
+			}
+		}
+	})
+
+	def := workflow.Definition{
+		Name: "RunningState",
+		Stages: []workflow.Stage{{
+			Name:    "blocking-stage",
+			Actions: []workflow.Action{{Ref: "state.running.block"}},
+		}},
+	}
+	workflowID, _ := gostage.MustRegisterWorkflow(def)
+
+	backends := testkit.NewMemoryBackends()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	node, diagCh, err := gostage.Run(ctx, testkit.MemoryOptions(backends)...)
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	diag := testkit.StartDiagnosticsCollector(t, diagCh)
+	t.Cleanup(func() {
+		if t.Failed() {
+			for _, evt := range diag.Events() {
+				t.Logf("diagnostic: component=%s severity=%s err=%v metadata=%v", evt.Component, evt.Severity, evt.Err, evt.Metadata)
+			}
+		}
+		diag.Close()
+	})
+	t.Cleanup(func() { _ = node.Close() })
+
+	if node.State == nil {
+		t.Fatalf("expected state reader on node")
+	}
+
+	runID, err := node.Submit(ctx, gostage.WorkflowRef(workflowID))
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	claimDeadline := time.Now().Add(5 * time.Second)
+	for {
+		stats, err := node.Stats()
+		if err != nil {
+			t.Fatalf("stats while waiting for claim: %v", err)
+		}
+		if stats.InFlight > 0 {
+			break
+		}
+		if time.Now().After(claimDeadline) {
+			t.Fatalf("workflow not claimed in time")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	summary := testkit.WaitForWorkflowInState(t, node.State, state.WorkflowID(runID), state.WorkflowRunning)
+	if summary.ID != state.WorkflowID(runID) {
+		t.Fatalf("unexpected workflow id listed: got %s want %s", summary.ID, runID)
+	}
+
+	close(blocker)
+
+	waitCtx, cancelWait := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelWait()
+	result, err := node.Wait(waitCtx, runID)
+	if err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("workflow failed: %+v", result)
+	}
+
+	checkCtx, cancelCheck := context.WithTimeout(ctx, time.Second)
+	runningList, err := node.State.ListWorkflows(checkCtx, state.StateFilter{States: []state.WorkflowState{state.WorkflowRunning}})
+	cancelCheck()
+	if err != nil {
+		t.Fatalf("list running workflows after completion: %v", err)
+	}
+	for _, entry := range runningList {
+		if entry.ID == state.WorkflowID(runID) {
+			t.Fatalf("workflow %s remained in running list after completion", runID)
+		}
 	}
 }

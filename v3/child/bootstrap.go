@@ -28,6 +28,7 @@ import (
 	processproto "github.com/davidroman0O/gostage/v3/process/proto"
 	"github.com/davidroman0O/gostage/v3/registry"
 	"github.com/davidroman0O/gostage/v3/runner"
+	rt "github.com/davidroman0O/gostage/v3/runtime"
 	"github.com/davidroman0O/gostage/v3/runtime/local"
 	"github.com/davidroman0O/gostage/v3/state"
 	"github.com/davidroman0O/gostage/v3/telemetry"
@@ -62,15 +63,29 @@ type Node struct {
 	cancel context.CancelFunc
 	nodeID string
 
-	runner   *runner.Runner
-	activeMu locks.Mutex
-	active   map[string]context.CancelFunc
-	pending  map[string]struct{}
+	defaultLogger telemetry.Logger
+	runner        *runner.Runner
+	activeMu      locks.Mutex
+	active        map[string]context.CancelFunc
+	pending       map[string]struct{}
 }
 
 type childLogger struct {
 	node *Node
 	name string
+}
+
+type childLoggerAdapter struct {
+	Logger telemetry.Logger
+}
+
+func (a childLoggerAdapter) Debug(format string, args ...interface{}) {
+	a.Logger.Debug(format, args...)
+}
+func (a childLoggerAdapter) Info(format string, args ...interface{}) { a.Logger.Info(format, args...) }
+func (a childLoggerAdapter) Warn(format string, args ...interface{}) { a.Logger.Warn(format, args...) }
+func (a childLoggerAdapter) Error(format string, args ...interface{}) {
+	a.Logger.Error(format, args...)
 }
 
 func (l childLogger) Debug(format string, args ...interface{}) { l.log("debug", format, args...) }
@@ -114,6 +129,9 @@ func NewNode(cfg Config) *Node {
 		nodeID:            uuid.NewString(),
 		active:            make(map[string]context.CancelFunc),
 		pending:           make(map[string]struct{}),
+	}
+	if cfg.Logger != nil {
+		n.defaultLogger = cfg.Logger
 	}
 	n.diagW = &diagWriter{node: n}
 	n.telemetry = node.NewTelemetryDispatcher(context.Background(), n.diagW, node.TelemetryDispatcherConfig{})
@@ -303,11 +321,19 @@ func (n *Node) connect(ctx context.Context) error {
 		return fmt.Errorf("child: open control stream: %w", err)
 	}
 
+	metadata := copyStringMap(n.cfg.Metadata)
+	if len(n.cfg.Tags) > 0 {
+		if metadata == nil {
+			metadata = make(map[string]string, 1)
+		}
+		metadata["tags"] = strings.Join(n.cfg.Tags, ",")
+	}
+
 	register := &processproto.RegisterNode{
 		NodeId:    n.nodeID,
 		ChildType: n.cfg.ChildType,
 		AuthToken: n.cfg.AuthToken,
-		Metadata:  n.cfg.Metadata,
+		Metadata:  metadata,
 		Pools:     make([]*processproto.ChildPool, 0, len(n.cfg.Pools)),
 		Runtime: &processproto.RuntimeInfo{
 			Version:   runtime.Version(),
@@ -365,6 +391,7 @@ func (n *Node) connect(ctx context.Context) error {
 		Metadata: map[string]any{
 			"address":    n.cfg.Address,
 			"child_type": n.cfg.ChildType,
+			"tags":       append([]string(nil), n.cfg.Tags...),
 		},
 	})
 
@@ -400,7 +427,11 @@ func (n *Node) ensureRuntime() error {
 		return nil
 	}
 	br := newChildBroker()
-	n.runner = runner.New(local.Factory{}, registry.Default(), br, runner.WithDefaultLogger(childLogger{node: n, name: "runtime"}))
+	var logger rt.Logger = childLogger{node: n, name: "runtime"}
+	if n.defaultLogger != nil {
+		logger = childLoggerAdapter{Logger: n.defaultLogger}
+	}
+	n.runner = runner.New(local.Factory{}, registry.Default(), br, runner.WithDefaultLogger(logger))
 	return nil
 }
 
