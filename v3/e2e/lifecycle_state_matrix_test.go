@@ -82,7 +82,8 @@ func TestLifecycleStatesLocal(t *testing.T) {
 					{stageSuccessID, actionSuccessID}: state.WorkflowCompleted,
 				},
 				workflowEvents: []telemetry.EventKind{
-					telemetry.EventWorkflowCompleted,
+					telemetry.EventWorkflowExecution,
+					telemetry.EventWorkflowSummary,
 				},
 			},
 		},
@@ -92,7 +93,7 @@ func TestLifecycleStatesLocal(t *testing.T) {
 			submit:   []gostage.SubmitOption{gostage.WithTags("lifecycle")},
 			exp: lifecycleExpectation{
 				workflowState: state.WorkflowFailed,
-				reason:        "",
+				reason:        state.TerminationReasonFailure,
 				stageStates: map[string]state.WorkflowState{
 					stageFailureID: state.WorkflowFailed,
 				},
@@ -100,7 +101,8 @@ func TestLifecycleStatesLocal(t *testing.T) {
 					{stageFailureID, actionFailureID}: state.WorkflowFailed,
 				},
 				workflowEvents: []telemetry.EventKind{
-					telemetry.EventWorkflowFailed,
+					telemetry.EventWorkflowExecution,
+					telemetry.EventWorkflowSummary,
 				},
 			},
 		},
@@ -119,7 +121,17 @@ func TestLifecycleStatesLocal(t *testing.T) {
 					{stageCancelID, actionCancelID}: state.WorkflowCancelled,
 				},
 				workflowEvents: []telemetry.EventKind{
-					telemetry.EventWorkflowCancelled,
+					telemetry.EventWorkflowExecution,
+					telemetry.EventWorkflowSummary,
+				},
+			},
+			running: &runningExpectation{
+				workflowState: state.WorkflowRunning,
+				stageStates: map[string]state.WorkflowState{
+					stageCancelID: state.WorkflowRunning,
+				},
+				actionStates: map[actionKey]state.WorkflowState{
+					{stageCancelID, actionCancelID}: state.WorkflowRunning,
 				},
 			},
 		},
@@ -146,7 +158,8 @@ func TestLifecycleStatesLocal(t *testing.T) {
 					{stageRemovedID, actionRemovedID}: state.WorkflowPending,
 				},
 				workflowEvents: []telemetry.EventKind{
-					telemetry.EventWorkflowCompleted,
+					telemetry.EventWorkflowExecution,
+					telemetry.EventWorkflowSummary,
 				},
 			},
 		},
@@ -321,6 +334,13 @@ type lifecycleScenario struct {
 	cancel   bool
 	submit   []gostage.SubmitOption
 	exp      lifecycleExpectation
+	running  *runningExpectation
+}
+
+type runningExpectation struct {
+	workflowState state.WorkflowState
+	stageStates   map[string]state.WorkflowState
+	actionStates  map[actionKey]state.WorkflowState
 }
 
 func executeLifecycleScenario(t *testing.T, ctx context.Context, node *gostage.Node, buf *testkit.TelemetryBuffer, observer *statetest.CaptureObserver, scenario lifecycleScenario) (gostage.WorkflowID, state.WorkflowSummary, []telemetry.Event) {
@@ -332,8 +352,17 @@ func executeLifecycleScenario(t *testing.T, ctx context.Context, node *gostage.N
 		t.Fatalf("submit %s: %v", scenario.name, err)
 	}
 
-	if scenario.cancel {
+	runningChecked := false
+	if scenario.running != nil {
 		testkit.WaitForWorkflowInState(t, node.State, state.WorkflowID(runID), state.WorkflowRunning)
+		assertRunningState(t, ctx, node, runID, scenario.running)
+		runningChecked = true
+	}
+
+	if scenario.cancel {
+		if !runningChecked {
+			testkit.WaitForWorkflowInState(t, node.State, state.WorkflowID(runID), state.WorkflowRunning)
+		}
 		cancelCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 		if err := node.Cancel(cancelCtx, runID); err != nil {
@@ -391,6 +420,50 @@ func executeLifecycleScenario(t *testing.T, ctx context.Context, node *gostage.N
 	}
 	events = append(events, buf.Collect(t, 200*time.Millisecond)...)
 	return runID, summary, events
+}
+
+func assertRunningState(t *testing.T, ctx context.Context, node *gostage.Node, id gostage.WorkflowID, exp *runningExpectation) {
+	t.Helper()
+	if exp == nil {
+		return
+	}
+	if node.State == nil {
+		t.Fatalf("state facade not configured")
+	}
+	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	summary, err := node.State.WorkflowSummary(readCtx, state.WorkflowID(id))
+	if err != nil {
+		t.Fatalf("workflow summary: %v", err)
+	}
+	if exp.workflowState != "" && summary.State != exp.workflowState {
+		t.Fatalf("running workflow state mismatch: got %s want %s", summary.State, exp.workflowState)
+	}
+	for stageID, expected := range exp.stageStates {
+		stage, ok := summary.Stages[stageID]
+		if !ok {
+			t.Fatalf("missing stage %s in running summary", stageID)
+		}
+		if stage.Status != expected {
+			t.Fatalf("stage %s running status mismatch: got %s want %s", stageID, stage.Status, expected)
+		}
+	}
+	for key, expected := range exp.actionStates {
+		stage, ok := summary.Stages[key.stage]
+		if !ok {
+			t.Fatalf("missing stage %s for action %s in running summary", key.stage, key.action)
+		}
+		if stage.Actions == nil {
+			t.Fatalf("missing actions for stage %s while running", key.stage)
+		}
+		act, ok := stage.Actions[key.action]
+		if !ok {
+			t.Fatalf("missing action %s::%s in running summary", key.stage, key.action)
+		}
+		if act.Status != expected {
+			t.Fatalf("action %s::%s running status mismatch: got %s want %s", key.stage, key.action, act.Status, expected)
+		}
+	}
 }
 
 func assertLifecycleExpectations(t *testing.T, runID gostage.WorkflowID, summary state.WorkflowSummary, events []telemetry.Event, exp lifecycleExpectation) {

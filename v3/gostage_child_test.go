@@ -98,6 +98,7 @@ func TestMergeChildConfigUsesOptions(t *testing.T) {
 		t.Fatalf("expected tags override, got %+v", cfg.Tags)
 	}
 
+	baseLogger := &stubLogger{}
 	base := child.Config{
 		Pools:     []child.PoolSpec{{Name: "existing"}},
 		Metadata:  map[string]string{"region": "override"},
@@ -107,15 +108,15 @@ func TestMergeChildConfigUsesOptions(t *testing.T) {
 			KeyPath:  "base-key",
 			CAPath:   "base-ca",
 		},
-		Logger: &stubLogger{},
+		Logger: baseLogger,
 		Tags:   []string{"existing"},
 	}
 	merged := mergeChildConfig(base, reg)
 	if len(merged.Pools) != 1 || merged.Pools[0].Name != "existing" {
 		t.Fatalf("expected existing pools to remain, got %+v", merged.Pools)
 	}
-	if merged.Metadata["region"] != "override" {
-		t.Fatalf("expected existing metadata to remain, got %v", merged.Metadata)
+	if merged.Metadata["region"] != "us" {
+		t.Fatalf("expected child metadata override, got %v", merged.Metadata)
 	}
 	if merged.Metadata["cluster"] != "blue" {
 		t.Fatalf("expected handler metadata to augment, got %v", merged.Metadata)
@@ -132,15 +133,44 @@ func TestMergeChildConfigUsesOptions(t *testing.T) {
 	if len(merged.Tags) != 3 {
 		t.Fatalf("expected tags merged, got %+v", merged.Tags)
 	}
+	if len(baseLogger.warns) != 1 {
+		t.Fatalf("expected override warning, got %+v", baseLogger.warns)
+	}
+	if baseLogger.warns[0].msg != "child metadata override" {
+		t.Fatalf("unexpected warning message: %+v", baseLogger.warns[0])
+	}
+	if !containsKV(baseLogger.warns[0].kv, "key", "region") || !containsKV(baseLogger.warns[0].kv, "new", "us") {
+		t.Fatalf("warning missing key/new: %+v", baseLogger.warns[0].kv)
+	}
 }
 
 func ptrToString(s string) *string {
 	return &s
 }
 
-type stubLogger struct{}
+type logEntry struct {
+	msg string
+	kv  []any
+}
 
-func (stubLogger) Debug(string, ...interface{}) {}
-func (stubLogger) Info(string, ...interface{})  {}
-func (stubLogger) Warn(string, ...interface{})  {}
-func (stubLogger) Error(string, ...interface{}) {}
+type stubLogger struct {
+	warns []logEntry
+}
+
+func (s *stubLogger) Debug(string, ...interface{}) {}
+func (s *stubLogger) Info(string, ...interface{})  {}
+func (s *stubLogger) Warn(msg string, kv ...interface{}) {
+	s.warns = append(s.warns, logEntry{msg: msg, kv: append([]any(nil), kv...)})
+}
+func (s *stubLogger) Error(string, ...interface{}) {}
+
+func containsKV(kv []any, key string, expect any) bool {
+	for i := 0; i < len(kv)-1; i += 2 {
+		if k, ok := kv[i].(string); ok && k == key {
+			if kv[i+1] == expect {
+				return true
+			}
+		}
+	}
+	return false
+}

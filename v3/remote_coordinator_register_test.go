@@ -103,6 +103,31 @@ func TestRemoteCoordinatorPoolMetadataEncoding(t *testing.T) {
 	if meta["enabled"] != "true" {
 		t.Fatalf("expected boolean metadata encoded as true, got %q", meta["enabled"])
 	}
+
+	t.Run("panic on unencodable metadata", func(t *testing.T) {
+		badDiag := &diagCollector{}
+		badBinding := &poolBinding{
+			pool: pools.NewLocal("bad-remote", state.Selector{}, 1),
+			remote: &remoteBinding{
+				spawner: spBinding,
+				poolCfg: PoolConfig{
+					Name:  "bad-remote",
+					Slots: 1,
+					Metadata: map[string]any{
+						"invalid": make(chan int),
+					},
+				},
+			},
+		}
+
+		rcBad, _ := buildRemoteCoordinatorForTest(t, ctx, badDiag, []*poolBinding{badBinding})
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatalf("expected panic when encoding invalid metadata")
+			}
+		}()
+		rcBad.poolSpecsForSpawner(spBinding)
+	})
 }
 
 func waitHealthEvents(t *testing.T, ch <-chan node.HealthEvent, want int) []node.HealthEvent {

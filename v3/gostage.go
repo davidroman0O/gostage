@@ -744,15 +744,17 @@ func mergeChildConfig(base child.Config, reg *childHandlerRegistration) child.Co
 	if len(cfg.Pools) == 0 && len(reg.options.pools) > 0 {
 		cfg.Pools = childPoolSpecsFromOptions(reg.options.pools)
 	}
+	overrides := make(map[string]string)
 	if len(reg.options.metadata) > 0 {
 		merged := copyStringStringMap(cfg.Metadata)
 		if merged == nil {
 			merged = make(map[string]string, len(reg.options.metadata))
 		}
 		for k, v := range reg.options.metadata {
-			if _, exists := merged[k]; !exists {
-				merged[k] = v
+			if current, exists := merged[k]; exists && current != v {
+				overrides[k] = current
 			}
+			merged[k] = v
 		}
 		cfg.Metadata = merged
 	}
@@ -768,6 +770,17 @@ func mergeChildConfig(base child.Config, reg *childHandlerRegistration) child.Co
 	}
 	if reg.options.logger != nil && cfg.Logger == nil {
 		cfg.Logger = reg.options.logger
+	}
+	if len(overrides) > 0 {
+		logger := cfg.Logger
+		if logger == nil {
+			logger = reg.options.logger
+		}
+		if logger != nil {
+			for key, previous := range overrides {
+				logger.Warn("child metadata override", "key", key, "previous", previous, "new", cfg.Metadata[key])
+			}
+		}
 	}
 	if len(reg.options.tags) > 0 {
 		existing := append([]string(nil), cfg.Tags...)

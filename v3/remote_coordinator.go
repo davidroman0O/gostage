@@ -258,7 +258,7 @@ func (rc *remoteCoordinator) launchSpawner(binding *poolBinding) error {
 			Name:     poolCfg.Name,
 			Slots:    uint32(poolCfg.Slots),
 			Tags:     append([]string(nil), poolCfg.Tags...),
-			Metadata: convertMetadata(poolCfg.Metadata),
+			Metadata: poolMetadataToStrings(poolCfg.Metadata),
 		}}
 	}
 
@@ -618,7 +618,7 @@ func (rc *remoteCoordinator) poolSpecsForSpawner(sp *spawnerBinding) []child.Poo
 			Name:     cfg.Name,
 			Slots:    uint32(cfg.Slots),
 			Tags:     append([]string(nil), cfg.Tags...),
-			Metadata: convertMetadata(cfg.Metadata),
+			Metadata: poolMetadataToStrings(cfg.Metadata),
 		}
 		if spec.Name == "" {
 			spec.Name = name
@@ -1121,33 +1121,6 @@ func actionRecordFromDefinition(action workflow.Action) state.ActionRecord {
 		Tags:        append([]string(nil), action.Tags...),
 		Status:      state.WorkflowPending,
 	}
-}
-
-func convertMetadata(input map[string]any) map[string]string {
-	if len(input) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(input))
-	for k, v := range input {
-		if v == nil {
-			continue
-		}
-		switch val := v.(type) {
-		case string:
-			out[k] = val
-		case fmt.Stringer:
-			out[k] = val.String()
-		case []byte:
-			out[k] = string(val)
-		default:
-			if data, err := json.Marshal(val); err == nil {
-				out[k] = string(data)
-			} else {
-				out[k] = fmt.Sprint(val)
-			}
-		}
-	}
-	return out
 }
 
 func expectedSpawnerMetadata(sp *spawnerBinding) map[string]string {
