@@ -104,7 +104,8 @@ func TestNodeRunConnectsAndEmitsDiagnostics(t *testing.T) {
 		<-done
 	})
 
-	node := NewNode(Config{Address: lis.Addr().String()})
+    cfg := Config{Address: lis.Addr().String(), ChildType: "test-child"}
+    node := NewNode(cfg)
 	diag := node.Diagnostics()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -115,25 +116,32 @@ func TestNodeRunConnectsAndEmitsDiagnostics(t *testing.T) {
 		runErr <- node.Run(ctx)
 	}()
 
-	var bootstrap diagnostics.Event
-	select {
-	case evt := <-diag:
-		bootstrap = evt
-	case <-time.After(time.Second):
-		t.Fatalf("expected diagnostic event")
-	}
-
-	cancel()
-
-	if err := <-runErr; err != nil {
-		if status.Code(err) != codes.Canceled && !errors.Is(err, context.Canceled) {
-			t.Fatalf("node run: %v", err)
+	found := false
+	timeout := time.After(time.Second)
+loop:
+	for {
+		select {
+		case evt := <-diag:
+			if evt.Component == "child.bootstrap" {
+				found = true
+				break loop
+			}
+		case <-timeout:
+			break loop
 		}
 	}
 
-	if bootstrap.Component != "child.bootstrap" {
-		t.Fatalf("expected bootstrap diag, got %+v", bootstrap)
+ cancel()
+
+ if err := <-runErr; err != nil {
+  if status.Code(err) != codes.Canceled && !errors.Is(err, context.Canceled) {
+   t.Fatalf("node run: %v", err)
+		}
 	}
+
+ if !found {
+  t.Fatalf("expected bootstrap diagnostic event")
+ }
 
 	if handler.registerCount == 0 {
 		t.Fatalf("expected register to be invoked")

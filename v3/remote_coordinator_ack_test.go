@@ -13,42 +13,49 @@ func TestRemoteCoordinatorOnLeaseAckReleasesJob(t *testing.T) {
 	ctx := context.Background()
 	diag := &diagCollector{}
 
-	binding := &poolBinding{pool: pools.NewLocal("remote", state.Selector{}, 1)}
+	binding := &poolBinding{
+		Pool: pools.NewLocal("remote", state.Selector{}, 1),
+		Remote: &remoteBinding{
+			PoolCfg: PoolConfig{Name: "remote", Slots: 1},
+		},
+	}
 	rc, _ := buildRemoteCoordinatorForTest(t, ctx, diag, []*poolBinding{binding})
 
-	remotePool := rc.pools["remote"]
-	remotePool.worker = &remoteWorker{busy: true}
+	remotePool := rc.PoolsForTest()["remote"]
+	remotePool.Worker = newRemoteWorkerForTest(true, nil)
 
 	releaseCalled := false
 	workflowID := "workflow-1"
-	rc.jobs[workflowID] = &remoteJob{
-		workflow: &state.ClaimedWorkflow{
+	rc.JobsForTest()[workflowID] = &remoteJob{
+		Workflow: &state.ClaimedWorkflow{
 			QueuedWorkflow: state.QueuedWorkflow{
 				ID: state.WorkflowID(workflowID),
 			},
 			LeaseID:   "lease-1",
 			ClaimedAt: time.Now(),
 		},
-		pool:    remotePool,
-		release: func() { releaseCalled = true },
+		Pool:    remotePool,
+		Release: func() { releaseCalled = true },
 	}
 
-	rc.dispatcher.inflight.Add(1)
-	rc.dispatcher.wg.Add(1)
+	rc.DispatcherForTest().BeginRemoteDispatch(state.WorkflowID(workflowID), func() {})
 
 	summary := state.ResultSummary{Success: true}
 	if err := rc.OnLeaseAck(ctx, nil, workflowID, "lease-1", summary); err != nil {
 		t.Fatalf("OnLeaseAck returned error: %v", err)
 	}
 
-	if _, ok := rc.jobs[workflowID]; ok {
+	if _, ok := rc.JobsForTest()[workflowID]; ok {
 		t.Fatalf("expected job to be removed after ack")
 	}
 	if !releaseCalled {
 		t.Fatalf("expected release callback to be invoked")
 	}
-	if remotePool.worker == nil || remotePool.worker.busy {
+	if remotePool.Worker == nil || remotePool.Worker.BusyForTest() {
 		t.Fatalf("expected worker to be marked idle after ack")
+	}
+	if rc.DispatcherForTest().Inflight() != 0 {
+		t.Fatalf("expected dispatcher inflight to be zero")
 	}
 }
 
@@ -56,7 +63,12 @@ func TestRemoteCoordinatorOnLeaseAckUnknownWorkflow(t *testing.T) {
 	ctx := context.Background()
 	diag := &diagCollector{}
 
-	binding := &poolBinding{pool: pools.NewLocal("remote", state.Selector{}, 1)}
+	binding := &poolBinding{
+		Pool: pools.NewLocal("remote", state.Selector{}, 1),
+		Remote: &remoteBinding{
+			PoolCfg: PoolConfig{Name: "remote", Slots: 1},
+		},
+	}
 	rc, _ := buildRemoteCoordinatorForTest(t, ctx, diag, []*poolBinding{binding})
 
 	err := rc.OnLeaseAck(ctx, nil, "missing", "lease", state.ResultSummary{})

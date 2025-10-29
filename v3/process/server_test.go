@@ -1,13 +1,16 @@
 package process
 
 import (
-	"context"
-	"net"
-	"testing"
-	"time"
+    "context"
+    "io"
+    "net"
+    "testing"
+    "time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+    "google.golang.org/grpc"
+    "google.golang.org/grpc/credentials/insecure"
+    "google.golang.org/grpc/codes"
+    "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/davidroman0O/gostage/v3/diagnostics"
@@ -30,6 +33,33 @@ func newMockHandler() *mockHandler {
 			HeartbeatInterval: durationpb.New(100 * time.Millisecond),
 		},
 	}
+}
+
+type testServerStream struct {
+	processproto.ProcessBridge_ControlServer
+	ctx       context.Context
+	recvQueue []*processproto.ControlEnvelope
+	sendQueue []*processproto.ControlEnvelope
+}
+
+func newTestServerStream(ctx context.Context, envelopes ...*processproto.ControlEnvelope) *testServerStream {
+	return &testServerStream{ctx: ctx, recvQueue: envelopes}
+}
+
+func (s *testServerStream) Context() context.Context { return s.ctx }
+
+func (s *testServerStream) Recv() (*processproto.ControlEnvelope, error) {
+	if len(s.recvQueue) == 0 {
+		return nil, io.EOF
+	}
+	msg := s.recvQueue[0]
+	s.recvQueue = s.recvQueue[1:]
+	return msg, nil
+}
+
+func (s *testServerStream) Send(msg *processproto.ControlEnvelope) error {
+	s.sendQueue = append(s.sendQueue, msg)
+	return nil
 }
 
 func (m *mockHandler) OnRegister(ctx context.Context, conn *Connection, req *processproto.RegisterNode) (*processproto.RegisterAck, error) {
@@ -131,5 +161,36 @@ func TestServerControlRegistersChild(t *testing.T) {
 	case <-handler.leaseAckCh:
 	case <-ctx.Done():
 		t.Fatalf("lease ack not observed")
+	}
+}
+
+func TestServerControlRejectsMissingIdentifiers(t *testing.T) {
+	stream := newTestServerStream(context.Background())
+	server := NewServer(newMockHandler())
+
+	err := server.Control(stream)
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("expected invalid argument, got %v", err)
+	}
+	if status.Convert(err).Message() != "expected register message" {
+		t.Fatalf("unexpected message: %v", err)
+	}
+
+	stream = newTestServerStream(context.Background(), &processproto.ControlEnvelope{Body: &processproto.ControlEnvelope_Register{Register: &processproto.RegisterNode{}}})
+	err = server.Control(stream)
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("expected invalid argument, got %v", err)
+	}
+	if status.Convert(err).Message() != "child_type required" {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	stream = newTestServerStream(context.Background(), &processproto.ControlEnvelope{Body: &processproto.ControlEnvelope_Register{Register: &processproto.RegisterNode{ChildType: "good"}}})
+	err = server.Control(stream)
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("expected invalid argument, got %v", err)
+	}
+	if status.Convert(err).Message() != "node_id required" {
+		t.Fatalf("unexpected error message: %v", err)
 	}
 }

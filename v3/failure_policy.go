@@ -1,68 +1,25 @@
 package gostage
 
 import (
-	"context"
-
-	"github.com/davidroman0O/gostage/v3/runner"
-	"github.com/davidroman0O/gostage/v3/state"
+	"github.com/davidroman0O/gostage/v3/bootstrap"
 )
 
-// FailureAction instructs the dispatcher how to treat a failed attempt.
-type FailureAction int
+type (
+	FailureAction     = bootstrap.FailureAction
+	FailureOutcome    = bootstrap.FailureOutcome
+	FailureContext    = bootstrap.FailureContext
+	FailurePolicy     = bootstrap.FailurePolicy
+	FailurePolicyFunc = bootstrap.FailurePolicyFunc
+)
 
 const (
-	// FailureActionAck acknowledges the run and removes it from the queue.
-	FailureActionAck FailureAction = iota
-	// FailureActionRetry releases the workflow back to the queue for another attempt.
-	FailureActionRetry
-	// FailureActionFinalize marks the workflow complete without requeueing (typically cancellation).
-	FailureActionFinalize
+	FailureActionAck      = bootstrap.FailureActionAck
+	FailureActionRetry    = bootstrap.FailureActionRetry
+	FailureActionFinalize = bootstrap.FailureActionFinalize
 )
 
-// FailureOutcome captures the decision returned by a FailurePolicy.
-type FailureOutcome struct {
-	Action     FailureAction
-	FinalState runner.ExecutionStatus
-	Reason     state.TerminationReason
-}
-
-// FailureContext supplies details about a failed workflow execution.
-type FailureContext struct {
-	WorkflowID state.WorkflowID
-	Attempt    int
-	Err        error
-}
-
-// FailurePolicy evaluates a failed workflow run and returns the desired action.
-type FailurePolicy interface {
-	Decide(ctx context.Context, info FailureContext) FailureOutcome
-}
-
-// FailurePolicyFunc adapts a function into a FailurePolicy.
-type FailurePolicyFunc func(context.Context, FailureContext) FailureOutcome
-
-// Decide implements FailurePolicy.
-func (f FailurePolicyFunc) Decide(ctx context.Context, info FailureContext) FailureOutcome {
-	if f == nil {
-		return FailureOutcome{Action: FailureActionAck}
-	}
-	return f(ctx, info)
-}
-
-// AckOutcome returns a FailureOutcome that acknowledges the run.
-func AckOutcome() FailureOutcome {
-	return FailureOutcome{Action: FailureActionAck}
-}
-
-// RetryOutcome returns a FailureOutcome that requeues the workflow.
-func RetryOutcome() FailureOutcome {
-	return FailureOutcome{Action: FailureActionRetry}
-}
-
-// CancelOutcome returns a FailureOutcome that finalises the workflow as cancelled using the provided reason.
-func CancelOutcome(reason state.TerminationReason) FailureOutcome {
-	if reason == "" {
-		reason = state.TerminationReasonPolicyCancel
-	}
-	return FailureOutcome{Action: FailureActionFinalize, FinalState: runner.StatusCancelled, Reason: reason}
+func AckOutcome() FailureOutcome   { return bootstrap.AckOutcome() }
+func RetryOutcome() FailureOutcome { return bootstrap.RetryOutcome() }
+func CancelOutcome(reason TerminationReason) FailureOutcome {
+	return bootstrap.CancelOutcome(reason)
 }

@@ -1,22 +1,25 @@
-package gostage
+package orchestrator
 
 import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/davidroman0O/gostage/v3/bootstrap"
 	"github.com/davidroman0O/gostage/v3/node"
+	"github.com/davidroman0O/gostage/v3/scheduler"
 	"github.com/davidroman0O/gostage/v3/state"
 	"github.com/davidroman0O/gostage/v3/telemetry"
 )
 
-type parentNode struct {
+type Node struct {
 	base       *node.Node
-	dispatcher *dispatcher
-	remote     *remoteCoordinator
+	dispatcher *scheduler.Dispatcher
+	remote     *RemoteCoordinator
 
 	queue      state.Queue
 	queueOwned bool
@@ -24,7 +27,7 @@ type parentNode struct {
 	store      state.Store
 	storeOwned bool
 
-	pools  []*poolBinding
+	pools  []*PoolBinding
 	logger telemetry.Logger
 
 	sqliteDB *sql.DB
@@ -32,9 +35,30 @@ type parentNode struct {
 
 	closeOnce sync.Once
 	closed    atomic.Bool
+
+	State state.StateReader
 }
 
-func (n *parentNode) Submit(ctx context.Context, ref WorkflowReference, opts ...SubmitOption) (WorkflowID, error) {
+// Stats returns scheduler metrics using a background context.
+func (n *Node) Stats() (Snapshot, error) {
+	if n == nil {
+		return Snapshot{}, fmt.Errorf("gostage: node not initialised")
+	}
+	return n.stats(context.Background())
+}
+
+// StatsWithContext collects scheduler metrics using the provided context.
+func (n *Node) StatsWithContext(ctx context.Context) (Snapshot, error) {
+	if n == nil {
+		return Snapshot{}, fmt.Errorf("gostage: node not initialised")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return n.stats(ctx)
+}
+
+func (n *Node) Submit(ctx context.Context, ref WorkflowReference, opts ...SubmitOption) (WorkflowID, error) {
 	if n.closed.Load() {
 		return "", ErrNodeClosed
 	}
@@ -48,40 +72,45 @@ func (n *parentNode) Submit(ctx context.Context, ref WorkflowReference, opts ...
 	if err != nil {
 		return "", err
 	}
-	cfg := newSubmitConfig()
+	cfg := bootstrap.NewSubmitRequest()
 	for _, opt := range opts {
 		if opt != nil {
-			opt.applySubmit(&cfg)
+			opt.applySubmit(cfg)
 		}
 	}
 
-	if len(cfg.tags) == 0 && len(def.Tags) > 0 {
-		cfg.tags = appendUniqueStrings(nil, def.Tags...)
+	if len(cfg.Tags) == 0 && len(def.Tags) > 0 {
+		cfg.Tags = appendUniqueStrings(nil, def.Tags...)
 	}
-	if len(cfg.tags) > 0 {
-		def.Tags = appendUniqueStrings(def.Tags, cfg.tags...)
+	if len(cfg.Tags) > 0 {
+		def.Tags = appendUniqueStrings(def.Tags, cfg.Tags...)
 	}
 
-	metadata := copyMap(cfg.metadata)
+	metadata := copyMap(cfg.Metadata)
 	if metadata == nil {
 		metadata = make(map[string]any)
 	}
-	if cfg.initialStore != nil {
-		metadata[metadataInitialStore] = cfg.initialStore
+	for k, v := range def.Metadata {
+		if _, exists := metadata[k]; !exists {
+			metadata[k] = v
+		}
+	}
+	if cfg.InitialStore != nil {
+		metadata[scheduler.MetadataInitialStore] = cfg.InitialStore
 	}
 
 	if !n.hasMatchingPool(def.Tags) {
 		return "", errors.Join(ErrSubmissionRejected, ErrNoMatchingPool)
 	}
 
-	id, err := n.queue.Enqueue(ctx, def.Clone(), cfg.priority, metadata)
+	id, err := n.queue.Enqueue(ctx, def.Clone(), cfg.Priority, metadata)
 	if err != nil {
 		return "", err
 	}
 	return id, nil
 }
 
-func (n *parentNode) Wait(ctx context.Context, id WorkflowID) (Result, error) {
+func (n *Node) Wait(ctx context.Context, id WorkflowID) (Result, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -92,12 +121,12 @@ func (n *parentNode) Wait(ctx context.Context, id WorkflowID) (Result, error) {
 	return resultFromSummary(id, summary), nil
 }
 
-func (n *parentNode) Cancel(ctx context.Context, id WorkflowID) error {
+func (n *Node) Cancel(ctx context.Context, id WorkflowID) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if n.dispatcher != nil {
-		n.dispatcher.cancelWorkflow(state.WorkflowID(id))
+		n.dispatcher.CancelWorkflow(state.WorkflowID(id))
 	}
 	if n.queue == nil {
 		return nil
@@ -108,19 +137,19 @@ func (n *parentNode) Cancel(ctx context.Context, id WorkflowID) error {
 	return nil
 }
 
-func (n *parentNode) hasMatchingPool(tags []string) bool {
+func (n *Node) hasMatchingPool(tags []string) bool {
 	if len(n.pools) == 0 {
 		return false
 	}
 	for _, binding := range n.pools {
-		if selectorMatches(tags, binding.pool.Selector()) {
+		if selectorMatches(tags, binding.Pool.Selector()) {
 			return true
 		}
 	}
 	return false
 }
 
-func (n *parentNode) stats(ctx context.Context) (Snapshot, error) {
+func (n *Node) stats(ctx context.Context) (Snapshot, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -128,19 +157,19 @@ func (n *parentNode) stats(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	completed, failed, cancelled := n.dispatcher.statsCounters()
+	completed64, failed64, cancelled64 := n.dispatcher.StatsCounters()
 	snapshot := Snapshot{
 		UpdatedAt:  time.Now(),
 		QueueDepth: stats.Pending,
-		InFlight:   int(n.dispatcher.inflight.Load()),
-		Completed:  completed,
-		Failed:     failed,
-		Cancelled:  cancelled,
+		InFlight:   int(n.dispatcher.Inflight()),
+		Completed:  int(completed64),
+		Failed:     int(failed64),
+		Cancelled:  int(cancelled64),
 		Pools:      make([]PoolSnapshot, 0, len(n.pools)),
 	}
 	for _, binding := range n.pools {
-		pool := binding.pool
-		status, detail, lastChange, lastErrDetail, lastErrAt := n.dispatcher.healthInfo(pool.Name())
+		pool := binding.Pool
+		status, detail, lastChange, lastErrDetail, lastErrAt := n.dispatcher.HealthInfo(pool.Name())
 		var lastErr error
 		switch {
 		case detail != "" && status != node.HealthHealthy:
@@ -172,7 +201,7 @@ func (n *parentNode) stats(ctx context.Context) (Snapshot, error) {
 	return snapshot, nil
 }
 
-func (n *parentNode) StreamTelemetry(ctx context.Context, fn TelemetryHandler) CancelFunc {
+func (n *Node) StreamTelemetry(ctx context.Context, fn TelemetryHandler) CancelFunc {
 	if fn == nil {
 		return func() {}
 	}
@@ -206,15 +235,19 @@ func (n *parentNode) StreamTelemetry(ctx context.Context, fn TelemetryHandler) C
 	}
 }
 
-func (n *parentNode) StreamHealth(ctx context.Context, fn HealthHandler) CancelFunc {
+func (n *Node) StreamHealth(ctx context.Context, fn HealthHandler) CancelFunc {
 	if fn == nil {
 		return func() {}
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	health := n.dispatcher.HealthDispatcher()
+	if health == nil {
+		return func() {}
+	}
 	var canceled atomic.Bool
-	unregister := n.dispatcher.health.Subscribe(func(evt HealthEvent) {
+	unregister := health.Subscribe(func(evt HealthEvent) {
 		if canceled.Load() {
 			return
 		}
@@ -232,15 +265,15 @@ func (n *parentNode) StreamHealth(ctx context.Context, fn HealthHandler) CancelF
 	}
 }
 
-func (n *parentNode) Close() error {
+func (n *Node) Close() error {
 	var closeErr error
 	n.closeOnce.Do(func() {
 		n.closed.Store(true)
 		if n.dispatcher != nil {
-			n.dispatcher.stop()
+			n.dispatcher.Stop()
 		}
 		if n.remote != nil {
-			n.remote.shutdown()
+			n.remote.Shutdown()
 		}
 		if n.base != nil {
 			_ = n.base.Close()

@@ -1,4 +1,4 @@
-package gostage
+package coordinator
 
 import (
 	"context"
@@ -27,6 +27,7 @@ import (
 	"github.com/davidroman0O/gostage/v3/pools"
 	"github.com/davidroman0O/gostage/v3/process"
 	processproto "github.com/davidroman0O/gostage/v3/process/proto"
+	"github.com/davidroman0O/gostage/v3/scheduler"
 	"github.com/davidroman0O/gostage/v3/spawner"
 	"github.com/davidroman0O/gostage/v3/state"
 	"github.com/davidroman0O/gostage/v3/telemetry"
@@ -38,11 +39,11 @@ const (
 	remoteHeartbeatTimeout  = 45 * time.Second
 )
 
-type remoteCoordinator struct {
+type RemoteCoordinator struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	dispatcher *dispatcher
+	dispatcher *scheduler.Dispatcher
 	queue      state.Queue
 
 	telemetry   *node.TelemetryDispatcher
@@ -58,8 +59,8 @@ type remoteCoordinator struct {
 	tlsConfig   *tls.Config
 
 	mu    locks.Mutex
-	pools map[string]*remotePool
-	jobs  map[string]*remoteJob
+	pools map[string]*RemotePool
+	jobs  map[string]*RemoteJob
 
 	spawned map[string]*spawner.ProcessHandle
 	spawnMu locks.Mutex
@@ -67,46 +68,46 @@ type remoteCoordinator struct {
 	wg locks.WaitGroup
 }
 
-type remotePool struct {
-	binding *poolBinding
-	worker  *remoteWorker
+type RemotePool struct {
+	Binding *Binding
+	Worker  *RemoteWorker
 }
 
-type remoteWorker struct {
+type RemoteWorker struct {
 	conn     *process.Connection
 	busy     bool
 	metadata map[string]string
 }
 
-type remoteJob struct {
-	workflow *state.ClaimedWorkflow
-	pool     *remotePool
-	release  func()
+type RemoteJob struct {
+	Workflow *state.ClaimedWorkflow
+	Pool     *RemotePool
+	Release  func()
 }
 
 type processSupervisor struct {
-	rc       *remoteCoordinator
-	spawner  *spawnerBinding
+	rc       *RemoteCoordinator
+	spawner  *SpawnerBinding
 	mu       locks.Mutex
 	handle   *spawner.ProcessHandle
 	restarts int
 }
 
-func newRemoteCoordinator(
+func NewRemoteCoordinator(
 	ctx context.Context,
-	dispatcher *dispatcher,
+	dispatcher *scheduler.Dispatcher,
 	queue state.Queue,
 	telemetryDisp *node.TelemetryDispatcher,
 	diag node.DiagnosticsWriter,
 	health *node.HealthDispatcher,
 	logger telemetry.Logger,
-	bindings []*poolBinding,
+	bindings []*Binding,
 	clock func() time.Time,
 	bridgeCfg RemoteBridgeConfig,
-) (*remoteCoordinator, error) {
+) (*RemoteCoordinator, error) {
 	hasRemote := false
 	for _, binding := range bindings {
-		if binding.remote != nil {
+		if binding.Remote != nil {
 			hasRemote = true
 			break
 		}
@@ -121,8 +122,24 @@ func newRemoteCoordinator(
 		ctx = context.Background()
 	}
 
+	for _, binding := range bindings {
+		if binding == nil || binding.Remote == nil {
+			continue
+		}
+		if err := validateRemoteBinding(binding.Remote); err != nil {
+			if diag != nil {
+				reportRemoteValidationFailure(diag, binding, err)
+			}
+			bindingName := ""
+			if binding.Pool != nil {
+				bindingName = binding.Pool.Name()
+			}
+			return nil, fmt.Errorf("gostage: remote binding %q invalid: %w", bindingName, err)
+		}
+	}
+
 	rcCtx, cancel := context.WithCancel(ctx)
-	rc := &remoteCoordinator{
+	rc := &RemoteCoordinator{
 		ctx:         rcCtx,
 		cancel:      cancel,
 		dispatcher:  dispatcher,
@@ -131,8 +148,8 @@ func newRemoteCoordinator(
 		diagnostics: diag,
 		health:      health,
 		logger:      logger,
-		pools:       make(map[string]*remotePool),
-		jobs:        make(map[string]*remoteJob),
+		pools:       make(map[string]*RemotePool),
+		jobs:        make(map[string]*RemoteJob),
 		spawned:     make(map[string]*spawner.ProcessHandle),
 	}
 	if clock == nil {
@@ -190,16 +207,16 @@ func newRemoteCoordinator(
 	}()
 
 	for _, binding := range bindings {
-		if binding.remote == nil {
+		if binding.Remote == nil {
 			continue
 		}
-		rp := &remotePool{binding: binding}
-		rc.pools[binding.pool.Name()] = rp
-		binding.remote.pool = rp
-		binding.remote.coordinator = rc
-		if binding.remote.spawner != nil && binding.remote.spawner.process != nil {
-			binding.remote.spawner.process.SetReporter(spawner.LoggerReporter(func(evt diagnostics.Event) {
-				rc.forwardChildLog(binding.pool.Name(), evt)
+		rp := &RemotePool{Binding: binding}
+		rc.pools[binding.Pool.Name()] = rp
+		binding.Remote.Pool = rp
+		binding.Remote.Coordinator = rc
+		if binding.Remote.Spawner != nil && binding.Remote.Spawner.Process != nil {
+			binding.Remote.Spawner.Process.SetReporter(spawner.LoggerReporter(func(evt diagnostics.Event) {
+				rc.forwardChildLog(binding.Pool.Name(), evt)
 			}))
 		}
 	}
@@ -212,42 +229,42 @@ func newRemoteCoordinator(
 	return rc, nil
 }
 
-func (rc *remoteCoordinator) launchSpawners() error {
+func (rc *RemoteCoordinator) launchSpawners() error {
 	seen := make(map[string]struct{})
 	for _, pool := range rc.pools {
-		binding := pool.binding
-		if binding == nil || binding.remote == nil || binding.remote.spawner == nil {
+		binding := pool.Binding
+		if binding == nil || binding.Remote == nil || binding.Remote.Spawner == nil {
 			continue
 		}
-		sp := binding.remote.spawner
-		if _, ok := seen[sp.name]; ok {
+		sp := binding.Remote.Spawner
+		if _, ok := seen[sp.Name]; ok {
 			continue
 		}
 		if err := rc.launchSpawner(binding); err != nil {
 			return err
 		}
-		seen[sp.name] = struct{}{}
+		seen[sp.Name] = struct{}{}
 	}
 	return nil
 }
 
-func (rc *remoteCoordinator) launchSpawner(binding *poolBinding) error {
-	sp := binding.remote.spawner
+func (rc *RemoteCoordinator) launchSpawner(binding *Binding) error {
+	sp := binding.Remote.Spawner
 	if sp == nil {
-		return fmt.Errorf("gostage: pool %s missing spawner", binding.pool.Name())
+		return fmt.Errorf("gostage: pool %s missing spawner", binding.Pool.Name())
 	}
 
 	rc.spawnMu.Lock()
-	sup := sp.supervisor
+	sup := sp.Supervisor
 	if sup == nil {
 		sup = &processSupervisor{rc: rc, spawner: sp}
-		sp.supervisor = sup
+		sp.Supervisor = sup
 	}
 	rc.spawnMu.Unlock()
 
-	poolCfg := binding.remote.poolCfg
+	poolCfg := binding.Remote.PoolCfg
 
-	childType := sp.cfg.ChildType
+	childType := sp.Cfg.ChildType
 	if childType == "" {
 		childType = poolCfg.Name
 	}
@@ -258,85 +275,75 @@ func (rc *remoteCoordinator) launchSpawner(binding *poolBinding) error {
 			Name:     poolCfg.Name,
 			Slots:    uint32(poolCfg.Slots),
 			Tags:     append([]string(nil), poolCfg.Tags...),
-			Metadata: poolMetadataToStrings(poolCfg.Metadata),
+			Metadata: PoolMetadataToStrings(poolCfg.Metadata),
 		}}
 	}
 
 	launch := spawner.LaunchConfig{
 		Address:   rc.address,
-		AuthToken: sp.cfg.AuthToken,
+		AuthToken: sp.Cfg.AuthToken,
 		ChildType: childType,
-		Metadata:  copyStringMap(sp.cfg.Metadata),
+		Metadata:  copyStringMap(sp.Cfg.Metadata),
 		TLS: child.TLSConfig{
-			CertPath: sp.cfg.TLS.CertPath,
-			KeyPath:  sp.cfg.TLS.KeyPath,
-			CAPath:   sp.cfg.TLS.CAPath,
+			CertPath: sp.Cfg.TLS.CertPath,
+			KeyPath:  sp.Cfg.TLS.KeyPath,
+			CAPath:   sp.Cfg.TLS.CAPath,
 		},
 		Pools: poolSpecs,
 	}
-	if len(sp.cfg.Tags) > 0 {
+	if len(sp.Cfg.Tags) > 0 {
 		if launch.Metadata == nil {
 			launch.Metadata = make(map[string]string, 1)
 		}
-		launch.Metadata["tags"] = strings.Join(sp.cfg.Tags, ",")
+		launch.Metadata["tags"] = strings.Join(sp.Cfg.Tags, ",")
 	}
 
 	return sup.ensure(rc.ctx, launch)
 }
 
-func (rc *remoteCoordinator) dispatch(binding *poolBinding, claimed *state.ClaimedWorkflow, release func()) error {
+func (rc *RemoteCoordinator) dispatch(binding *Binding, claimed *state.ClaimedWorkflow, release func()) error {
 	if binding == nil || claimed == nil {
 		return errors.New("gostage: remote dispatch requires binding and workflow")
 	}
-	initialStore := extractInitialStore(claimed.Metadata)
+	initialStore := scheduler.ExtractInitialStore(claimed.Metadata)
 	rc.ensureWorkflowRegistered(claimed)
 	rc.mu.Lock()
-	pool := rc.pools[binding.pool.Name()]
+	pool := rc.pools[binding.Pool.Name()]
 	if pool == nil {
 		rc.mu.Unlock()
-		return fmt.Errorf("gostage: pool %s not registered for remote execution", binding.pool.Name())
+		return fmt.Errorf("gostage: pool %s not registered for remote execution", binding.Pool.Name())
 	}
-	worker := pool.worker
+	worker := pool.Worker
 	if worker == nil {
 		rc.mu.Unlock()
-		return fmt.Errorf("gostage: pool %s has no active child", binding.pool.Name())
+		return fmt.Errorf("gostage: pool %s has no active child", binding.Pool.Name())
 	}
 	if worker.busy {
 		rc.mu.Unlock()
-		return fmt.Errorf("gostage: pool %s worker busy", binding.pool.Name())
+		return fmt.Errorf("gostage: pool %s worker busy", binding.Pool.Name())
 	}
 	worker.busy = true
 	jobKey := string(claimed.ID)
-	rc.jobs[jobKey] = &remoteJob{workflow: claimed, pool: pool, release: release}
+	rc.jobs[jobKey] = &RemoteJob{Workflow: claimed, Pool: pool, Release: release}
 	rc.mu.Unlock()
 
-	rc.dispatcher.inflight.Add(1)
-	rc.dispatcher.wg.Add(1)
-
-	rc.dispatcher.registerCancel(claimed.ID, func() {
+	rc.dispatcher.BeginRemoteDispatch(claimed.ID, func() {
 		_ = rc.sendCancel(pool, claimed.ID)
 	})
-	rc.dispatcher.suppressWorkflowTelemetry(claimed.ID,
-		telemetry.EventWorkflowStarted,
-		telemetry.EventWorkflowCompleted,
-		telemetry.EventWorkflowFailed,
-		telemetry.EventWorkflowCancelled,
-		telemetry.EventWorkflowSummary,
-	)
 
 	if err := rc.sendLease(worker, claimed, initialStore); err != nil {
 		rc.failDispatch(jobKey, err)
 		return err
 	}
-	if rc.dispatcher != nil && rc.dispatcher.manager != nil {
-		if err := rc.dispatcher.manager.WorkflowStatus(rc.ctx, string(claimed.ID), state.WorkflowRunning); err != nil {
-			rc.dispatcher.reportError("dispatcher.remote.status", fmt.Errorf("mark workflow %s running: %w", claimed.ID, err))
+	if mgr := rc.dispatcher.Manager(); mgr != nil {
+		if err := mgr.WorkflowStatus(rc.ctx, string(claimed.ID), state.WorkflowRunning); err != nil {
+			rc.dispatcher.ReportError("dispatcher.remote.status", fmt.Errorf("mark workflow %s running: %w", claimed.ID, err))
 		}
 	}
 	return nil
 }
 
-func (rc *remoteCoordinator) sendLease(worker *remoteWorker, claimed *state.ClaimedWorkflow, initial map[string]any) error {
+func (rc *RemoteCoordinator) sendLease(worker *RemoteWorker, claimed *state.ClaimedWorkflow, initial map[string]any) error {
 	defJSON, err := workflow.ToJSON(claimed.Definition.Clone())
 	if err != nil {
 		return fmt.Errorf("encode workflow definition: %w", err)
@@ -348,7 +355,7 @@ func (rc *remoteCoordinator) sendLease(worker *remoteWorker, claimed *state.Clai
 			return fmt.Errorf("encode initial store: %w", err)
 		}
 	}
-	metadataJSON, err := json.Marshal(metadataWithoutInitialStore(claimed.Metadata))
+	metadataJSON, err := json.Marshal(scheduler.MetadataWithoutInitialStore(claimed.Metadata))
 	if err != nil {
 		return fmt.Errorf("encode metadata: %w", err)
 	}
@@ -369,9 +376,9 @@ func (rc *remoteCoordinator) sendLease(worker *remoteWorker, claimed *state.Clai
 	return nil
 }
 
-func (rc *remoteCoordinator) sendCancel(pool *remotePool, id state.WorkflowID) error {
+func (rc *RemoteCoordinator) sendCancel(pool *RemotePool, id state.WorkflowID) error {
 	rc.mu.Lock()
-	worker := pool.worker
+	worker := pool.Worker
 	rc.mu.Unlock()
 	if worker == nil || worker.conn == nil {
 		rc.reportDiagnostic(diagnostics.Event{
@@ -379,7 +386,7 @@ func (rc *remoteCoordinator) sendCancel(pool *remotePool, id state.WorkflowID) e
 			Severity:  diagnostics.SeverityWarning,
 			Metadata: map[string]any{
 				"workflow_id": id,
-				"pool":        pool.binding.pool.Name(),
+				"pool":        pool.Binding.Pool.Name(),
 				"reason":      "no worker",
 			},
 		})
@@ -395,7 +402,7 @@ func (rc *remoteCoordinator) sendCancel(pool *remotePool, id state.WorkflowID) e
 			Err:       err,
 			Metadata: map[string]any{
 				"workflow_id": id,
-				"pool":        pool.binding.pool.Name(),
+				"pool":        pool.Binding.Pool.Name(),
 			},
 		})
 	} else {
@@ -404,14 +411,14 @@ func (rc *remoteCoordinator) sendCancel(pool *remotePool, id state.WorkflowID) e
 			Severity:  diagnostics.SeverityInfo,
 			Metadata: map[string]any{
 				"workflow_id": id,
-				"pool":        pool.binding.pool.Name(),
+				"pool":        pool.Binding.Pool.Name(),
 			},
 		})
 	}
 	return err
 }
 
-func (rc *remoteCoordinator) failDispatch(jobKey string, err error) {
+func (rc *RemoteCoordinator) failDispatch(jobKey string, err error) {
 	rc.reportDiagnostic(diagnostics.Event{
 		Component: "remote.dispatch",
 		Severity:  diagnostics.SeverityError,
@@ -422,26 +429,26 @@ func (rc *remoteCoordinator) failDispatch(jobKey string, err error) {
 	job := rc.jobs[jobKey]
 	if job != nil {
 		delete(rc.jobs, jobKey)
-		if job.pool != nil && job.pool.worker != nil {
-			job.pool.worker.busy = false
+		if job.Pool != nil && job.Pool.Worker != nil {
+			job.Pool.Worker.busy = false
 		}
 	}
 	rc.mu.Unlock()
 
 	if job != nil {
-		rc.dispatcher.unregisterCancel(job.workflow.ID)
-		if job.release != nil {
-			job.release()
+		rc.dispatcher.AbortRemoteDispatch(job.Workflow.ID)
+		if job.Release != nil {
+			job.Release()
 		}
-		if err := rc.queue.Release(rc.ctx, job.workflow.ID); err != nil {
-			rc.dispatcher.reportError("dispatcher.remote.release", fmt.Errorf("release workflow %s: %w", job.workflow.ID, err))
+		if err := rc.queue.Release(rc.ctx, job.Workflow.ID); err != nil {
+			rc.dispatcher.ReportError("dispatcher.remote.release", fmt.Errorf("release workflow %s: %w", job.Workflow.ID, err))
 		}
+		return
 	}
-	rc.dispatcher.inflight.Add(-1)
-	rc.dispatcher.wg.Done()
+	rc.dispatcher.AbortRemoteDispatch(state.WorkflowID(jobKey))
 }
 
-func (rc *remoteCoordinator) OnRegister(ctx context.Context, conn *process.Connection, req *processproto.RegisterNode) (*processproto.RegisterAck, error) {
+func (rc *RemoteCoordinator) OnRegister(ctx context.Context, conn *process.Connection, req *processproto.RegisterNode) (*processproto.RegisterAck, error) {
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "missing register message")
 	}
@@ -463,21 +470,21 @@ func (rc *remoteCoordinator) OnRegister(ctx context.Context, conn *process.Conne
 	}
 
 	var (
-		matched []*remotePool
+		matched []*RemotePool
 		unknown []string
 		missing []string
-		sp      *spawnerBinding
+		sp      *SpawnerBinding
 	)
 
 	rc.mu.Lock()
 	for name := range advertised {
 		pool := rc.pools[name]
-		if pool == nil || pool.binding == nil || pool.binding.remote == nil {
+		if pool == nil || pool.Binding == nil || pool.Binding.Remote == nil {
 			unknown = append(unknown, name)
 			continue
 		}
 		if sp == nil {
-			sp = pool.binding.remote.spawner
+			sp = pool.Binding.Remote.Spawner
 		}
 		matched = append(matched, pool)
 	}
@@ -485,44 +492,49 @@ func (rc *remoteCoordinator) OnRegister(ctx context.Context, conn *process.Conne
 		rc.mu.Unlock()
 		return nil, status.Errorf(codes.InvalidArgument, "child must declare at least one known pool")
 	}
-	if sp != nil && strings.TrimSpace(sp.cfg.AuthToken) != "" {
+	if sp != nil && strings.TrimSpace(sp.Cfg.AuthToken) != "" {
 		provided := strings.TrimSpace(req.GetAuthToken())
-		if subtle.ConstantTimeCompare([]byte(provided), []byte(sp.cfg.AuthToken)) != 1 {
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(sp.Cfg.AuthToken)) != 1 {
 			rc.mu.Unlock()
+			meta := map[string]any{
+				"node_id":    req.GetNodeId(),
+				"child_type": req.GetChildType(),
+				"reason":     "invalid auth token",
+				"spawner":    sp.Cfg.Name,
+			}
+			if names := matchedPoolNames(matched); len(names) > 0 {
+				meta["pools"] = names
+			}
 			rc.reportDiagnostic(diagnostics.Event{
 				Component: "remote.register",
 				Severity:  diagnostics.SeverityError,
-				Metadata: map[string]any{
-					"node_id":    req.GetNodeId(),
-					"child_type": req.GetChildType(),
-					"reason":     "invalid auth token",
-				},
+				Metadata:  meta,
 			})
 			return nil, status.Error(codes.PermissionDenied, "invalid auth token")
 		}
 	}
 	for _, pool := range matched {
-		pool.worker = &remoteWorker{
+		pool.Worker = &RemoteWorker{
 			conn:     conn,
 			metadata: copyStringStringMap(conn.Info().Metadata),
 		}
 	}
 	if sp != nil {
 		for name, pool := range rc.pools {
-			if pool == nil || pool.binding == nil || pool.binding.remote == nil || pool.binding.remote.spawner != sp {
+			if pool == nil || pool.Binding == nil || pool.Binding.Remote == nil || pool.Binding.Remote.Spawner != sp {
 				continue
 			}
 			if _, ok := advertised[name]; ok {
 				continue
 			}
-			pool.worker = nil
+			pool.Worker = nil
 			missing = append(missing, name)
 		}
 	}
 	rc.mu.Unlock()
 
 	for _, pool := range matched {
-		rc.dispatcher.publishHealth(pool.binding.pool.Name(), node.HealthHealthy, "child registered")
+		rc.dispatcher.PublishHealth(pool.Binding.Pool.Name(), node.HealthHealthy, "child registered")
 	}
 	childMetadata := conn.Info().Metadata
 	if len(childMetadata) == 0 && len(req.GetMetadata()) > 0 {
@@ -531,8 +543,8 @@ func (rc *remoteCoordinator) OnRegister(ctx context.Context, conn *process.Conne
 	if len(childMetadata) > 0 {
 		rc.mu.Lock()
 		for _, pool := range matched {
-			if pool.worker != nil {
-				pool.worker.metadata = copyStringStringMap(childMetadata)
+			if pool.Worker != nil {
+				pool.Worker.metadata = copyStringStringMap(childMetadata)
 			}
 		}
 		rc.mu.Unlock()
@@ -564,16 +576,20 @@ func (rc *remoteCoordinator) OnRegister(ctx context.Context, conn *process.Conne
 	if len(missing) > 0 {
 		sort.Strings(missing)
 		for _, name := range missing {
-			rc.dispatcher.publishHealth(name, node.HealthUnavailable, "child missing registration")
+			rc.dispatcher.PublishHealth(name, node.HealthUnavailable, "child missing registration")
+		}
+		meta := map[string]any{
+			"node_id":       req.GetNodeId(),
+			"child_type":    req.GetChildType(),
+			"missing_pools": append([]string(nil), missing...),
+		}
+		if sp != nil {
+			meta["spawner"] = sp.Cfg.Name
 		}
 		rc.reportDiagnostic(diagnostics.Event{
 			Component: "remote.register",
 			Severity:  diagnostics.SeverityWarning,
-			Metadata: map[string]any{
-				"node_id":       req.GetNodeId(),
-				"child_type":    req.GetChildType(),
-				"missing_pools": append([]string(nil), missing...),
-			},
+			Metadata:  meta,
 		})
 	}
 	if len(unknown) > 0 {
@@ -581,11 +597,7 @@ func (rc *remoteCoordinator) OnRegister(ctx context.Context, conn *process.Conne
 		rc.reportDiagnostic(diagnostics.Event{
 			Component: "remote.register",
 			Severity:  diagnostics.SeverityWarning,
-			Metadata: map[string]any{
-				"node_id":       req.GetNodeId(),
-				"child_type":    req.GetChildType(),
-				"unknown_pools": append([]string(nil), unknown...),
-			},
+			Metadata:  enrichedPoolMetadata(req, unknown),
 		})
 	}
 
@@ -595,7 +607,7 @@ func (rc *remoteCoordinator) OnRegister(ctx context.Context, conn *process.Conne
 	}, nil
 }
 
-func (rc *remoteCoordinator) poolSpecsForSpawner(sp *spawnerBinding) []child.PoolSpec {
+func (rc *RemoteCoordinator) poolSpecsForSpawner(sp *SpawnerBinding) []child.PoolSpec {
 	if sp == nil {
 		return nil
 	}
@@ -604,27 +616,27 @@ func (rc *remoteCoordinator) poolSpecsForSpawner(sp *spawnerBinding) []child.Poo
 	specs := make([]child.PoolSpec, 0)
 	seen := make(map[string]struct{})
 	for name, pool := range rc.pools {
-		if pool == nil || pool.binding == nil || pool.binding.remote == nil {
+		if pool == nil || pool.Binding == nil || pool.Binding.Remote == nil {
 			continue
 		}
-		if pool.binding.remote.spawner != sp {
+		if pool.Binding.Remote.Spawner != sp {
 			continue
 		}
 		if _, ok := seen[name]; ok {
 			continue
 		}
-		cfg := pool.binding.remote.poolCfg
+		cfg := pool.Binding.Remote.PoolCfg
 		spec := child.PoolSpec{
 			Name:     cfg.Name,
 			Slots:    uint32(cfg.Slots),
 			Tags:     append([]string(nil), cfg.Tags...),
-			Metadata: poolMetadataToStrings(cfg.Metadata),
+			Metadata: PoolMetadataToStrings(cfg.Metadata),
 		}
 		if spec.Name == "" {
 			spec.Name = name
 		}
 		if spec.Slots == 0 {
-			spec.Slots = uint32(pool.binding.pool.Slots())
+			spec.Slots = uint32(pool.Binding.Pool.Slots())
 		}
 		specs = append(specs, spec)
 		seen[name] = struct{}{}
@@ -632,14 +644,14 @@ func (rc *remoteCoordinator) poolSpecsForSpawner(sp *spawnerBinding) []child.Poo
 	return specs
 }
 
-func (rc *remoteCoordinator) OnLeaseAck(ctx context.Context, conn *process.Connection, workflowID string, leaseID string, summary state.ResultSummary) error {
+func (rc *RemoteCoordinator) OnLeaseAck(ctx context.Context, conn *process.Connection, workflowID string, leaseID string, summary state.ResultSummary) error {
 	jobKey := workflowID
 	rc.mu.Lock()
 	job := rc.jobs[jobKey]
 	if job != nil {
 		delete(rc.jobs, jobKey)
-		if job.pool != nil && job.pool.worker != nil {
-			job.pool.worker.busy = false
+		if job.Pool != nil && job.Pool.Worker != nil {
+			job.Pool.Worker.busy = false
 		}
 	}
 	rc.mu.Unlock()
@@ -647,17 +659,17 @@ func (rc *remoteCoordinator) OnLeaseAck(ctx context.Context, conn *process.Conne
 		return fmt.Errorf("gostage: lease ack for unknown workflow %s", jobKey)
 	}
 
-	rc.dispatcher.unregisterCancel(job.workflow.ID)
+	rc.dispatcher.UnregisterCancel(job.Workflow.ID)
 
 	var pool *pools.Local
-	if job.pool != nil && job.pool.binding != nil {
-		pool = job.pool.binding.pool
+	if job.Pool != nil && job.Pool.Binding != nil {
+		pool = job.Pool.Binding.Pool
 	}
-	rc.dispatcher.completeRemote(job.workflow, pool, summary, job.release)
+	rc.dispatcher.CompleteRemote(job.Workflow, pool, summary, job.Release)
 	return nil
 }
 
-func (rc *remoteCoordinator) OnTelemetry(ctx context.Context, conn *process.Connection, evt telemetry.Event) error {
+func (rc *RemoteCoordinator) OnTelemetry(ctx context.Context, conn *process.Connection, evt telemetry.Event) error {
 	if rc.telemetry == nil {
 		return nil
 	}
@@ -665,11 +677,11 @@ func (rc *remoteCoordinator) OnTelemetry(ctx context.Context, conn *process.Conn
 	return rc.telemetry.Dispatch(evt)
 }
 
-func (rc *remoteCoordinator) OnDiagnostic(ctx context.Context, conn *process.Connection, evt diagnostics.Event) {
+func (rc *RemoteCoordinator) OnDiagnostic(ctx context.Context, conn *process.Connection, evt diagnostics.Event) {
 	rc.reportDiagnostic(evt)
 }
 
-func (rc *remoteCoordinator) OnLog(ctx context.Context, conn *process.Connection, entry process.LogEntry) error {
+func (rc *RemoteCoordinator) OnLog(ctx context.Context, conn *process.Connection, entry process.LogEntry) error {
 	severity := diagnostics.SeverityInfo
 	switch strings.ToLower(entry.Level) {
 	case "info", "", "debug", "trace":
@@ -721,25 +733,25 @@ func (rc *remoteCoordinator) OnLog(ctx context.Context, conn *process.Connection
 	return nil
 }
 
-func (rc *remoteCoordinator) OnHeartbeat(ctx context.Context, conn *process.Connection, ts time.Time) error {
+func (rc *RemoteCoordinator) OnHeartbeat(ctx context.Context, conn *process.Connection, ts time.Time) error {
 	return nil
 }
 
-func (rc *remoteCoordinator) OnShutdown(ctx context.Context, conn *process.Connection, reason string) {
+func (rc *RemoteCoordinator) OnShutdown(ctx context.Context, conn *process.Connection, reason string) {
 	if conn == nil {
 		return
 	}
 	rc.mu.Lock()
 	for name, pool := range rc.pools {
-		if pool != nil && pool.worker != nil && pool.worker.conn == conn {
-			pool.worker = nil
-			rc.dispatcher.publishHealth(name, node.HealthUnavailable, reason)
+		if pool != nil && pool.Worker != nil && pool.Worker.conn == conn {
+			pool.Worker = nil
+			rc.dispatcher.PublishHealth(name, node.HealthUnavailable, reason)
 		}
 	}
 	rc.mu.Unlock()
 }
 
-func (rc *remoteCoordinator) shutdown() {
+func (rc *RemoteCoordinator) shutdown() {
 	rc.cancel()
 	if rc.server != nil {
 		rc.server.GracefulStop()
@@ -759,14 +771,19 @@ func (rc *remoteCoordinator) shutdown() {
 	rc.spawnMu.Unlock()
 }
 
-func (rc *remoteCoordinator) now() time.Time {
+// Shutdown gracefully stops the coordinator server and releases spawned workers.
+func (rc *RemoteCoordinator) Shutdown() {
+	rc.shutdown()
+}
+
+func (rc *RemoteCoordinator) now() time.Time {
 	if rc != nil && rc.clock != nil {
 		return rc.clock()
 	}
 	return time.Now()
 }
 
-func (rc *remoteCoordinator) reportDiagnostic(evt diagnostics.Event) {
+func (rc *RemoteCoordinator) reportDiagnostic(evt diagnostics.Event) {
 	if rc.diagnostics != nil {
 		rc.diagnostics.Write(evt)
 	}
@@ -775,28 +792,28 @@ func (rc *remoteCoordinator) reportDiagnostic(evt diagnostics.Event) {
 	}
 }
 
-func (rc *remoteCoordinator) setSpawnerHandle(sp *spawnerBinding, handle *spawner.ProcessHandle) {
+func (rc *RemoteCoordinator) setSpawnerHandle(sp *SpawnerBinding, handle *spawner.ProcessHandle) {
 	if rc == nil || sp == nil {
 		return
 	}
 	rc.spawnMu.Lock()
 	if handle == nil {
-		delete(rc.spawned, sp.name)
+		delete(rc.spawned, sp.Name)
 	} else {
-		rc.spawned[sp.name] = handle
+		rc.spawned[sp.Name] = handle
 	}
 	rc.spawnMu.Unlock()
 }
 
-func (rc *remoteCoordinator) markSpawnerPools(sp *spawnerBinding, status node.HealthStatus, detail string) {
+func (rc *RemoteCoordinator) markSpawnerPools(sp *SpawnerBinding, status node.HealthStatus, detail string) {
 	if rc == nil || rc.dispatcher == nil || sp == nil {
 		return
 	}
 	for name, pool := range rc.pools {
-		if pool == nil || pool.binding == nil || pool.binding.remote == nil || pool.binding.remote.spawner != sp {
+		if pool == nil || pool.Binding == nil || pool.Binding.Remote == nil || pool.Binding.Remote.Spawner != sp {
 			continue
 		}
-		rc.dispatcher.publishHealth(name, status, detail)
+		rc.dispatcher.PublishHealth(name, status, detail)
 	}
 }
 
@@ -823,19 +840,19 @@ func (ps *processSupervisor) start(ctx context.Context, launch spawner.LaunchCon
 		ps.restarts = 0
 		ps.mu.Unlock()
 	}
-	handle, err := ps.spawner.process.Launch(ctx, launch)
+	handle, err := ps.spawner.Process.Launch(ctx, launch)
 	if err != nil {
 		detail := fmt.Sprintf("launch failed: %v", err)
 		ps.rc.markSpawnerPools(ps.spawner, node.HealthUnavailable, detail)
 		ps.rc.reportDiagnostic(diagnostics.Event{
-			Component: fmt.Sprintf("remote.spawner.%s", ps.spawner.name),
+			Component: fmt.Sprintf("remote.spawner.%s", ps.spawner.Name),
 			Severity:  diagnostics.SeverityError,
 			Err:       err,
 			Metadata: map[string]any{
 				"restart": 0,
 			},
 		})
-		return fmt.Errorf("gostage: launch spawner %s: %w", ps.spawner.name, err)
+		return fmt.Errorf("gostage: launch spawner %s: %w", ps.spawner.Name, err)
 	}
 	ps.mu.Lock()
 	ps.handle = handle
@@ -870,10 +887,10 @@ func (ps *processSupervisor) monitor(ctx context.Context, launch spawner.LaunchC
 		metadata["error"] = err.Error()
 	}
 
-	maxRestarts := ps.spawner.cfg.MaxRestarts
+	maxRestarts := ps.spawner.Cfg.MaxRestarts
 	if maxRestarts > 0 && restarts > maxRestarts {
 		ps.rc.reportDiagnostic(diagnostics.Event{
-			Component: fmt.Sprintf("remote.spawner.%s", ps.spawner.name),
+			Component: fmt.Sprintf("remote.spawner.%s", ps.spawner.Name),
 			Severity:  diagnostics.SeverityCritical,
 			Err:       err,
 			Metadata:  metadata,
@@ -881,13 +898,13 @@ func (ps *processSupervisor) monitor(ctx context.Context, launch spawner.LaunchC
 		return
 	}
 
-	backoff := ps.spawner.cfg.RestartBackoff
+	backoff := ps.spawner.Cfg.RestartBackoff
 	if backoff <= 0 {
 		backoff = 100 * time.Millisecond
 	}
 
 	ps.rc.reportDiagnostic(diagnostics.Event{
-		Component: fmt.Sprintf("remote.spawner.%s", ps.spawner.name),
+		Component: fmt.Sprintf("remote.spawner.%s", ps.spawner.Name),
 		Severity:  diagnostics.SeverityWarning,
 		Err:       err,
 		Metadata:  metadata,
@@ -904,21 +921,21 @@ func (ps *processSupervisor) monitor(ctx context.Context, launch spawner.LaunchC
 	_ = ps.start(ctx, launch, false)
 }
 
-func (rc *remoteCoordinator) poolNameForConn(conn *process.Connection) string {
+func (rc *RemoteCoordinator) poolNameForConn(conn *process.Connection) string {
 	if conn == nil {
 		return ""
 	}
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	for name, pool := range rc.pools {
-		if pool != nil && pool.worker != nil && pool.worker.conn == conn {
+		if pool != nil && pool.Worker != nil && pool.Worker.conn == conn {
 			return name
 		}
 	}
 	return ""
 }
 
-func (rc *remoteCoordinator) forwardChildLog(poolName string, evt diagnostics.Event) {
+func (rc *RemoteCoordinator) forwardChildLog(poolName string, evt diagnostics.Event) {
 	if rc == nil {
 		return
 	}
@@ -941,32 +958,32 @@ func (rc *remoteCoordinator) forwardChildLog(poolName string, evt diagnostics.Ev
 	})
 }
 
-func (rc *remoteCoordinator) enrichTelemetry(evt *telemetry.Event) {
+func (rc *RemoteCoordinator) enrichTelemetry(evt *telemetry.Event) {
 	if evt == nil || evt.WorkflowID == "" {
 		return
 	}
 	rc.mu.Lock()
 	job := rc.jobs[evt.WorkflowID]
 	rc.mu.Unlock()
-	if job == nil || job.pool == nil || job.pool.binding == nil || job.pool.binding.pool == nil {
+	if job == nil || job.Pool == nil || job.Pool.Binding == nil || job.Pool.Binding.Pool == nil {
 		return
 	}
 	if evt.Metadata == nil {
 		evt.Metadata = make(map[string]any, 1)
 	}
 	if _, exists := evt.Metadata["pool"]; !exists {
-		evt.Metadata["pool"] = job.pool.binding.pool.Name()
+		evt.Metadata["pool"] = job.Pool.Binding.Pool.Name()
 	}
 }
 
-func deriveRemoteBridgeDefaults(cfg RemoteBridgeConfig, bindings []*poolBinding) RemoteBridgeConfig {
+func deriveRemoteBridgeDefaults(cfg RemoteBridgeConfig, bindings []*Binding) RemoteBridgeConfig {
 	copyCfg := cfg
 	if copyCfg.TLS.CertPath == "" && copyCfg.TLS.KeyPath == "" {
 		for _, binding := range bindings {
-			if binding == nil || binding.remote == nil || binding.remote.spawner == nil {
+			if binding == nil || binding.Remote == nil || binding.Remote.Spawner == nil {
 				continue
 			}
-			spTLS := binding.remote.spawner.cfg.TLS
+			spTLS := binding.Remote.Spawner.Cfg.TLS
 			if spTLS.CertPath != "" && spTLS.KeyPath != "" {
 				copyCfg.TLS = spTLS
 				if spTLS.CAPath != "" && !copyCfg.RequireClientCert {
@@ -979,13 +996,185 @@ func deriveRemoteBridgeDefaults(cfg RemoteBridgeConfig, bindings []*poolBinding)
 	return copyCfg
 }
 
+func validateRemoteBinding(binding *RemoteBinding) error {
+	if binding == nil || binding.Spawner == nil {
+		return nil
+	}
+
+	sp := binding.Spawner
+	spName := strings.TrimSpace(sp.Cfg.Name)
+	if spName == "" {
+		spName = strings.TrimSpace(sp.Name)
+	}
+
+	poolName := ""
+	if binding.Parent != nil && binding.Parent.Pool != nil {
+		poolName = binding.Parent.Pool.Name()
+	}
+
+	token := strings.TrimSpace(sp.Cfg.AuthToken)
+	missingToken := token == ""
+
+	tlsFiles := sp.Cfg.TLS
+	certPath := strings.TrimSpace(tlsFiles.CertPath)
+	keyPath := strings.TrimSpace(tlsFiles.KeyPath)
+	caPath := strings.TrimSpace(tlsFiles.CAPath)
+
+	hasAnyTLS := certPath != "" || keyPath != "" || caPath != ""
+	missingTLS := make([]string, 0, 3)
+	if hasAnyTLS {
+		if certPath == "" {
+			missingTLS = append(missingTLS, "cert")
+		}
+		if keyPath == "" {
+			missingTLS = append(missingTLS, "key")
+		}
+		if caPath == "" {
+			missingTLS = append(missingTLS, "ca")
+		}
+	}
+
+	if !missingToken && len(missingTLS) == 0 {
+		return nil
+	}
+
+	var errs []error
+	if missingToken {
+		errs = append(errs, errors.Join(ErrMissingAuthToken, fmt.Errorf("spawner %q missing auth token", spName)))
+	}
+	if hasAnyTLS {
+		if certPath == "" || keyPath == "" {
+			missingParts := make([]string, 0, 2)
+			if certPath == "" {
+				missingParts = append(missingParts, "cert")
+			}
+			if keyPath == "" {
+				missingParts = append(missingParts, "key")
+			}
+			if len(missingParts) == 0 {
+				missingParts = []string{"cert", "key"}
+			}
+			errs = append(errs, errors.Join(ErrMissingTLSPair, fmt.Errorf("spawner %q missing TLS %s", spName, strings.Join(missingParts, "/"))))
+		}
+		if caPath == "" {
+			errs = append(errs, errors.Join(ErrMissingTLSCA, fmt.Errorf("spawner %q missing TLS ca", spName)))
+		}
+	}
+
+	if len(errs) == 0 {
+		return nil
+	}
+
+	return &remoteValidationError{
+		base:         errors.Join(errs...),
+		spawner:      spName,
+		pool:         poolName,
+		missingToken: missingToken,
+		missingTLS:   missingTLS,
+	}
+}
+
+// ValidateRemoteBinding exposes remote binding validation for callers that need to
+// preflight configurations before starting the coordinator.
+func ValidateRemoteBinding(binding *RemoteBinding) error {
+	return validateRemoteBinding(binding)
+}
+
+type remoteValidationError struct {
+	base         error
+	spawner      string
+	pool         string
+	missingToken bool
+	missingTLS   []string
+}
+
+func (e *remoteValidationError) Error() string {
+	if e == nil || e.base == nil {
+		return "remote binding validation failed"
+	}
+	return e.base.Error()
+}
+
+func (e *remoteValidationError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.base
+}
+
+func (e *remoteValidationError) metadata(fallbackPool string) map[string]any {
+	meta := map[string]any{}
+	if e == nil {
+		return meta
+	}
+	if e.spawner != "" {
+		meta["spawner"] = e.spawner
+	}
+	pool := e.pool
+	if pool == "" {
+		pool = fallbackPool
+	}
+	if pool != "" {
+		meta["pool"] = pool
+	}
+	if len(e.missingTLS) > 0 {
+		meta["missing_tls"] = append([]string(nil), e.missingTLS...)
+	}
+	if e.missingToken {
+		meta["missing_auth_token"] = true
+	}
+	return meta
+}
+
+func reportRemoteValidationFailure(diag node.DiagnosticsWriter, binding *Binding, err error) {
+	if diag == nil || err == nil {
+		return
+	}
+	var failure *remoteValidationError
+	if errors.As(err, &failure) {
+		poolName := ""
+		if binding != nil && binding.Pool != nil {
+			poolName = binding.Pool.Name()
+		}
+		meta := failure.metadata(poolName)
+		if len(meta) == 0 {
+			meta = map[string]any{}
+		}
+		meta["reason"] = "remote_binding_validation"
+		diag.Write(diagnostics.Event{
+			Component: "remote.bootstrap",
+			Severity:  diagnostics.SeverityError,
+			Err:       failure,
+			Metadata:  meta,
+		})
+		return
+	}
+	poolName := ""
+	if binding != nil && binding.Pool != nil {
+		poolName = binding.Pool.Name()
+	}
+	meta := map[string]any{"reason": "remote_binding_validation"}
+	if poolName != "" {
+		meta["pool"] = poolName
+	}
+	diag.Write(diagnostics.Event{
+		Component: "remote.bootstrap",
+		Severity:  diagnostics.SeverityError,
+		Err:       err,
+		Metadata:  meta,
+	})
+}
+
 func buildBridgeServerOptions(cfg RemoteBridgeConfig) ([]grpc.ServerOption, *tls.Config, error) {
 	tlsFiles := cfg.TLS
-	if tlsFiles.CertPath == "" && tlsFiles.KeyPath == "" {
+	if tlsFiles.CertPath == "" && tlsFiles.KeyPath == "" && tlsFiles.CAPath == "" {
 		return nil, nil, nil
 	}
 	if tlsFiles.CertPath == "" || tlsFiles.KeyPath == "" {
-		return nil, nil, fmt.Errorf("gostage: remote bridge TLS requires both cert and key")
+		return nil, nil, errors.Join(ErrMissingTLSPair, fmt.Errorf("gostage: remote bridge TLS requires cert and key"))
+	}
+	if tlsFiles.CAPath == "" {
+		return nil, nil, errors.Join(ErrMissingTLSCA, fmt.Errorf("gostage: remote bridge TLS requires CA path"))
 	}
 	cert, err := tls.LoadX509KeyPair(tlsFiles.CertPath, tlsFiles.KeyPath)
 	if err != nil {
@@ -995,31 +1184,33 @@ func buildBridgeServerOptions(cfg RemoteBridgeConfig) ([]grpc.ServerOption, *tls
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
 	}
-	if tlsFiles.CAPath != "" {
-		caBytes, err := os.ReadFile(tlsFiles.CAPath)
-		if err != nil {
-			return nil, nil, fmt.Errorf("gostage: read bridge CA: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(caBytes) {
-			return nil, nil, errors.New("gostage: bridge CA contains no certificates")
-		}
-		serverTLS.ClientCAs = pool
+	caBytes, err := os.ReadFile(tlsFiles.CAPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("gostage: read bridge CA: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caBytes) {
+		return nil, nil, errors.New("gostage: bridge CA contains no certificates")
+	}
+	serverTLS.ClientCAs = pool
+	if cfg.RequireClientCert {
 		serverTLS.ClientAuth = tls.RequireAndVerifyClientCert
-	} else if cfg.RequireClientCert {
-		serverTLS.ClientAuth = tls.RequireAnyClientCert
 	}
 	return []grpc.ServerOption{grpc.Creds(credentials.NewTLS(serverTLS))}, serverTLS, nil
 }
 
-func (rc *remoteCoordinator) ensureWorkflowRegistered(claimed *state.ClaimedWorkflow) {
-	if claimed == nil || rc.dispatcher == nil || rc.dispatcher.manager == nil {
+func (rc *RemoteCoordinator) ensureWorkflowRegistered(claimed *state.ClaimedWorkflow) {
+	if claimed == nil {
+		return
+	}
+	mgr := rc.dispatcher.Manager()
+	if mgr == nil {
 		return
 	}
 	record := workflowRecordFromClaimed(claimed)
 	ctx := rc.ctx
-	if err := rc.dispatcher.manager.WorkflowRegistered(ctx, record); err != nil {
-		rc.dispatcher.reportError("dispatcher.remote.register", fmt.Errorf("record workflow %s: %w", claimed.ID, err))
+	if err := mgr.WorkflowRegistered(ctx, record); err != nil {
+		rc.dispatcher.ReportError("dispatcher.remote.register", fmt.Errorf("record workflow %s: %w", claimed.ID, err))
 		return
 	}
 	for _, stage := range claimed.Definition.Stages {
@@ -1027,8 +1218,8 @@ func (rc *remoteCoordinator) ensureWorkflowRegistered(claimed *state.ClaimedWork
 			continue
 		}
 		stageRec := stageRecordFromDefinition(stage)
-		if err := rc.dispatcher.manager.StageRegistered(ctx, string(claimed.ID), stageRec); err != nil {
-			rc.dispatcher.reportError("dispatcher.remote.stage", fmt.Errorf("record stage %s for workflow %s: %w", stage.ID, claimed.ID, err))
+		if err := mgr.StageRegistered(ctx, string(claimed.ID), stageRec); err != nil {
+			rc.dispatcher.ReportError("dispatcher.remote.stage", fmt.Errorf("record stage %s for workflow %s: %w", stage.ID, claimed.ID, err))
 			continue
 		}
 		for _, action := range stage.Actions {
@@ -1036,13 +1227,13 @@ func (rc *remoteCoordinator) ensureWorkflowRegistered(claimed *state.ClaimedWork
 			if actionRec.Name == "" {
 				continue
 			}
-			if err := rc.dispatcher.manager.ActionRegistered(ctx, string(claimed.ID), stageRec.ID, actionRec); err != nil {
-				rc.dispatcher.reportError("dispatcher.remote.action", fmt.Errorf("record action %s for workflow %s: %w", actionRec.Name, claimed.ID, err))
+			if err := mgr.ActionRegistered(ctx, string(claimed.ID), stageRec.ID, actionRec); err != nil {
+				rc.dispatcher.ReportError("dispatcher.remote.action", fmt.Errorf("record action %s for workflow %s: %w", actionRec.Name, claimed.ID, err))
 			}
 		}
 	}
-	if err := rc.dispatcher.manager.WorkflowStatus(ctx, string(claimed.ID), state.WorkflowClaimed); err != nil {
-		rc.dispatcher.reportError("dispatcher.remote.status", fmt.Errorf("mark workflow %s claimed: %w", claimed.ID, err))
+	if err := mgr.WorkflowStatus(ctx, string(claimed.ID), state.WorkflowClaimed); err != nil {
+		rc.dispatcher.ReportError("dispatcher.remote.status", fmt.Errorf("mark workflow %s claimed: %w", claimed.ID, err))
 	}
 }
 
@@ -1054,7 +1245,7 @@ func workflowRecordFromClaimed(claimed *state.ClaimedWorkflow) state.WorkflowRec
 	if created.IsZero() {
 		created = claimed.ClaimedAt
 	}
-	metadata := metadataWithoutInitialStore(claimed.Metadata)
+	metadata := scheduler.MetadataWithoutInitialStore(claimed.Metadata)
 	defMeta := copyMap(claimed.Definition.Metadata)
 	if len(defMeta) > 0 {
 		if metadata == nil {
@@ -1123,16 +1314,16 @@ func actionRecordFromDefinition(action workflow.Action) state.ActionRecord {
 	}
 }
 
-func expectedSpawnerMetadata(sp *spawnerBinding) map[string]string {
+func expectedSpawnerMetadata(sp *SpawnerBinding) map[string]string {
 	if sp == nil {
 		return nil
 	}
-	meta := copyStringStringMap(sp.cfg.Metadata)
-	if len(sp.cfg.Tags) > 0 {
+	meta := copyStringStringMap(sp.Cfg.Metadata)
+	if len(sp.Cfg.Tags) > 0 {
 		if meta == nil {
 			meta = make(map[string]string, 1)
 		}
-		meta["tags"] = strings.Join(sp.cfg.Tags, ",")
+		meta["tags"] = strings.Join(sp.Cfg.Tags, ",")
 	}
 	return meta
 }
@@ -1162,4 +1353,38 @@ func errorFromSummary(summary state.ResultSummary) error {
 		return nil
 	}
 	return errors.New(summary.Error)
+}
+func matchedPoolNames(pools []*RemotePool) []string {
+	if len(pools) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(pools))
+	for _, pool := range pools {
+		if pool == nil || pool.Binding == nil || pool.Binding.Pool == nil {
+			continue
+		}
+		names = append(names, pool.Binding.Pool.Name())
+	}
+	return names
+}
+
+func connSpawnerName(meta map[string]string) string {
+	if meta == nil {
+		return ""
+	}
+	return meta["spawner"]
+}
+
+func enrichedPoolMetadata(req *processproto.RegisterNode, pools []string) map[string]any {
+	meta := map[string]any{
+		"node_id":    req.GetNodeId(),
+		"child_type": req.GetChildType(),
+	}
+	if len(pools) > 0 {
+		meta["unknown_pools"] = append([]string(nil), pools...)
+	}
+	if spawner := connSpawnerName(req.GetMetadata()); spawner != "" {
+		meta["spawner"] = spawner
+	}
+	return meta
 }

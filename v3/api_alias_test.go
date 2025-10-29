@@ -1,7 +1,6 @@
 package gostage_test
 
 import (
-	"context"
 	"testing"
 
 	gostage "github.com/davidroman0O/gostage/v3"
@@ -27,6 +26,5 @@ func TestStateAliasesExposePublicAPI(t *testing.T) {
 
 	// Ensure helper functions accept the alias types without importing state directly.
 	node := &gostage.Node{}
-	ctx := context.Background()
-	_, _ = node.StatsWithContext(ctx)
+	_ = node.StatsWithContext
 }

@@ -1,4 +1,4 @@
-package gostage
+package scheduler
 
 import (
 	"context"
@@ -10,41 +10,40 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/davidroman0O/gostage/v3/bootstrap"
 	"github.com/davidroman0O/gostage/v3/diagnostics"
 	"github.com/davidroman0O/gostage/v3/node"
 	"github.com/davidroman0O/gostage/v3/pools"
 	"github.com/davidroman0O/gostage/v3/registry"
 	"github.com/davidroman0O/gostage/v3/runner"
-	"github.com/davidroman0O/gostage/v3/spawner"
 	"github.com/davidroman0O/gostage/v3/state"
 	"github.com/davidroman0O/gostage/v3/telemetry"
 	"github.com/davidroman0O/gostage/v3/workflow"
 )
 
-const metadataInitialStore = "gostage.initial_store"
-
-type dispatcher struct {
+type Dispatcher struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	queue   state.Queue
-	store   state.Store
-	manager state.Manager
+	queue   Queue
+	store   SummaryStore
+	manager ExecutionManager
 
-	runner *runner.Runner
+	runner WorkflowRunner
 
-	pools []*poolBinding
+	bindings []*binding
 
-	telemetry   *node.TelemetryDispatcher
-	diagnostics node.DiagnosticsWriter
-	health      *node.HealthDispatcher
+	telemetry        TelemetryDispatcher
+	diagnostics      DiagnosticsWriter
+	health           HealthPublisher
+	healthDispatcher *node.HealthDispatcher
 
 	logger telemetry.Logger
 
 	claimInterval    time.Duration
 	jitter           time.Duration
 	maxInFlight      int
-	failurePolicy    FailurePolicy
+	failurePolicy    bootstrap.FailurePolicy
 	healthStates     map[string]node.HealthStatus
 	healthDetails    map[string]string
 	healthTimes      map[string]time.Time
@@ -64,51 +63,161 @@ type dispatcher struct {
 	clock     func() time.Time
 }
 
-type poolBinding struct {
+const defaultClaimInterval = 50 * time.Millisecond
+
+type binding struct {
 	pool   *pools.Local
-	remote *remoteBinding
+	remote RemoteExecutor
 }
 
-type remoteBinding struct {
-	spawner     *spawnerBinding
-	poolCfg     PoolConfig
-	coordinator *remoteCoordinator
-	pool        *remotePool
+// Start launches the dispatcher processing loop.
+func (d *Dispatcher) Start() {
+	d.start()
 }
 
-type spawnerBinding struct {
-	name    string
-	cfg     SpawnerConfig
-	process *spawner.ProcessSpawner
-	supervisor *processSupervisor
+// Stop gracefully stops the dispatcher and waits for inflight work.
+func (d *Dispatcher) Stop() {
+	d.stop()
 }
 
-func newDispatcher(ctx context.Context, queue state.Queue, store state.Store, manager state.Manager, runner *runner.Runner, telemetryDisp *node.TelemetryDispatcher, diag node.DiagnosticsWriter, health *node.HealthDispatcher, logger telemetry.Logger, claimInterval, jitter time.Duration, maxInFlight int, failure FailurePolicy, poolBindings []*poolBinding, clock func() time.Time) *dispatcher {
+// PollOnce executes a single scheduling cycle.
+func (d *Dispatcher) PollOnce() {
+	d.pollOnce()
+}
+
+// RegisterCancel associates a cancellation callback with a workflow ID.
+func (d *Dispatcher) RegisterCancel(id state.WorkflowID, cancel context.CancelFunc) {
+	d.registerCancel(id, cancel)
+}
+
+// UnregisterCancel removes the cancellation callback for a workflow ID.
+func (d *Dispatcher) UnregisterCancel(id state.WorkflowID) {
+	d.unregisterCancel(id)
+}
+
+// CancelWorkflow requests cancellation for the given workflow ID.
+func (d *Dispatcher) CancelWorkflow(id state.WorkflowID) {
+	d.cancelWorkflow(id)
+}
+
+// SuppressWorkflowTelemetry mutes specified telemetry events for a workflow.
+func (d *Dispatcher) SuppressWorkflowTelemetry(id state.WorkflowID, kinds ...telemetry.EventKind) {
+	d.suppressWorkflowTelemetry(id, kinds...)
+}
+
+// StatsCounters returns completion/failure/cancellation counters.
+func (d *Dispatcher) StatsCounters() (completed, failed, cancelled int64) {
+	c, f, cn := d.statsCounters()
+	return int64(c), int64(f), int64(cn)
+}
+
+// HealthInfo returns health metadata for the specified pool.
+func (d *Dispatcher) HealthInfo(pool string) (node.HealthStatus, string, time.Time, string, time.Time) {
+	return d.healthInfo(pool)
+}
+
+// PublishHealth publishes a health event for the given pool.
+func (d *Dispatcher) PublishHealth(pool string, status node.HealthStatus, detail string) {
+	d.publishHealth(pool, status, detail)
+}
+
+// Inflight returns the current number of inflight workflows.
+func (d *Dispatcher) Inflight() int32 {
+	if d == nil {
+		return 0
+	}
+	return d.inflight.Load()
+}
+
+// ExecuteForTest executes a claimed workflow synchronously (test helper).
+func (d *Dispatcher) ExecuteForTest(pool *pools.Local, release func(), claimed *state.ClaimedWorkflow) {
+	if d == nil {
+		return
+	}
+	d.inflight.Add(1)
+	d.wg.Add(1)
+	d.execute(pool, release, claimed)
+}
+
+// HealthDispatcher exposes the underlying health dispatcher when available.
+func (d *Dispatcher) HealthDispatcher() *node.HealthDispatcher {
+	return d.healthDispatcher
+}
+
+// ReportError records a diagnostics event for dispatcher components.
+func (d *Dispatcher) ReportError(component string, err error) {
+	d.reportError(component, err)
+}
+
+// Manager exposes the state manager backing the dispatcher.
+func (d *Dispatcher) Manager() ExecutionManager {
+	return d.manager
+}
+
+// TelemetryDispatcher exposes the telemetry dispatcher backing the scheduler.
+func (d *Dispatcher) TelemetryDispatcher() TelemetryDispatcher {
+	return d.telemetry
+}
+
+// BeginRemoteDispatch prepares dispatcher bookkeeping for a remote workflow.
+func (d *Dispatcher) BeginRemoteDispatch(id state.WorkflowID, cancel context.CancelFunc) {
+	d.inflight.Add(1)
+	d.wg.Add(1)
+	d.registerCancel(id, cancel)
+	d.clearTelemetry(id)
+	d.suppressWorkflowTelemetry(id,
+		telemetry.EventWorkflowStarted,
+		telemetry.EventWorkflowCompleted,
+		telemetry.EventWorkflowFailed,
+		telemetry.EventWorkflowCancelled,
+		telemetry.EventWorkflowSummary,
+	)
+}
+
+// AbortRemoteDispatch cleans up dispatcher bookkeeping when a remote workflow is aborted before completion.
+func (d *Dispatcher) AbortRemoteDispatch(id state.WorkflowID) {
+	d.unregisterCancel(id)
+	d.inflight.Add(-1)
+	d.wg.Done()
+	d.clearTelemetry(id)
+}
+
+func New(ctx context.Context, queue Queue, store SummaryStore, manager ExecutionManager, runner WorkflowRunner, telemetryDisp TelemetryDispatcher, diag DiagnosticsWriter, health HealthPublisher, logger telemetry.Logger, bindings []*Binding, opts Options) *Dispatcher {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	dctx, cancel := context.WithCancel(ctx)
-	d := &dispatcher{
+	internalBindings := make([]*binding, 0, len(bindings))
+	for _, b := range bindings {
+		if b == nil || b.Pool == nil {
+			continue
+		}
+		internalBindings = append(internalBindings, &binding{
+			pool:   b.Pool,
+			remote: b.Remote,
+		})
+	}
+	d := &Dispatcher{
 		ctx:           dctx,
 		cancel:        cancel,
 		queue:         queue,
 		store:         store,
 		runner:        runner,
 		manager:       manager,
-		pools:         poolBindings,
+		bindings:      internalBindings,
 		telemetry:     telemetryDisp,
 		diagnostics:   diag,
 		health:        health,
 		logger:        logger,
-		claimInterval: claimInterval,
-		jitter:        jitter,
-		maxInFlight:   maxInFlight,
-		failurePolicy: failure,
+		claimInterval: opts.ClaimInterval,
+		jitter:        opts.Jitter,
+		maxInFlight:   opts.MaxInFlight,
+		failurePolicy: opts.FailurePolicy,
 	}
-	if clock == nil {
-		clock = time.Now
+	if opts.Clock == nil {
+		opts.Clock = time.Now
 	}
-	d.clock = clock
+	d.clock = opts.Clock
 	if d.claimInterval <= 0 {
 		d.claimInterval = defaultClaimInterval
 	}
@@ -119,12 +228,15 @@ func newDispatcher(ctx context.Context, queue state.Queue, store state.Store, ma
 		d.healthErrorTimes = make(map[string]time.Time)
 		d.healthErrorInfo = make(map[string]string)
 	}
+	if hd, ok := health.(*node.HealthDispatcher); ok {
+		d.healthDispatcher = hd
+	}
 	d.cancels = make(map[state.WorkflowID]context.CancelFunc)
 	d.pendingCancels = make(map[state.WorkflowID]struct{})
 	return d
 }
 
-func (d *dispatcher) emitWorkflowEvent(kind telemetry.EventKind, id state.WorkflowID, attempt int, metadata map[string]any, err error) {
+func (d *Dispatcher) emitWorkflowEvent(kind telemetry.EventKind, id state.WorkflowID, attempt int, metadata map[string]any, err error) {
 	if d == nil || d.telemetry == nil {
 		return
 	}
@@ -143,17 +255,17 @@ func (d *dispatcher) emitWorkflowEvent(kind telemetry.EventKind, id state.Workfl
 	}
 }
 
-func (d *dispatcher) start() {
+func (d *Dispatcher) start() {
 	d.wg.Add(1)
 	go d.loop()
 	if d.health != nil {
-		for _, binding := range d.pools {
+		for _, binding := range d.bindings {
 			d.publishHealth(binding.pool.Name(), node.HealthHealthy, "ready")
 		}
 	}
 }
 
-func (d *dispatcher) loop() {
+func (d *Dispatcher) loop() {
 	defer d.wg.Done()
 	for {
 		if d.ctx.Err() != nil {
@@ -180,11 +292,11 @@ func (d *dispatcher) loop() {
 	}
 }
 
-func (d *dispatcher) pollOnce() {
+func (d *Dispatcher) pollOnce() {
 	if max := d.maxInFlight; max > 0 && int(d.inflight.Load()) >= max {
 		return
 	}
-	for _, binding := range d.pools {
+	for _, binding := range d.bindings {
 		if d.maxInFlight > 0 && int(d.inflight.Load()) >= d.maxInFlight {
 			return
 		}
@@ -209,8 +321,8 @@ func (d *dispatcher) pollOnce() {
 		d.emitWorkflowEvent(telemetry.EventWorkflowClaimed, claimed.ID, claimed.Attempt, map[string]any{
 			"pool": pool.Name(),
 		}, nil)
-		if binding.remote != nil && binding.remote.coordinator != nil {
-			if err := binding.remote.coordinator.dispatch(binding, claimed, release); err != nil {
+		if binding.remote != nil && binding.remote.Ready() {
+			if err := binding.remote.Dispatch(claimed, release); err != nil {
 				release()
 				d.reportError("dispatcher.remote", fmt.Errorf("dispatch workflow %s: %w", claimed.ID, err))
 				d.publishHealth(pool.Name(), node.HealthUnavailable, err.Error())
@@ -226,10 +338,12 @@ func (d *dispatcher) pollOnce() {
 	}
 }
 
-func (d *dispatcher) execute(pool *pools.Local, release func(), claimed *state.ClaimedWorkflow) {
+func (d *Dispatcher) execute(pool *pools.Local, release func(), claimed *state.ClaimedWorkflow) {
 	defer d.wg.Done()
 	defer d.inflight.Add(-1)
 	defer release()
+
+	d.clearTelemetry(claimed.ID)
 
 	execCtx, cancel := context.WithCancel(d.ctx)
 	defer cancel()
@@ -240,7 +354,7 @@ func (d *dispatcher) execute(pool *pools.Local, release func(), claimed *state.C
 		"pool": pool.Name(),
 	}, nil)
 
-	initialStore := extractInitialStore(claimed.Metadata)
+	initialStore := ExtractInitialStore(claimed.Metadata)
 	result, err := d.runWorkflow(execCtx, pool, claimed, initialStore)
 	if err != nil {
 		d.reportError("dispatcher.run", err)
@@ -271,10 +385,10 @@ func (d *dispatcher) execute(pool *pools.Local, release func(), claimed *state.C
 	}
 	result.state = finalState
 	result.report.Status = executionStatusToWorkflow(result.state)
-	result.reason = normalizeReason(outcome.Reason, finalState, result.result.Success)
+	result.reason = d.normalizeReason(claimed.ID, outcome.Reason, finalState, result.result.Success)
 
 	switch outcome.Action {
-	case FailureActionRetry:
+	case bootstrap.FailureActionRetry:
 		preserveInitialStoreForRetry(claimed, result.result.FinalStore)
 		d.emitWorkflowEvent(telemetry.EventWorkflowRetry, claimed.ID, claimed.Attempt, map[string]any{
 			"pool":   pool.Name(),
@@ -285,6 +399,7 @@ func (d *dispatcher) execute(pool *pools.Local, release func(), claimed *state.C
 			d.reportError("dispatcher.release", fmt.Errorf("release workflow %s: %w", claimed.ID, err))
 			d.publishHealth(pool.Name(), node.HealthUnavailable, err.Error())
 		}
+		d.clearTelemetry(claimed.ID)
 		return
 	}
 
@@ -326,9 +441,19 @@ func (d *dispatcher) execute(pool *pools.Local, release func(), claimed *state.C
 	} else {
 		d.recordCompletion(result.state)
 	}
+
+	attempt := summary.Attempt
+	if attempt == 0 {
+		attempt = claimed.Attempt
+	}
+	poolName := ""
+	if pool != nil {
+		poolName = pool.Name()
+	}
+	d.verifyTelemetryCoverage(claimed.ID, attempt, result.state, poolName)
 }
 
-func (d *dispatcher) runWorkflow(ctx context.Context, pool *pools.Local, claimed *state.ClaimedWorkflow, initialStore map[string]any) (runResult, error) {
+func (d *Dispatcher) runWorkflow(ctx context.Context, pool *pools.Local, claimed *state.ClaimedWorkflow, initialStore map[string]any) (runResult, error) {
 	def := claimed.Definition.Clone()
 	def.ID = string(claimed.ID)
 	wf, err := workflow.Materialize(def, registry.Default())
@@ -360,10 +485,17 @@ func (d *dispatcher) runWorkflow(ctx context.Context, pool *pools.Local, claimed
 		"pool":    pool.Name(),
 	}, res.Error)
 
-	return runResult{claimed: claimed, result: res, report: report, state: finalState, clock: d.clock}, nil
+	return runResult{
+		claimed:    claimed,
+		result:     res,
+		report:     report,
+		state:      finalState,
+		clock:      d.clock,
+		dispatcher: d,
+	}, nil
 }
 
-func (d *dispatcher) suppressWorkflowTelemetry(id state.WorkflowID, kinds ...telemetry.EventKind) {
+func (d *Dispatcher) suppressWorkflowTelemetry(id state.WorkflowID, kinds ...telemetry.EventKind) {
 	if d == nil || len(kinds) == 0 {
 		return
 	}
@@ -374,12 +506,12 @@ func (d *dispatcher) suppressWorkflowTelemetry(id state.WorkflowID, kinds ...tel
 	}
 }
 
-func (d *dispatcher) stop() {
+func (d *Dispatcher) stop() {
 	d.cancel()
 	d.wg.Wait()
 }
 
-func (d *dispatcher) registerCancel(id state.WorkflowID, cancel context.CancelFunc) {
+func (d *Dispatcher) registerCancel(id state.WorkflowID, cancel context.CancelFunc) {
 	if cancel == nil {
 		return
 	}
@@ -392,13 +524,13 @@ func (d *dispatcher) registerCancel(id state.WorkflowID, cancel context.CancelFu
 	d.cancelMu.Unlock()
 }
 
-func (d *dispatcher) unregisterCancel(id state.WorkflowID) {
+func (d *Dispatcher) unregisterCancel(id state.WorkflowID) {
 	d.cancelMu.Lock()
 	delete(d.cancels, id)
 	d.cancelMu.Unlock()
 }
 
-func (d *dispatcher) cancelWorkflow(id state.WorkflowID) {
+func (d *Dispatcher) cancelWorkflow(id state.WorkflowID) {
 	d.cancelMu.RLock()
 	cancel := d.cancels[id]
 	d.cancelMu.RUnlock()
@@ -413,7 +545,7 @@ func (d *dispatcher) cancelWorkflow(id state.WorkflowID) {
 	d.emitWorkflowEvent(telemetry.EventWorkflowCancelRequest, id, 0, map[string]any{"pending": true}, nil)
 }
 
-func (d *dispatcher) publishHealth(pool string, status node.HealthStatus, detail string) {
+func (d *Dispatcher) publishHealth(pool string, status node.HealthStatus, detail string) {
 	if d.health == nil {
 		return
 	}
@@ -457,7 +589,7 @@ func (d *dispatcher) publishHealth(pool string, status node.HealthStatus, detail
 	})
 }
 
-func (d *dispatcher) healthInfo(pool string) (node.HealthStatus, string, time.Time, string, time.Time) {
+func (d *Dispatcher) healthInfo(pool string) (node.HealthStatus, string, time.Time, string, time.Time) {
 	if d.health == nil {
 		return node.HealthHealthy, "", time.Time{}, "", time.Time{}
 	}
@@ -474,7 +606,7 @@ func (d *dispatcher) healthInfo(pool string) (node.HealthStatus, string, time.Ti
 	return status, detail, lastChange, lastErrDetail, lastErr
 }
 
-func (d *dispatcher) recordCompletion(state runner.ExecutionStatus) {
+func (d *Dispatcher) recordCompletion(state runner.ExecutionStatus) {
 	switch state {
 	case runner.StatusCompleted:
 		d.completed.Add(1)
@@ -485,42 +617,42 @@ func (d *dispatcher) recordCompletion(state runner.ExecutionStatus) {
 	}
 }
 
-func (d *dispatcher) statsCounters() (completed, failed, cancelled int) {
+func (d *Dispatcher) statsCounters() (completed, failed, cancelled int) {
 	if d == nil {
 		return 0, 0, 0
 	}
 	return int(d.completed.Load()), int(d.failed.Load()), int(d.cancelled.Load())
 }
 
-func (d *dispatcher) decideFailure(claimed *state.ClaimedWorkflow, result runResult) FailureOutcome {
+func (d *Dispatcher) decideFailure(claimed *state.ClaimedWorkflow, result runResult) bootstrap.FailureOutcome {
 	if result.result.Success {
-		return FailureOutcome{
-			Action:     FailureActionAck,
+		return bootstrap.FailureOutcome{
+			Action:     bootstrap.FailureActionAck,
 			FinalState: runner.StatusCompleted,
 			Reason:     state.TerminationReasonSuccess,
 		}
 	}
 	if result.state == runner.StatusCancelled {
-		return FailureOutcome{
-			Action:     FailureActionAck,
+		return bootstrap.FailureOutcome{
+			Action:     bootstrap.FailureActionAck,
 			FinalState: runner.StatusCancelled,
 			Reason:     state.TerminationReasonUserCancel,
 		}
 	}
 	if d.failurePolicy == nil {
-		return FailureOutcome{
-			Action:     FailureActionAck,
+		return bootstrap.FailureOutcome{
+			Action:     bootstrap.FailureActionAck,
 			FinalState: result.state,
 			Reason:     state.TerminationReasonFailure,
 		}
 	}
-	ctx := FailureContext{
+	ctx := bootstrap.FailureContext{
 		WorkflowID: claimed.ID,
 		Attempt:    claimed.Attempt,
 		Err:        result.result.Error,
 	}
 	outcome := d.failurePolicy.Decide(d.ctx, ctx)
-	if outcome.Action == FailureActionRetry {
+	if outcome.Action == bootstrap.FailureActionRetry {
 		if outcome.Reason == "" {
 			outcome.Reason = state.TerminationReasonFailure
 		}
@@ -530,6 +662,12 @@ func (d *dispatcher) decideFailure(claimed *state.ClaimedWorkflow, result runRes
 		outcome.FinalState = result.state
 	}
 	if outcome.Reason == "" {
+		if d != nil {
+			d.reportErrorWithMetadata("dispatcher.reason.missing", fmt.Errorf("workflow %s missing termination reason", claimed.ID), map[string]any{
+				"workflow_id": string(claimed.ID),
+				"attempt":     claimed.Attempt,
+			})
+		}
 		switch outcome.FinalState {
 		case runner.StatusCancelled:
 			outcome.Reason = state.TerminationReasonPolicyCancel
@@ -539,28 +677,32 @@ func (d *dispatcher) decideFailure(claimed *state.ClaimedWorkflow, result runRes
 			outcome.Reason = state.TerminationReasonFailure
 		}
 	}
-	if outcome.Action == FailureActionFinalize {
+	if outcome.Action == bootstrap.FailureActionFinalize {
 		if outcome.FinalState == "" {
 			outcome.FinalState = runner.StatusCancelled
 		}
 		return outcome
 	}
 	// Default: acknowledge.
-	if outcome.Action == FailureActionAck {
+	if outcome.Action == bootstrap.FailureActionAck {
 		if outcome.Reason == "" {
 			outcome.Reason = state.TerminationReasonFailure
 		}
 		return outcome
 	}
-	return FailureOutcome{
-		Action:     FailureActionAck,
+	return bootstrap.FailureOutcome{
+		Action:     bootstrap.FailureActionAck,
 		FinalState: result.state,
 		Reason:     state.TerminationReasonFailure,
 	}
 }
 
-func (d *dispatcher) reportError(component string, err error) {
-	if err == nil {
+func (d *Dispatcher) reportError(component string, err error) {
+	d.reportErrorWithMetadata(component, err, nil)
+}
+
+func (d *Dispatcher) reportErrorWithMetadata(component string, err error, metadata map[string]any) {
+	if err == nil && len(metadata) == 0 {
 		return
 	}
 	if d.diagnostics != nil {
@@ -569,21 +711,98 @@ func (d *dispatcher) reportError(component string, err error) {
 			Component:  component,
 			Severity:   diagnostics.SeverityError,
 			Err:        err,
+			Metadata:   copyMap(metadata),
 		})
 	}
-	if d.logger != nil {
+	if err != nil && d.logger != nil {
 		d.logger.Error(component, "error", err)
 	}
 }
 
-func (d *dispatcher) now() time.Time {
+func (d *Dispatcher) now() time.Time {
 	if d != nil && d.clock != nil {
 		return d.clock()
 	}
 	return time.Now()
 }
 
-func (d *dispatcher) completeRemote(claimed *state.ClaimedWorkflow, pool *pools.Local, summary state.ResultSummary, release func()) {
+func (d *Dispatcher) clearTelemetry(id state.WorkflowID) {
+	if d == nil || d.telemetry == nil || id == "" {
+		return
+	}
+	d.telemetry.ClearCoverage(string(id))
+}
+
+func (d *Dispatcher) verifyTelemetryCoverage(id state.WorkflowID, attempt int, finalState runner.ExecutionStatus, pool string) {
+	if d == nil || d.telemetry == nil || id == "" {
+		return
+	}
+	coverage := d.telemetry.Coverage(string(id))
+	required := requiredWorkflowEvents(finalState)
+	required = append(required, telemetry.EventWorkflowSummary)
+	missing := missingTelemetry(required, coverage)
+	if len(missing) == 0 {
+		d.telemetry.ClearCoverage(string(id))
+		return
+	}
+	missingStrings := eventKindsToStrings(missing)
+	meta := map[string]any{
+		"workflow_id": string(id),
+		"missing":     missingStrings,
+	}
+	if attempt > 0 {
+		meta["attempt"] = attempt
+	}
+	if pool != "" {
+		meta["pool"] = pool
+	}
+	d.reportErrorWithMetadata("telemetry.missing", fmt.Errorf("workflow %s missing telemetry events: %s", id, strings.Join(missingStrings, ",")), meta)
+	d.telemetry.ClearCoverage(string(id))
+}
+
+func requiredWorkflowEvents(state runner.ExecutionStatus) []telemetry.EventKind {
+	switch state {
+	case runner.StatusCompleted:
+		return []telemetry.EventKind{telemetry.EventWorkflowCompleted}
+	case runner.StatusCancelled:
+		return []telemetry.EventKind{telemetry.EventWorkflowCancelled}
+	case runner.StatusFailed:
+		return []telemetry.EventKind{telemetry.EventWorkflowFailed}
+	default:
+		return nil
+	}
+}
+
+func missingTelemetry(required []telemetry.EventKind, coverage map[telemetry.EventKind]int) []telemetry.EventKind {
+	if len(required) == 0 {
+		return nil
+	}
+	missing := make([]telemetry.EventKind, 0, len(required))
+	for _, kind := range required {
+		if kind == "" {
+			continue
+		}
+		if coverage == nil || coverage[kind] == 0 {
+			missing = append(missing, kind)
+		}
+	}
+	return missing
+}
+
+func eventKindsToStrings(kinds []telemetry.EventKind) []string {
+	if len(kinds) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(kinds))
+	for _, kind := range kinds {
+		if kind != "" {
+			out = append(out, string(kind))
+		}
+	}
+	return out
+}
+
+func (d *Dispatcher) CompleteRemote(claimed *state.ClaimedWorkflow, pool *pools.Local, summary state.ResultSummary, release func()) {
 	if claimed == nil {
 		if release != nil {
 			release()
@@ -615,7 +834,8 @@ func (d *dispatcher) completeRemote(claimed *state.ClaimedWorkflow, pool *pools.
 	}
 
 	run := runResult{
-		claimed: claimed,
+		dispatcher: d,
+		claimed:    claimed,
 		result: runner.RunResult{
 			Success:         summary.Success,
 			Error:           runErr,
@@ -685,10 +905,11 @@ func (d *dispatcher) completeRemote(claimed *state.ClaimedWorkflow, pool *pools.
 	}
 	run.state = finalState
 	run.report.Status = executionStatusToWorkflow(run.state)
-	run.reason = normalizeReason(outcome.Reason, run.state, run.result.Success)
+	run.reason = d.normalizeReason(claimed.ID, outcome.Reason, run.state, run.result.Success)
+	run.report.Reason = run.reason
 
 	switch outcome.Action {
-	case FailureActionRetry:
+	case bootstrap.FailureActionRetry:
 		preserveInitialStoreForRetry(claimed, run.result.FinalStore)
 		metadata := map[string]any{
 			"pool":   poolName,
@@ -704,6 +925,7 @@ func (d *dispatcher) completeRemote(claimed *state.ClaimedWorkflow, pool *pools.
 				d.publishHealth(poolName, node.HealthUnavailable, err.Error())
 			}
 		}
+		d.clearTelemetry(claimed.ID)
 		return
 	}
 
@@ -743,6 +965,12 @@ func (d *dispatcher) completeRemote(claimed *state.ClaimedWorkflow, pool *pools.
 		}
 	}
 
+	if d.manager != nil {
+		if err := d.manager.WorkflowStatus(d.ctx, string(claimed.ID), executionStatusToWorkflow(run.state)); err != nil {
+			d.reportError("dispatcher.remote.workflow_status", fmt.Errorf("update workflow %s status: %w", claimed.ID, err))
+		}
+	}
+
 	if err := d.queue.Ack(d.ctx, claimed.ID, finalSummary); err != nil {
 		d.reportError("dispatcher.remote.ack", fmt.Errorf("ack workflow %s: %w", claimed.ID, err))
 		if poolName != "" {
@@ -751,15 +979,22 @@ func (d *dispatcher) completeRemote(claimed *state.ClaimedWorkflow, pool *pools.
 	} else {
 		d.recordCompletion(run.state)
 	}
+
+	telemetryAttempt := finalSummary.Attempt
+	if telemetryAttempt == 0 {
+		telemetryAttempt = attempt
+	}
+	d.verifyTelemetryCoverage(claimed.ID, telemetryAttempt, run.state, poolName)
 }
 
 type runResult struct {
-	claimed *state.ClaimedWorkflow
-	result  runner.RunResult
-	report  state.ExecutionReport
-	state   runner.ExecutionStatus
-	reason  state.TerminationReason
-	clock   func() time.Time
+	claimed    *state.ClaimedWorkflow
+	result     runner.RunResult
+	report     state.ExecutionReport
+	state      runner.ExecutionStatus
+	reason     state.TerminationReason
+	clock      func() time.Time
+	dispatcher *Dispatcher
 }
 
 func (r runResult) toSummary() state.ResultSummary {
@@ -771,7 +1006,16 @@ func (r runResult) toSummary() state.ResultSummary {
 			completedAt = time.Now()
 		}
 	}
-	reason := normalizeReason(r.reason, r.state, r.result.Success)
+	wfID := state.WorkflowID(r.report.WorkflowID)
+	if wfID == "" && r.claimed != nil {
+		wfID = r.claimed.ID
+	}
+	var reason state.TerminationReason
+	if r.dispatcher != nil {
+		reason = r.dispatcher.normalizeReason(wfID, r.reason, r.state, r.result.Success)
+	} else {
+		reason = normalizeReasonValue(r.reason, r.state, r.result.Success)
+	}
 	summary := state.ResultSummary{
 		Success:         r.result.Success,
 		Duration:        r.result.Duration,
@@ -832,11 +1076,11 @@ func (r runResult) toSummary() state.ResultSummary {
 	return summary
 }
 
-func extractInitialStore(metadata map[string]any) map[string]any {
+func ExtractInitialStore(metadata map[string]any) map[string]any {
 	if len(metadata) == 0 {
 		return nil
 	}
-	raw, ok := metadata[metadataInitialStore]
+	raw, ok := metadata[MetadataInitialStore]
 	if !ok {
 		return nil
 	}
@@ -846,7 +1090,7 @@ func extractInitialStore(metadata map[string]any) map[string]any {
 	return nil
 }
 
-func (d *dispatcher) applyRemoteStatuses(claimed *state.ClaimedWorkflow, summary state.ResultSummary) {
+func (d *Dispatcher) applyRemoteStatuses(claimed *state.ClaimedWorkflow, summary state.ResultSummary) {
 	if d == nil || d.manager == nil || claimed == nil {
 		return
 	}
@@ -989,7 +1233,20 @@ func copyStringMap(src map[string]string) map[string]string {
 	return dst
 }
 
-func normalizeReason(reason state.TerminationReason, finalState runner.ExecutionStatus, success bool) state.TerminationReason {
+func (d *Dispatcher) normalizeReason(id state.WorkflowID, reason state.TerminationReason, finalState runner.ExecutionStatus, success bool) state.TerminationReason {
+	normalized := normalizeReasonValue(reason, finalState, success)
+	if reason == "" && d != nil {
+		meta := map[string]any{
+			"workflow_id": string(id),
+			"final_state": string(finalState),
+			"success":     success,
+		}
+		d.reportErrorWithMetadata("dispatcher.reason.missing", fmt.Errorf("workflow %s missing termination reason", id), meta)
+	}
+	return normalized
+}
+
+func normalizeReasonValue(reason state.TerminationReason, finalState runner.ExecutionStatus, success bool) state.TerminationReason {
 	if reason != "" {
 		return reason
 	}
@@ -1006,13 +1263,13 @@ func normalizeReason(reason state.TerminationReason, finalState runner.Execution
 	}
 }
 
-func metadataWithoutInitialStore(src map[string]any) map[string]any {
+func MetadataWithoutInitialStore(src map[string]any) map[string]any {
 	if len(src) == 0 {
 		return nil
 	}
 	dst := make(map[string]any, len(src))
 	for k, v := range src {
-		if k == metadataInitialStore {
+		if k == MetadataInitialStore {
 			continue
 		}
 		dst[k] = v
@@ -1033,7 +1290,7 @@ func preserveInitialStoreForRetry(claimed *state.ClaimedWorkflow, store map[stri
 	if claimed.Metadata == nil {
 		claimed.Metadata = make(map[string]any, 1)
 	}
-	claimed.Metadata[metadataInitialStore] = copyMap(store)
+	claimed.Metadata[MetadataInitialStore] = copyMap(store)
 }
 
 func executionStatusToWorkflow(status runner.ExecutionStatus) state.WorkflowState {

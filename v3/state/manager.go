@@ -23,6 +23,8 @@ type StoreManager struct {
 	observers []ManagerObserver
 }
 
+var _ Writer = (*StoreManager)(nil)
+
 type workflowSnapshot struct {
 	record  WorkflowRecord
 	summary *ResultSummary

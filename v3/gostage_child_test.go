@@ -5,26 +5,26 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/davidroman0O/gostage/v3/bootstrap"
 	"github.com/davidroman0O/gostage/v3/child"
+	"github.com/davidroman0O/gostage/v3/orchestrator"
 )
 
 func resetChildRegistrations() {
-	childHandlersMu.Lock()
-	defaultChildHandler = nil
-	namedChildHandlers = make(map[string]*childHandlerRegistration)
-	childHandlersMu.Unlock()
+	orchestrator.ResetChildRegistrationsForTest()
 }
 
 func TestRunChildModeExecutesHandler(t *testing.T) {
+	originalDetect := orchestrator.ChildDetectForTest()
 	t.Cleanup(func() {
-		childDetect = child.Detect
+		orchestrator.SetChildDetectForTest(originalDetect)
 		resetChildRegistrations()
 	})
 
 	sentinelErr := errors.New("sentinel")
-	childDetect = func(args []string, getenv child.GetenvFunc) (child.Config, bool, error) {
+	orchestrator.SetChildDetectForTest(func(args []string, getenv child.GetenvFunc) (child.Config, bool, error) {
 		return child.Config{Address: "127.0.0.1:12345"}, true, nil
-	}
+	})
 
 	called := false
 	HandleChild(func(ctx context.Context, node ChildNode) error {
@@ -47,32 +47,66 @@ func TestRunChildModeExecutesHandler(t *testing.T) {
 	}
 }
 
+func TestRunChildModeMetadataConflictFails(t *testing.T) {
+	originalDetect := orchestrator.ChildDetectForTest()
+	t.Cleanup(func() {
+		orchestrator.SetChildDetectForTest(originalDetect)
+		resetChildRegistrations()
+	})
+
+	orchestrator.SetChildDetectForTest(func(args []string, getenv child.GetenvFunc) (child.Config, bool, error) {
+		return child.Config{
+			Address:  "127.0.0.1:12345",
+			Metadata: map[string]string{"region": "parent"},
+		}, true, nil
+	})
+
+	HandleChild(func(ctx context.Context, node ChildNode) error {
+		t.Fatalf("handler should not execute when metadata conflicts")
+		return nil
+	}, bootstrap.ChildOptionFunc(func(opts *bootstrap.ChildOptions) {
+		if opts.Metadata == nil {
+			opts.Metadata = make(map[string]string)
+		}
+		opts.Metadata["region"] = "child"
+	}))
+
+	_, _, err := Run(context.Background())
+	if err == nil {
+		t.Fatalf("expected metadata conflict error")
+	}
+	if !errors.Is(err, bootstrap.ErrChildMetadataConflict) {
+		t.Fatalf("expected ErrChildMetadataConflict, got %v", err)
+	}
+}
+
 func TestMergeChildConfigUsesOptions(t *testing.T) {
 	logger := &stubLogger{}
-	reg := &childHandlerRegistration{
-		options: childOptions{
-			pools: []PoolConfig{{
-				Name:     "remote",
-				Slots:    2,
-				Tags:     []string{"payments"},
-				Metadata: map[string]any{"zone": "us-east"},
-			}},
-			metadata: map[string]string{
-				"region":  "us",
-				"cluster": "blue",
-			},
-			tls: &TLSFiles{
-				CertPath: "/tmp/cert.pem",
-				KeyPath:  "/tmp/key.pem",
-				CAPath:   "/tmp/ca.pem",
-			},
-			authToken: ptrToString("override-token"),
-			logger:    logger,
-			tags:      []string{"remote", "child"},
+	reg := orchestrator.NewChildHandlerRegistration(bootstrap.ChildOptions{
+		Pools: []PoolConfig{{
+			Name:     "remote",
+			Slots:    2,
+			Tags:     []string{"payments"},
+			Metadata: map[string]any{"zone": "us-east"},
+		}},
+		Metadata: map[string]string{
+			"region":  "us",
+			"cluster": "blue",
 		},
-	}
+		TLS: &TLSFiles{
+			CertPath: "/tmp/cert.pem",
+			KeyPath:  "/tmp/key.pem",
+			CAPath:   "/tmp/ca.pem",
+		},
+		AuthToken: ptrToString("override-token"),
+		Logger:    logger,
+		Tags:      []string{"remote", "child"},
+	})
 
-	cfg := mergeChildConfig(child.Config{}, reg)
+	cfg, err := orchestrator.MergeChildConfigForTest(child.Config{}, reg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(cfg.Pools) != 1 {
 		t.Fatalf("expected 1 pool, got %d", len(cfg.Pools))
 	}
@@ -84,6 +118,9 @@ func TestMergeChildConfigUsesOptions(t *testing.T) {
 	}
 	if cfg.Metadata["region"] != "us" {
 		t.Fatalf("expected metadata applied, got %v", cfg.Metadata)
+	}
+	if cfg.Metadata["cluster"] != "blue" {
+		t.Fatalf("expected metadata enriched, got %v", cfg.Metadata)
 	}
 	if cfg.AuthToken != "override-token" {
 		t.Fatalf("expected auth token override, got %q", cfg.AuthToken)
@@ -98,10 +135,56 @@ func TestMergeChildConfigUsesOptions(t *testing.T) {
 		t.Fatalf("expected tags override, got %+v", cfg.Tags)
 	}
 
+	t.Run("metadata scenarios", func(t *testing.T) {
+		t.Run("matching value succeeds", func(t *testing.T) {
+			base := child.Config{Metadata: map[string]string{"region": "us"}}
+			merged, err := orchestrator.MergeChildConfigForTest(base, reg)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if merged.Metadata["region"] != "us" || merged.Metadata["cluster"] != "blue" {
+				t.Fatalf("expected metadata preserved and enriched, got %v", merged.Metadata)
+			}
+		})
+
+		t.Run("distinct keys succeed", func(t *testing.T) {
+			base := child.Config{Metadata: map[string]string{"env": "prod"}}
+			merged, err := orchestrator.MergeChildConfigForTest(base, reg)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if merged.Metadata["env"] != "prod" {
+				t.Fatalf("expected env metadata preserved, got %v", merged.Metadata)
+			}
+			if merged.Metadata["region"] != "us" {
+				t.Fatalf("expected handler metadata applied, got %v", merged.Metadata)
+			}
+		})
+
+		t.Run("conflicting values fail", func(t *testing.T) {
+			base := child.Config{Metadata: map[string]string{"region": "eu"}}
+			_, err := orchestrator.MergeChildConfigForTest(base, reg)
+			if err == nil {
+				t.Fatalf("expected conflict error")
+			}
+			if !errors.Is(err, bootstrap.ErrChildMetadataConflict) {
+				t.Fatalf("expected ErrChildMetadataConflict, got %v", err)
+			}
+			var conflictErr *orchestrator.ChildMetadataConflictError
+			if !errors.As(err, &conflictErr) {
+				t.Fatalf("expected ChildMetadataConflictError, got %T", err)
+			}
+			conflicts := conflictErr.Conflicts()
+			if len(conflicts) != 1 || conflicts[0].Key != "region" || conflicts[0].Existing != "eu" || conflicts[0].Proposed != "us" {
+				t.Fatalf("unexpected conflict payload: %+v", conflicts)
+			}
+		})
+	})
+
 	baseLogger := &stubLogger{}
 	base := child.Config{
 		Pools:     []child.PoolSpec{{Name: "existing"}},
-		Metadata:  map[string]string{"region": "override"},
+		Metadata:  map[string]string{"env": "prod"},
 		AuthToken: "base-token",
 		TLS: child.TLSConfig{
 			CertPath: "base-cert",
@@ -111,12 +194,12 @@ func TestMergeChildConfigUsesOptions(t *testing.T) {
 		Logger: baseLogger,
 		Tags:   []string{"existing"},
 	}
-	merged := mergeChildConfig(base, reg)
+	merged, err := orchestrator.MergeChildConfigForTest(base, reg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(merged.Pools) != 1 || merged.Pools[0].Name != "existing" {
 		t.Fatalf("expected existing pools to remain, got %+v", merged.Pools)
-	}
-	if merged.Metadata["region"] != "us" {
-		t.Fatalf("expected child metadata override, got %v", merged.Metadata)
 	}
 	if merged.Metadata["cluster"] != "blue" {
 		t.Fatalf("expected handler metadata to augment, got %v", merged.Metadata)
@@ -133,14 +216,8 @@ func TestMergeChildConfigUsesOptions(t *testing.T) {
 	if len(merged.Tags) != 3 {
 		t.Fatalf("expected tags merged, got %+v", merged.Tags)
 	}
-	if len(baseLogger.warns) != 1 {
-		t.Fatalf("expected override warning, got %+v", baseLogger.warns)
-	}
-	if baseLogger.warns[0].msg != "child metadata override" {
-		t.Fatalf("unexpected warning message: %+v", baseLogger.warns[0])
-	}
-	if !containsKV(baseLogger.warns[0].kv, "key", "region") || !containsKV(baseLogger.warns[0].kv, "new", "us") {
-		t.Fatalf("warning missing key/new: %+v", baseLogger.warns[0].kv)
+	if len(baseLogger.warns) != 0 {
+		t.Fatalf("expected no warnings, got %+v", baseLogger.warns)
 	}
 }
 

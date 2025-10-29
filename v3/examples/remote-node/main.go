@@ -23,6 +23,7 @@ const (
 	sqlitePath        = "remote-node.db"
 	spawnerName       = "remote-node-spawner"
 	remotePoolName    = "remote-requests"
+	remoteAuthToken   = "remote-node-secret"
 	disableCaptureEnv = "REMOTE_DISABLE_CAPTURE"
 )
 
@@ -67,7 +68,7 @@ func init() {
 		Name:  remotePoolName,
 		Tags:  []string{"remote"},
 		Slots: 1,
-	}))
+	}), gostage.ChildWithAuth(remoteAuthToken))
 }
 
 func main() {
@@ -173,6 +174,7 @@ func buildSpawnerConfig(disableCapture bool) gostage.SpawnerConfig {
 		RestartBackoff:       2 * time.Second,
 		ShutdownGrace:        3 * time.Second,
 		DisableOutputCapture: disableCapture,
+		AuthToken:            remoteAuthToken,
 	}
 }
 

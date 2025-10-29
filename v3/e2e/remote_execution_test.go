@@ -436,6 +436,7 @@ func remoteOptions(t *testing.T, pools []child.PoolSpec, mutate ...func(*gostage
 		ChildType:     remoteChildType,
 		MaxRestarts:   0,
 		ShutdownGrace: 3 * time.Second,
+		AuthToken:     "remote-e2e-secret",
 	}
 	for _, fn := range mutate {
 		if fn != nil {

@@ -155,6 +155,12 @@ func (s *Server) Control(stream processproto.ProcessBridge_ControlServer) error 
 	if register == nil {
 		return status.Error(codes.InvalidArgument, "expected register message")
 	}
+	if register.GetChildType() == "" {
+		return status.Error(codes.InvalidArgument, "child_type required")
+	}
+	if register.GetNodeId() == "" {
+		return status.Error(codes.InvalidArgument, "node_id required")
+	}
 
 	conn := newConnection(ConnectionInfo{
 		NodeID:    register.GetNodeId(),
@@ -200,16 +206,21 @@ func (s *Server) Control(stream processproto.ProcessBridge_ControlServer) error 
 			return err
 		}
 		switch body := msg.Body.(type) {
-		case *processproto.ControlEnvelope_LeaseAck:
-			summary, convErr := convertSummary(body.LeaseAck.GetSummary())
-			if convErr != nil {
-				conn.Close(convErr.Error())
-				return convErr
-			}
-			if err := s.handler.OnLeaseAck(ctx, conn, body.LeaseAck.GetWorkflowId(), body.LeaseAck.GetLeaseId(), summary); err != nil {
-				conn.Close(err.Error())
-				return err
-			}
+	case *processproto.ControlEnvelope_LeaseAck:
+		summary, convErr := convertSummary(body.LeaseAck.GetSummary())
+		if convErr != nil {
+			conn.Close(convErr.Error())
+			return convErr
+		}
+		if body.LeaseAck.GetWorkflowId() == "" || body.LeaseAck.GetLeaseId() == "" {
+			err := status.Error(codes.InvalidArgument, "lease ack missing identifiers")
+			conn.Close(err.Error())
+			return err
+		}
+		if err := s.handler.OnLeaseAck(ctx, conn, body.LeaseAck.GetWorkflowId(), body.LeaseAck.GetLeaseId(), summary); err != nil {
+			conn.Close(err.Error())
+			return err
+		}
 		case *processproto.ControlEnvelope_Telemetry:
 			evt, convErr := decodeTelemetry(body.Telemetry.GetEventJson())
 			if convErr != nil {

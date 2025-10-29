@@ -10,57 +10,27 @@ import (
 	"github.com/davidroman0O/gostage/v3/registry"
 	rt "github.com/davidroman0O/gostage/v3/runtime"
 	"github.com/davidroman0O/gostage/v3/runtime/core"
+	runtimeengine "github.com/davidroman0O/gostage/v3/runtime/engine"
 	"github.com/davidroman0O/gostage/v3/state"
 	storepkg "github.com/davidroman0O/gostage/v3/store"
 )
 
-// ExecutionStatus represents the lifecycle state of a stage or action.
-type ExecutionStatus string
+type ExecutionStatus = runtimeengine.ExecutionStatus
 
 const (
-	StatusPending   ExecutionStatus = "pending"
-	StatusRunning   ExecutionStatus = "running"
-	StatusCompleted ExecutionStatus = "completed"
-	StatusFailed    ExecutionStatus = "failed"
-	StatusSkipped   ExecutionStatus = "skipped"
-	StatusRemoved   ExecutionStatus = "removed"
-	StatusCancelled ExecutionStatus = "cancelled"
+	StatusPending   = runtimeengine.StatusPending
+	StatusRunning   = runtimeengine.StatusRunning
+	StatusCompleted = runtimeengine.StatusCompleted
+	StatusFailed    = runtimeengine.StatusFailed
+	StatusSkipped   = runtimeengine.StatusSkipped
+	StatusRemoved   = runtimeengine.StatusRemoved
+	StatusCancelled = runtimeengine.StatusCancelled
 )
 
-// StageStatus captures lifecycle details for a stage.
-type StageStatus struct {
-	ID          string
-	Name        string
-	Description string
-	Tags        []string
-	Status      ExecutionStatus
-	Dynamic     bool
-	CreatedBy   string
-}
-
-// ActionStatus captures lifecycle details for an action.
-type ActionStatus struct {
-	StageID     string
-	Name        string
-	Description string
-	Tags        []string
-	Status      ExecutionStatus
-	Dynamic     bool
-	CreatedBy   string
-}
-
-// DynamicStage describes a stage generated during execution.
-type DynamicStage struct {
-	Stage     rt.Stage
-	CreatedBy string
-}
-
-// DynamicAction describes an action generated during execution.
-type DynamicAction struct {
-	StageID   string
-	Action    rt.Action
-	CreatedBy string
-}
+type StageStatus = runtimeengine.StageStatus
+type ActionStatus = runtimeengine.ActionStatus
+type DynamicStage = runtimeengine.DynamicStage
+type DynamicAction = runtimeengine.DynamicAction
 
 // RunResult provides execution outcome details.
 type RunResult struct {
@@ -220,7 +190,7 @@ func (r *Runner) Run(workflow rt.Workflow, options RunOptions) RunResult {
 		}
 	}
 
-	tele := newTelemetry(workflow)
+	tele := runtimeengine.NewTelemetry(workflow, StatusPending)
 	// telemetry is maintained within the runner; broker proxy no longer mutates it directly.
 	start := time.Now()
 	if r.broker != nil {
@@ -236,10 +206,10 @@ func (r *Runner) Run(workflow rt.Workflow, options RunOptions) RunResult {
 		Error:          err,
 		Duration:       duration,
 		FinalStore:     nil,
-		Stages:         tele.stageStatuses(),
-		Actions:        tele.actionStatuses(),
-		DynamicStages:  tele.dynamicStages,
-		DynamicActions: tele.dynamicActions,
+		Stages:         tele.StageStatuses(),
+		Actions:        tele.ActionStatuses(),
+		DynamicStages:  tele.DynamicStages(),
+		DynamicActions: tele.DynamicActions(),
 	}
 	if options.Attempt > 0 {
 		result.Attempt = options.Attempt
@@ -258,8 +228,8 @@ func (r *Runner) Run(workflow rt.Workflow, options RunOptions) RunResult {
 		}
 	}
 
-	result.RemovedStages = tele.removedStages()
-	result.RemovedActions = tele.removedActions()
+	result.RemovedStages = tele.RemovedStages()
+	result.RemovedActions = tele.RemovedActions()
 
 	if err != nil && options.IgnoreErrors {
 		result.Success = true
@@ -283,7 +253,7 @@ func (r *Runner) Run(workflow rt.Workflow, options RunOptions) RunResult {
 	return result
 }
 
-func (r *Runner) executeWorkflow(ctx context.Context, workflow rt.Workflow, execCtx core.ExecutionContext, logger rt.Logger, tele *telemetry) error {
+func (r *Runner) executeWorkflow(ctx context.Context, workflow rt.Workflow, execCtx core.ExecutionContext, logger rt.Logger, tele *runtimeengine.Telemetry) error {
 	stages := append([]rt.Stage(nil), workflow.Stages()...)
 	combinedMW := append([]rt.WorkflowMiddleware{}, r.workflowMW...)
 	if mw := workflow.Middlewares(); len(mw) > 0 {
@@ -298,12 +268,12 @@ func (r *Runner) executeWorkflow(ctx context.Context, workflow rt.Workflow, exec
 		stageRunner = combinedMW[i](stageRunner)
 	}
 
-	disabledStages := tele.disabledStages(execCtx)
+	disabledStages := tele.DisabledStages(execCtx)
 
 	for i := 0; i < len(stages); i++ {
 		r.drainRemovedStages(execCtx, tele, ctx, workflow, logger)
 		stage := stages[i]
-		stageStatus := tele.stage(stage.ID(), stage.Name(), stage.Description(), stage.Tags(), false, "")
+		stageStatus := tele.Stage(stage.ID(), stage.Name(), stage.Description(), stage.Tags(), false, "")
 
 		if disabledStages[stage.ID()] {
 			stageStatus.Status = StatusSkipped
@@ -332,8 +302,8 @@ func (r *Runner) executeWorkflow(ctx context.Context, workflow rt.Workflow, exec
 		stageStatus.Status = StatusCompleted
 		r.notifyStageStatus(ctx, workflow.ID(), stage.ID(), StatusCompleted, logger)
 
-		if len(tele.pendingStageInsertions) > 0 {
-			stages = tele.insertPendingStages(stages, i+1)
+		if tele.HasPendingStages() {
+			stages = tele.InsertPendingStages(stages, i+1)
 		}
 		r.drainRemovedStages(execCtx, tele, ctx, workflow, logger)
 	}
@@ -342,7 +312,7 @@ func (r *Runner) executeWorkflow(ctx context.Context, workflow rt.Workflow, exec
 	return nil
 }
 
-func (r *Runner) executeStage(ctx context.Context, workflow rt.Workflow, stage rt.Stage, execCtx core.ExecutionContext, logger rt.Logger, tele *telemetry) error {
+func (r *Runner) executeStage(ctx context.Context, workflow rt.Workflow, stage rt.Stage, execCtx core.ExecutionContext, logger rt.Logger, tele *runtimeengine.Telemetry) error {
 	if err := mergeStageInitialStore(workflow, stage); err != nil {
 		return err
 	}
@@ -365,7 +335,7 @@ func (r *Runner) executeStage(ctx context.Context, workflow rt.Workflow, stage r
 	return stageRunner(ctx, stage, workflow, logger)
 }
 
-func (r *Runner) runActions(ctx context.Context, workflow rt.Workflow, stage rt.Stage, execCtx core.ExecutionContext, logger rt.Logger, tele *telemetry) error {
+func (r *Runner) runActions(ctx context.Context, workflow rt.Workflow, stage rt.Stage, execCtx core.ExecutionContext, logger rt.Logger, tele *runtimeengine.Telemetry) error {
 	actionList := append([]rt.Action(nil), stage.ActionList()...)
 	execCtx.SetActionList(actionList)
 	disabledActions, _ := execCtx.DisabledMaps()
@@ -373,8 +343,8 @@ func (r *Runner) runActions(ctx context.Context, workflow rt.Workflow, stage rt.
 
 	for i := 0; i < len(actionList); i++ {
 		action := actionList[i]
-		actionKey := actionKey(stage.ID(), action.Name())
-		actionStatus := tele.action(stage.ID(), action.Name(), action.Description(), action.Tags(), false, "")
+		actionKey := runtimeengine.ActionKey(stage.ID(), action.Name())
+		actionStatus := tele.Action(stage.ID(), action.Name(), action.Description(), action.Tags(), false, "")
 
 		if err := r.ensureActionRegistered(action); err != nil {
 			actionStatus.Status = StatusFailed
@@ -439,29 +409,18 @@ func (r *Runner) runActions(ctx context.Context, workflow rt.Workflow, stage rt.
 			actionList = insertActions(actionList, added, i+1)
 			execCtx.SetActionList(actionList)
 			for _, dyn := range added {
-				dynStatus := tele.action(stage.ID(), dyn.Name(), dyn.Description(), dyn.Tags(), true, actionKey)
+				dynStatus := tele.Action(stage.ID(), dyn.Name(), dyn.Description(), dyn.Tags(), true, actionKey)
 				dynStatus.Status = StatusPending
-				tele.dynamicActions = append(tele.dynamicActions, DynamicAction{
-					StageID:   stage.ID(),
-					Action:    dyn,
-					CreatedBy: actionKey,
-				})
+				tele.AddDynamicAction(stage.ID(), dyn, actionKey)
 				r.registerAction(ctx, logger, workflow.ID(), stage.ID(), dyn, true, actionKey)
 			}
 		}
 
 		if dynStages := execCtx.ConsumeDynamicStages(); len(dynStages) > 0 {
 			for _, dynStage := range dynStages {
-				t := tele.stage(dynStage.ID(), dynStage.Name(), dynStage.Description(), dynStage.Tags(), true, actionKey)
+				t := tele.Stage(dynStage.ID(), dynStage.Name(), dynStage.Description(), dynStage.Tags(), true, actionKey)
 				t.Status = StatusPending
-				tele.pendingStageInsertions = append(tele.pendingStageInsertions, pendingStage{
-					stage:     dynStage,
-					createdBy: actionKey,
-				})
-				tele.dynamicStages = append(tele.dynamicStages, DynamicStage{
-					Stage:     dynStage,
-					CreatedBy: actionKey,
-				})
+				tele.AddDynamicStage(dynStage, actionKey)
 				r.registerStage(ctx, workflow, dynStage, true, actionKey, logger)
 			}
 		}
@@ -480,8 +439,6 @@ func insertActions(actions []rt.Action, additions []rt.Action, index int) []rt.A
 	result = append(result, actions[index:]...)
 	return result
 }
-
-func actionKey(stageID, actionName string) string { return stageID + "::" + actionName }
 
 func mergeStageInitialStore(workflow rt.Workflow, stage rt.Stage) error {
 	wfStore := workflow.Store()
@@ -628,7 +585,7 @@ func buildActionSummariesForStage(stageID string, actions []ActionStatus, result
 			Disabled:    result.DisabledActions != nil && result.DisabledActions[action.Name],
 		}
 		if result.RemovedActions != nil {
-			summary.RemovedBy = result.RemovedActions[actionKey(stageID, action.Name)]
+			summary.RemovedBy = result.RemovedActions[runtimeengine.ActionKey(stageID, action.Name)]
 		}
 		summaries = append(summaries, summary)
 	}
@@ -701,20 +658,20 @@ func (r *Runner) registerAction(ctx context.Context, logger rt.Logger, workflowI
 	})
 }
 
-func (r *Runner) flushStageStatuses(ctx context.Context, workflow rt.Workflow, tele *telemetry, logger rt.Logger) {
+func (r *Runner) flushStageStatuses(ctx context.Context, workflow rt.Workflow, tele *runtimeengine.Telemetry, logger rt.Logger) {
 	if r.broker == nil || workflow == nil || tele == nil {
 		return
 	}
-	for _, status := range tele.stageStatuses() {
+	for _, status := range tele.StageStatuses() {
 		r.notifyStageStatus(ctx, workflow.ID(), status.ID, status.Status, logger)
 	}
 }
 
-func (r *Runner) flushActionStatuses(ctx context.Context, workflow rt.Workflow, tele *telemetry, logger rt.Logger) {
+func (r *Runner) flushActionStatuses(ctx context.Context, workflow rt.Workflow, tele *runtimeengine.Telemetry, logger rt.Logger) {
 	if r.broker == nil || workflow == nil || tele == nil {
 		return
 	}
-	for _, status := range tele.actionStatuses() {
+	for _, status := range tele.ActionStatuses() {
 		r.notifyActionStatus(ctx, workflow.ID(), status.StageID, status.Name, status.Status, logger)
 	}
 }
@@ -799,7 +756,7 @@ func (r *Runner) notifyStageRemoved(ctx context.Context, workflowID, stageID, cr
 	}
 }
 
-func (r *Runner) drainRemovedStages(execCtx core.ExecutionContext, tele *telemetry, ctx context.Context, workflow rt.Workflow, logger rt.Logger) {
+func (r *Runner) drainRemovedStages(execCtx core.ExecutionContext, tele *runtimeengine.Telemetry, ctx context.Context, workflow rt.Workflow, logger rt.Logger) {
 	if execCtx == nil || workflow == nil {
 		return
 	}
@@ -949,22 +906,18 @@ func (r *Runner) ensureActionRegistered(action rt.Action) error {
 	return fmt.Errorf("runner: action %s not registered", id)
 }
 
-func (r *Runner) updateActionTelemetryRemoval(tele *telemetry, stageID, actionName, createdBy string) {
+func (r *Runner) updateActionTelemetryRemoval(tele *runtimeengine.Telemetry, stageID, actionName, createdBy string) {
 	if tele == nil {
 		return
 	}
-	status := tele.action(stageID, actionName, "", nil, createdBy != "", createdBy)
-	status.Status = StatusRemoved
-	tele.removedActionMap[actionKey(stageID, actionName)] = createdBy
+	tele.MarkActionRemoved(stageID, actionName, createdBy)
 }
 
-func (r *Runner) updateStageTelemetryRemoval(tele *telemetry, stageID, createdBy string) {
+func (r *Runner) updateStageTelemetryRemoval(tele *runtimeengine.Telemetry, stageID, createdBy string) {
 	if tele == nil {
 		return
 	}
-	status := tele.stage(stageID, stageID, "", nil, createdBy != "", createdBy)
-	status.Status = StatusRemoved
-	tele.removedStageMap[stageID] = createdBy
+	tele.MarkStageRemoved(stageID, createdBy)
 }
 
 func makeStageRecord(stage rt.Stage, dynamic bool, createdBy string) state.StageRecord {
@@ -1043,167 +996,4 @@ func toWorkflowState(status ExecutionStatus) state.WorkflowState {
 	default:
 		return state.WorkflowPending
 	}
-}
-
-// telemetry tracks execution state while running.
-type telemetry struct {
-	stages                 map[string]*StageStatus
-	actions                map[string]*ActionStatus
-	dynamicStages          []DynamicStage
-	dynamicActions         []DynamicAction
-	pendingStageInsertions []pendingStage
-	removedStageMap        map[string]string
-	removedActionMap       map[string]string
-}
-
-type pendingStage struct {
-	stage     rt.Stage
-	createdBy string
-}
-
-func newTelemetry(workflow rt.Workflow) *telemetry {
-	t := &telemetry{
-		stages:                 make(map[string]*StageStatus),
-		actions:                make(map[string]*ActionStatus),
-		dynamicStages:          make([]DynamicStage, 0),
-		dynamicActions:         make([]DynamicAction, 0),
-		pendingStageInsertions: make([]pendingStage, 0),
-		removedStageMap:        make(map[string]string),
-		removedActionMap:       make(map[string]string),
-	}
-	for _, stage := range workflow.Stages() {
-		if stage == nil {
-			continue
-		}
-		t.stages[stage.ID()] = &StageStatus{
-			ID:          stage.ID(),
-			Name:        stage.Name(),
-			Description: stage.Description(),
-			Tags:        copyStrings(stage.Tags()),
-			Status:      StatusPending,
-		}
-	}
-	return t
-}
-
-func (t *telemetry) disabledStages(execCtx core.ExecutionContext) map[string]bool {
-	if _, stageMap := execCtx.DisabledMaps(); stageMap != nil {
-		return stageMap
-	}
-	return map[string]bool{}
-}
-
-func (t *telemetry) stage(id, name, description string, tags []string, dynamic bool, createdBy string) *StageStatus {
-	status, ok := t.stages[id]
-	if !ok {
-		status = &StageStatus{ID: id, Status: StatusPending}
-		t.stages[id] = status
-	}
-	if name != "" {
-		status.Name = name
-	}
-	if description != "" {
-		status.Description = description
-	}
-	if len(tags) > 0 {
-		status.Tags = copyStrings(tags)
-	}
-	if dynamic {
-		status.Dynamic = true
-	}
-	if createdBy != "" {
-		status.CreatedBy = createdBy
-	}
-	return status
-}
-
-func (t *telemetry) action(stageID, name, description string, tags []string, dynamic bool, createdBy string) *ActionStatus {
-	key := actionKey(stageID, name)
-	status, ok := t.actions[key]
-	if !ok {
-		status = &ActionStatus{StageID: stageID, Name: name, Status: StatusPending}
-		t.actions[key] = status
-	}
-	if description != "" {
-		status.Description = description
-	}
-	if len(tags) > 0 {
-		status.Tags = copyStrings(tags)
-	}
-	if dynamic {
-		status.Dynamic = true
-	}
-	if createdBy != "" {
-		status.CreatedBy = createdBy
-	}
-	return status
-}
-
-func (t *telemetry) stageStatuses() []StageStatus {
-	result := make([]StageStatus, 0, len(t.stages))
-	for _, status := range t.stages {
-		copyStatus := *status
-		if len(copyStatus.Tags) > 0 {
-			copyStatus.Tags = copyStrings(copyStatus.Tags)
-		}
-		result = append(result, copyStatus)
-	}
-	return result
-}
-
-func (t *telemetry) actionStatuses() []ActionStatus {
-	result := make([]ActionStatus, 0, len(t.actions))
-	for _, status := range t.actions {
-		copyStatus := *status
-		if len(copyStatus.Tags) > 0 {
-			copyStatus.Tags = copyStrings(copyStatus.Tags)
-		}
-		result = append(result, copyStatus)
-	}
-	return result
-}
-
-func (t *telemetry) removedStages() map[string]string {
-	if len(t.removedStageMap) == 0 {
-		return nil
-	}
-	copyMap := make(map[string]string, len(t.removedStageMap))
-	for k, v := range t.removedStageMap {
-		copyMap[k] = v
-	}
-	return copyMap
-}
-
-func (t *telemetry) removedActions() map[string]string {
-	if len(t.removedActionMap) == 0 {
-		return nil
-	}
-	copyMap := make(map[string]string, len(t.removedActionMap))
-	for k, v := range t.removedActionMap {
-		copyMap[k] = v
-	}
-	return copyMap
-}
-
-func (t *telemetry) insertPendingStages(existing []rt.Stage, index int) []rt.Stage {
-	if len(t.pendingStageInsertions) == 0 {
-		return existing
-	}
-
-	stages := make([]rt.Stage, 0, len(existing)+len(t.pendingStageInsertions))
-	stages = append(stages, existing[:index]...)
-	for _, pending := range t.pendingStageInsertions {
-		stages = append(stages, pending.stage)
-	}
-	stages = append(stages, existing[index:]...)
-
-	for _, pending := range t.pendingStageInsertions {
-		status := t.stage(pending.stage.ID(), pending.stage.Name(), pending.stage.Description(), pending.stage.Tags(), true, pending.createdBy)
-		if status.Status == StatusPending {
-			status.Status = StatusPending
-		}
-	}
-	// reset buffer
-	t.pendingStageInsertions = t.pendingStageInsertions[:0]
-	return stages
 }

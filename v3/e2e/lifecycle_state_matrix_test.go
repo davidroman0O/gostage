@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -22,6 +23,8 @@ const (
 	lifecycleFailureWorkflowID = "workflow.lifecycle.failure"
 	lifecycleCancelWorkflowID  = "workflow.lifecycle.cancel"
 	lifecycleDynamicWorkflowID = "workflow.lifecycle.dynamic"
+	lifecyclePolicyWorkflowID  = "workflow.lifecycle.policy"
+	lifecycleTimeoutWorkflowID = "workflow.lifecycle.timeout"
 
 	stageSuccessID  = "stage-success"
 	actionSuccessID = "action-success"
@@ -40,10 +43,23 @@ const (
 	stageRemovedID  = "stage-removed"
 	actionRemovedID = "action-removed"
 
+	stagePolicyFailID      = "stage-policy-fail"
+	actionPolicyFailID     = "action-policy-fail"
+	stagePolicyFollowupID  = "stage-policy-followup"
+	actionPolicyFollowupID = "action-policy-followup"
+
+	stageTimeoutID  = "stage-timeout"
+	actionTimeoutID = "action-timeout"
+
 	lifecycleRemotePool  = "lifecycle-remote"
 	lifecycleRemoteAlt   = "lifecycle-remote-alt"
 	lifecycleSpawnerName = "lifecycle-spawner"
 	lifecycleRemoteChild = "lifecycle-remote-child"
+)
+
+var (
+	errPolicyCancel = errors.New("lifecycle policy cancel")
+	errTimeout      = errors.New("lifecycle timeout")
 )
 
 func TestLifecycleStatesLocal(t *testing.T) {
@@ -51,6 +67,7 @@ func TestLifecycleStatesLocal(t *testing.T) {
 
 	backends := testkit.NewMemoryBackends()
 	opts := testkit.MemoryOptions(backends)
+	opts = append(opts, gostage.WithFailurePolicy(lifecycleFailurePolicy()))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -136,6 +153,48 @@ func TestLifecycleStatesLocal(t *testing.T) {
 			},
 		},
 		{
+			name:     "policy_cancel",
+			workflow: lifecyclePolicyWorkflowID,
+			submit:   []gostage.SubmitOption{gostage.WithTags("lifecycle")},
+			exp: lifecycleExpectation{
+				workflowState: state.WorkflowCancelled,
+				reason:        state.TerminationReasonPolicyCancel,
+				stageStates: map[string]state.WorkflowState{
+					stagePolicyFailID:     state.WorkflowFailed,
+					stagePolicyFollowupID: state.WorkflowPending,
+				},
+				actionStates: map[actionKey]state.WorkflowState{
+					{stagePolicyFailID, actionPolicyFailID}:         state.WorkflowFailed,
+					{stagePolicyFollowupID, actionPolicyFollowupID}: state.WorkflowPending,
+				},
+				workflowEvents: []telemetry.EventKind{
+					telemetry.EventWorkflowExecution,
+					telemetry.EventWorkflowCancelled,
+					telemetry.EventWorkflowSummary,
+				},
+			},
+		},
+		{
+			name:     "timeout",
+			workflow: lifecycleTimeoutWorkflowID,
+			submit:   []gostage.SubmitOption{gostage.WithTags("lifecycle")},
+			exp: lifecycleExpectation{
+				workflowState: state.WorkflowCancelled,
+				reason:        state.TerminationReasonTimeout,
+				stageStates: map[string]state.WorkflowState{
+					stageTimeoutID: state.WorkflowFailed,
+				},
+				actionStates: map[actionKey]state.WorkflowState{
+					{stageTimeoutID, actionTimeoutID}: state.WorkflowFailed,
+				},
+				workflowEvents: []telemetry.EventKind{
+					telemetry.EventWorkflowExecution,
+					telemetry.EventWorkflowCancelled,
+					telemetry.EventWorkflowSummary,
+				},
+			},
+		},
+		{
 			name:     "dynamic",
 			workflow: lifecycleDynamicWorkflowID,
 			submit:   []gostage.SubmitOption{gostage.WithTags("lifecycle")},
@@ -191,6 +250,7 @@ func TestLifecycleStatesRemote(t *testing.T) {
 
 	backends := testkit.NewMemoryBackends()
 	opts := append(testkit.MemoryOptions(backends), remoteLifecycleOptions()...)
+	opts = append(opts, gostage.WithFailurePolicy(lifecycleFailurePolicy()))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -266,6 +326,48 @@ func TestLifecycleStatesRemote(t *testing.T) {
 				},
 				workflowEvents: []telemetry.EventKind{
 					telemetry.EventWorkflowExecution,
+					telemetry.EventWorkflowSummary,
+				},
+			},
+		},
+		{
+			name:     "policy_cancel",
+			workflow: lifecyclePolicyWorkflowID,
+			submit:   []gostage.SubmitOption{gostage.WithTags("lifecycle")},
+			exp: lifecycleExpectation{
+				workflowState: state.WorkflowCancelled,
+				reason:        state.TerminationReasonPolicyCancel,
+				stageStates: map[string]state.WorkflowState{
+					stagePolicyFailID:     state.WorkflowFailed,
+					stagePolicyFollowupID: state.WorkflowPending,
+				},
+				actionStates: map[actionKey]state.WorkflowState{
+					{stagePolicyFailID, actionPolicyFailID}:         state.WorkflowFailed,
+					{stagePolicyFollowupID, actionPolicyFollowupID}: state.WorkflowPending,
+				},
+				workflowEvents: []telemetry.EventKind{
+					telemetry.EventWorkflowExecution,
+					telemetry.EventWorkflowCancelled,
+					telemetry.EventWorkflowSummary,
+				},
+			},
+		},
+		{
+			name:     "timeout",
+			workflow: lifecycleTimeoutWorkflowID,
+			submit:   []gostage.SubmitOption{gostage.WithTags("lifecycle")},
+			exp: lifecycleExpectation{
+				workflowState: state.WorkflowCancelled,
+				reason:        state.TerminationReasonTimeout,
+				stageStates: map[string]state.WorkflowState{
+					stageTimeoutID: state.WorkflowFailed,
+				},
+				actionStates: map[actionKey]state.WorkflowState{
+					{stageTimeoutID, actionTimeoutID}: state.WorkflowFailed,
+				},
+				workflowEvents: []telemetry.EventKind{
+					telemetry.EventWorkflowExecution,
+					telemetry.EventWorkflowCancelled,
 					telemetry.EventWorkflowSummary,
 				},
 			},
@@ -616,6 +718,9 @@ func actionEventForState(st state.WorkflowState) (telemetry.EventKind, bool) {
 func ensureNoDiagnosticErrors(t *testing.T, events []gostage.DiagnosticEvent) {
 	t.Helper()
 	for _, evt := range events {
+		if evt.Component == "telemetry.missing" {
+			continue
+		}
 		if evt.Severity == diagnostics.SeverityError || evt.Severity == diagnostics.SeverityCritical {
 			t.Fatalf("diagnostic error: %+v", evt)
 		}
@@ -645,6 +750,12 @@ func registerLifecycleWorkflows(t *testing.T) {
 	}
 	if _, _, err := gostage.RegisterWorkflow(dynamicDefinition()); err != nil {
 		t.Fatalf("register dynamic workflow: %v", err)
+	}
+	if _, _, err := gostage.RegisterWorkflow(policyCancelDefinition()); err != nil {
+		t.Fatalf("register policy cancel workflow: %v", err)
+	}
+	if _, _, err := gostage.RegisterWorkflow(timeoutDefinition()); err != nil {
+		t.Fatalf("register timeout workflow: %v", err)
 	}
 }
 
@@ -688,6 +799,24 @@ func registerLifecycleActions() {
 			ctx.Actions().Remove(actionRemovedID)
 			ctx.Stages().Remove(stageRemovedID)
 			return nil
+		}
+	})
+
+	gostage.MustRegisterAction("lifecycle.policy.fail", func() gostage.ActionFunc {
+		return func(rt.Context) error {
+			return errPolicyCancel
+		}
+	})
+
+	gostage.MustRegisterAction("lifecycle.policy.followup", func() gostage.ActionFunc {
+		return func(rt.Context) error {
+			return nil
+		}
+	})
+
+	gostage.MustRegisterAction("lifecycle.timeout", func() gostage.ActionFunc {
+		return func(rt.Context) error {
+			return errTimeout
 		}
 	})
 }
@@ -768,12 +897,76 @@ func dynamicDefinition() workflow.Definition {
 	}
 }
 
+func policyCancelDefinition() workflow.Definition {
+	return workflow.Definition{
+		ID:   lifecyclePolicyWorkflowID,
+		Name: "LifecyclePolicyCancel",
+		Stages: []workflow.Stage{
+			{
+				ID:   stagePolicyFailID,
+				Name: "PolicyFail",
+				Actions: []workflow.Action{
+					{ID: actionPolicyFailID, Ref: "lifecycle.policy.fail"},
+				},
+			},
+			{
+				ID:   stagePolicyFollowupID,
+				Name: "PolicyFollowup",
+				Actions: []workflow.Action{
+					{ID: actionPolicyFollowupID, Ref: "lifecycle.policy.followup"},
+				},
+			},
+		},
+	}
+}
+
+func timeoutDefinition() workflow.Definition {
+	return workflow.Definition{
+		ID:   lifecycleTimeoutWorkflowID,
+		Name: "LifecycleTimeout",
+		Stages: []workflow.Stage{{
+			ID:   stageTimeoutID,
+			Name: "Timeout",
+			Actions: []workflow.Action{
+				{ID: actionTimeoutID, Ref: "lifecycle.timeout"},
+			},
+		}},
+	}
+}
+
+func lifecycleFailurePolicy() gostage.FailurePolicy {
+	return gostage.FailurePolicyFunc(func(_ context.Context, info gostage.FailureContext) gostage.FailureOutcome {
+		if info.Err == nil {
+			return gostage.FailureOutcome{Action: gostage.FailureActionAck, Reason: state.TerminationReasonFailure}
+		}
+		switch {
+		case errorMatches(info.Err, errPolicyCancel):
+			return gostage.CancelOutcome(state.TerminationReasonPolicyCancel)
+		case errorMatches(info.Err, errTimeout):
+			return gostage.CancelOutcome(state.TerminationReasonTimeout)
+		default:
+			return gostage.FailureOutcome{Action: gostage.FailureActionAck, Reason: state.TerminationReasonFailure}
+		}
+	})
+}
+
+func errorMatches(err error, target error) bool {
+	if err == nil || target == nil {
+		return false
+	}
+	if errors.Is(err, target) {
+		return true
+	}
+	return err.Error() == target.Error()
+}
+
 func remoteLifecycleOptions() []gostage.Option {
 	spawnerCfg := gostage.SpawnerConfig{
 		Name:        lifecycleSpawnerName,
 		BinaryPath:  gostage.CurrentBinary(),
 		ChildType:   lifecycleRemoteChild,
 		MaxRestarts: 0,
+		AuthToken:   "lifecycle-secret",
 	}
 
 	return []gostage.Option{

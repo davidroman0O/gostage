@@ -15,6 +15,7 @@ import (
 	"github.com/davidroman0O/gostage/v3/runner"
 	rt "github.com/davidroman0O/gostage/v3/runtime"
 	"github.com/davidroman0O/gostage/v3/runtime/local"
+	"github.com/davidroman0O/gostage/v3/scheduler"
 	"github.com/davidroman0O/gostage/v3/state"
 	"github.com/davidroman0O/gostage/v3/telemetry"
 	"github.com/davidroman0O/gostage/v3/workflow"
@@ -75,11 +76,11 @@ func TestDispatcherMaxInFlight(t *testing.T) {
 	run := runner.New(local.Factory{}, registry.Default(), br)
 
 	pool := pools.NewLocal("local", state.Selector{}, 2)
-	bindings := []*poolBinding{{pool: pool}}
+	bindings := []*poolBinding{{Pool: pool}}
 
-	dispatcher := newDispatcher(ctx, queue, store, manager, run, nil, nil, nil, telemetry.NoopLogger{}, 5*time.Millisecond, 0, 1, nil, bindings, manager.Clock())
-	dispatcher.start()
-	defer dispatcher.stop()
+	dispatcher := newTestDispatcher(ctx, queue, store, manager, run, nil, nil, nil, telemetry.NoopLogger{}, 5*time.Millisecond, 0, 1, nil, bindings, manager.Clock())
+	dispatcher.Start()
+	defer dispatcher.Stop()
 
 	select {
 	case <-started:
@@ -103,6 +104,89 @@ func TestDispatcherMaxInFlight(t *testing.T) {
 	release <- struct{}{}
 }
 
+func TestDispatcherMissingTerminationReasonDiagnostic(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	registry.SetDefault(registry.NewSafeRegistry())
+
+	const failAction = "test.fail.reason"
+	MustRegisterAction(failAction, func() ActionFunc {
+		return func(actionCtx rt.Context) error {
+			return errors.New("boom")
+		}
+	})
+
+	def := workflow.Definition{
+		ID: "wf-missing-reason",
+		Stages: []workflow.Stage{
+			{
+				Name:    "fail",
+				Actions: []workflow.Action{{Ref: failAction}},
+			},
+		},
+	}
+	if normalized, _, err := workflow.EnsureIDs(def); err != nil {
+		t.Fatalf("ensure ids: %v", err)
+	} else {
+		def = normalized
+	}
+
+	queue := state.NewMemoryQueue()
+	id, err := queue.Enqueue(ctx, def, state.PriorityDefault, nil)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	store := state.NewMemoryStore()
+	baseManager, err := state.NewStoreManager(store)
+	if err != nil {
+		t.Fatalf("store manager: %v", err)
+	}
+
+	teleDispatcher := node.NewTelemetryDispatcher(ctx, nil, node.TelemetryDispatcherConfig{})
+	defer teleDispatcher.Close()
+
+	diagHub := node.NewDiagnosticsHub()
+	defer diagHub.Close()
+	diagCh := diagHub.Subscribe()
+
+	manager := wrapWithTelemetry(baseManager, teleDispatcher)
+	br := broker.NewLocal(manager)
+	run := runner.New(local.Factory{}, registry.Default(), br)
+
+	policy := FailurePolicyFunc(func(context.Context, FailureContext) FailureOutcome {
+		return FailureOutcome{
+			Action:     FailureActionAck,
+			FinalState: runner.StatusFailed,
+			Reason:     "",
+		}
+	})
+
+	pool := pools.NewLocal("local", state.Selector{}, 1)
+	dispatcher := newTestDispatcher(ctx, queue, store, manager, run, teleDispatcher, diagHub, nil, telemetry.NoopLogger{}, 5*time.Millisecond, 0, 0, policy, []*poolBinding{{Pool: pool}}, baseManager.Clock())
+	dispatcher.Start()
+	defer dispatcher.Stop()
+
+	waitCtx, waitCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer waitCancel()
+	if _, err := store.WaitResult(waitCtx, id); err != nil {
+		t.Fatalf("wait result: %v", err)
+	}
+
+	timeout := time.After(2 * time.Second)
+	for {
+		select {
+		case evt := <-diagCh:
+			if evt.Component == "dispatcher.reason.missing" {
+				return
+			}
+		case <-timeout:
+			t.Fatalf("expected diagnostics event for missing termination reason")
+		}
+	}
+}
+
 func TestDispatcherPublishesHealthOnClaimError(t *testing.T) {
 	ctx := context.Background()
 	queue := &errorQueue{err: errors.New("boom")}
@@ -113,8 +197,8 @@ func TestDispatcherPublishesHealthOnClaimError(t *testing.T) {
 		events <- evt
 	})
 
-	dispatcher := newDispatcher(ctx, queue, nil, nil, nil, nil, nil, health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{{pool: pools.NewLocal("local", state.Selector{}, 1)}}, time.Now)
-	dispatcher.pollOnce()
+	dispatcher := newTestDispatcher(ctx, queue, nil, nil, nil, nil, nil, health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{{Pool: pools.NewLocal("local", state.Selector{}, 1)}}, time.Now)
+	dispatcher.PollOnce()
 
 	select {
 	case evt := <-events:
@@ -130,21 +214,21 @@ func TestDispatcherHealthTracksLastError(t *testing.T) {
 	ctx := context.Background()
 	health := node.NewHealthDispatcher()
 	pool := pools.NewLocal("local", state.Selector{}, 1)
-	bindings := []*poolBinding{{pool: pool}}
-	dispatcher := newDispatcher(ctx, nil, nil, nil, nil, nil, nil, health, telemetry.NoopLogger{}, 0, 0, 0, nil, bindings, time.Now)
+	bindings := []*poolBinding{{Pool: pool}}
+	dispatcher := newTestDispatcher(ctx, nil, nil, nil, nil, nil, nil, health, telemetry.NoopLogger{}, 0, 0, 0, nil, bindings, time.Now)
 
 	events := make(chan node.HealthEvent, 2)
 	_ = health.Subscribe(func(evt node.HealthEvent) {
 		events <- evt
 	})
 
-	dispatcher.publishHealth("local", node.HealthUnavailable, "boom")
+	dispatcher.PublishHealth("local", node.HealthUnavailable, "boom")
 	first := <-events
 	if first.Status != node.HealthUnavailable {
 		t.Fatalf("expected unavailable status, got %s", first.Status)
 	}
 
-	status, detail, lastChange, lastErrDetail, lastErrAt := dispatcher.healthInfo("local")
+	status, detail, lastChange, lastErrDetail, lastErrAt := dispatcher.HealthInfo("local")
 	if status != node.HealthUnavailable {
 		t.Fatalf("expected status unavailable, got %s", status)
 	}
@@ -161,13 +245,13 @@ func TestDispatcherHealthTracksLastError(t *testing.T) {
 		t.Fatalf("expected last change timestamp")
 	}
 
-	dispatcher.publishHealth("local", node.HealthHealthy, "recovered")
+	dispatcher.PublishHealth("local", node.HealthHealthy, "recovered")
 	second := <-events
 	if second.Status != node.HealthHealthy {
 		t.Fatalf("expected healthy status, got %s", second.Status)
 	}
 
-	status, detail, lastChange2, lastErrDetail2, lastErrAt2 := dispatcher.healthInfo("local")
+	status, detail, lastChange2, lastErrDetail2, lastErrAt2 := dispatcher.HealthInfo("local")
 	if status != node.HealthHealthy {
 		t.Fatalf("expected status healthy after recovery, got %s", status)
 	}
@@ -221,7 +305,7 @@ func TestDispatcherStoresSummaryBeforeAck(t *testing.T) {
 	run := runner.New(local.Factory{}, registry.Default(), br)
 
 	pool := pools.NewLocal("local", state.Selector{}, 1)
-	dispatcher := newDispatcher(ctx, queue, nil, manager, run, nil, nil, nil, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{{pool: pool}}, manager.Clock())
+	dispatcher := newTestDispatcher(ctx, queue, nil, manager, run, nil, nil, nil, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{{Pool: pool}}, manager.Clock())
 
 	if _, err := queue.Enqueue(ctx, normalized.Clone(), state.PriorityDefault, nil); err != nil {
 		t.Fatalf("enqueue: %v", err)
@@ -236,12 +320,10 @@ func TestDispatcherStoresSummaryBeforeAck(t *testing.T) {
 		t.Fatalf("claim: %v", err)
 	}
 
-	dispatcher.inflight.Add(1)
-	dispatcher.wg.Add(1)
-	dispatcher.execute(pool, release, claimed)
+	dispatcher.ExecuteForTest(pool, release, claimed)
 
-	if dispatcher.inflight.Load() != 0 {
-		t.Fatalf("expected inflight to be zero, got %d", dispatcher.inflight.Load())
+	if dispatcher.Inflight() != 0 {
+		t.Fatalf("expected inflight to be zero, got %d", dispatcher.Inflight())
 	}
 	if queue.ackCount.Load() != 1 {
 		t.Fatalf("expected single ack call, got %d", queue.ackCount.Load())
@@ -278,18 +360,18 @@ func TestDispatcherSuppressesWorkflowTelemetry(t *testing.T) {
 	run := runner.New(local.Factory{}, registry.Default(), br, runner.WithDefaultLogger(telemetry.NoopLogger{}))
 
 	pool := pools.NewLocal("remote", state.Selector{}, 1)
-	dispatcher := newDispatcher(ctx, queue, store, managerWithTelemetry, run, telemetryDisp, nil, health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{{pool: pool}}, manager.Clock())
+	dispatcher := newTestDispatcher(ctx, queue, store, managerWithTelemetry, run, telemetryDisp, nil, health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{{Pool: pool}}, manager.Clock())
 
 	wf := state.WorkflowRecord{
 		ID:   state.WorkflowID("wf-remote"),
 		Name: "remote",
 	}
-	if err := dispatcher.manager.WorkflowRegistered(ctx, wf); err != nil {
+	if err := dispatcher.Manager().WorkflowRegistered(ctx, wf); err != nil {
 		t.Fatalf("workflow registered: %v", err)
 	}
 	<-sink.C() // drain registration event
 
-	dispatcher.suppressWorkflowTelemetry(wf.ID,
+	dispatcher.SuppressWorkflowTelemetry(wf.ID,
 		telemetry.EventWorkflowStarted,
 		telemetry.EventWorkflowCompleted,
 		telemetry.EventWorkflowFailed,
@@ -302,7 +384,7 @@ func TestDispatcherSuppressesWorkflowTelemetry(t *testing.T) {
 		WorkflowID: string(wf.ID),
 		Timestamp:  time.Now(),
 	}
-	if err := dispatcher.telemetry.Dispatch(childEvt); err != nil {
+	if err := dispatcher.TelemetryDispatcher().Dispatch(childEvt); err != nil {
 		t.Fatalf("dispatch child telemetry: %v", err)
 	}
 	startEvt := <-sink.C()
@@ -310,7 +392,7 @@ func TestDispatcherSuppressesWorkflowTelemetry(t *testing.T) {
 		t.Fatalf("expected workflow.started from child, got %s", startEvt.Kind)
 	}
 
-	if err := dispatcher.manager.WorkflowStatus(ctx, string(wf.ID), state.WorkflowRunning); err != nil {
+	if err := dispatcher.Manager().WorkflowStatus(ctx, string(wf.ID), state.WorkflowRunning); err != nil {
 		t.Fatalf("workflow status running: %v", err)
 	}
 	select {
@@ -324,7 +406,7 @@ func TestDispatcherSuppressesWorkflowTelemetry(t *testing.T) {
 		Status:     state.WorkflowCompleted,
 		Success:    true,
 	}
-	if err := dispatcher.manager.StoreExecutionSummary(ctx, string(wf.ID), report); err != nil {
+	if err := dispatcher.Manager().StoreExecutionSummary(ctx, string(wf.ID), report); err != nil {
 		t.Fatalf("store execution summary: %v", err)
 	}
 	select {
@@ -333,7 +415,7 @@ func TestDispatcherSuppressesWorkflowTelemetry(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	if err := dispatcher.manager.WorkflowStatus(ctx, string(wf.ID), state.WorkflowFailed); err != nil {
+	if err := dispatcher.Manager().WorkflowStatus(ctx, string(wf.ID), state.WorkflowFailed); err != nil {
 		t.Fatalf("workflow status failed: %v", err)
 	}
 	evt := <-sink.C()
@@ -375,7 +457,7 @@ func (q *metadataQueue) Release(_ context.Context, id state.WorkflowID) error {
 	defer q.mu.Unlock()
 	q.releaseCount++
 	meta, ok := q.metadata[id]
-	if !ok || meta[metadataInitialStore] == nil {
+	if !ok || meta[scheduler.MetadataInitialStore] == nil {
 		q.releaseMissing = true
 	}
 	return nil
@@ -445,7 +527,7 @@ func TestDispatcherCompleteRemoteAck(t *testing.T) {
 	}
 
 	pool := pools.NewLocal("remote", state.Selector{}, 1)
-	dispatcher := newDispatcher(ctx, queue, store, manager, nil, nil, nil, nil, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{{pool: pool}}, manager.Clock())
+	dispatcher := newTestDispatcher(ctx, queue, store, manager, nil, nil, nil, nil, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{{Pool: pool}}, manager.Clock())
 
 	def := workflow.Definition{Name: "remote"}
 	def, _, err = workflow.EnsureIDs(def)
@@ -454,7 +536,7 @@ func TestDispatcherCompleteRemoteAck(t *testing.T) {
 	}
 
 	initialMetadata := map[string]any{
-		metadataInitialStore: map[string]any{"seed": true},
+		scheduler.MetadataInitialStore: map[string]any{"seed": true},
 	}
 	id, err := queue.Enqueue(ctx, def, state.PriorityDefault, initialMetadata)
 	if err != nil {
@@ -466,11 +548,7 @@ func TestDispatcherCompleteRemoteAck(t *testing.T) {
 		t.Fatalf("claim: %v", err)
 	}
 
-	dispatcher.registerCancel(claimed.ID, func() {})
-	dispatcher.unregisterCancel(claimed.ID)
-
-	dispatcher.inflight.Add(1)
-	dispatcher.wg.Add(1)
+	dispatcher.BeginRemoteDispatch(claimed.ID, func() {})
 
 	releaseCalled := false
 	summary := state.ResultSummary{
@@ -482,8 +560,7 @@ func TestDispatcherCompleteRemoteAck(t *testing.T) {
 		Reason:      state.TerminationReasonSuccess,
 	}
 
-	dispatcher.completeRemote(claimed, pool, summary, func() { releaseCalled = true })
-	dispatcher.wg.Wait()
+	dispatcher.CompleteRemote(claimed, pool, summary, func() { releaseCalled = true })
 
 	if !releaseCalled {
 		t.Fatalf("expected release to be invoked")
@@ -512,10 +589,10 @@ func TestDispatcherCompleteRemoteAck(t *testing.T) {
 	if result.Reason != state.TerminationReasonSuccess {
 		t.Fatalf("expected reason success, got %s", result.Reason)
 	}
-	if completed, failed, cancelled := dispatcher.statsCounters(); completed != 1 || failed != 0 || cancelled != 0 {
+	if completed, failed, cancelled := dispatcher.StatsCounters(); completed != 1 || failed != 0 || cancelled != 0 {
 		t.Fatalf("unexpected counters: %d/%d/%d", completed, failed, cancelled)
 	}
-	if dispatcher.inflight.Load() != 0 {
+	if dispatcher.Inflight() != 0 {
 		t.Fatalf("expected inflight to be zero")
 	}
 }
@@ -534,7 +611,7 @@ func TestDispatcherCompleteRemoteRetry(t *testing.T) {
 		}
 	})
 
-	dispatcher := newDispatcher(ctx, queue, nil, nil, nil, nil, nil, nil, telemetry.NoopLogger{}, 0, 0, 0, policy, []*poolBinding{{pool: pool}}, time.Now)
+	dispatcher := newTestDispatcher(ctx, queue, nil, nil, nil, nil, nil, nil, telemetry.NoopLogger{}, 0, 0, 0, policy, []*poolBinding{{Pool: pool}}, time.Now)
 
 	def := workflow.Definition{Name: "remote-retry"}
 	def, _, err := workflow.EnsureIDs(def)
@@ -549,18 +626,14 @@ func TestDispatcherCompleteRemoteRetry(t *testing.T) {
 			Definition: def.Clone(),
 			Attempt:    1,
 			Metadata: map[string]any{
-				metadataInitialStore: map[string]any{"seed": true},
+				scheduler.MetadataInitialStore: map[string]any{"seed": true},
 			},
 		},
 		ClaimedAt: time.Now(),
 	}
 	queue.Track(id, claimed.Metadata)
 
-	dispatcher.registerCancel(claimed.ID, func() {})
-	dispatcher.unregisterCancel(claimed.ID)
-
-	dispatcher.inflight.Add(1)
-	dispatcher.wg.Add(1)
+	dispatcher.BeginRemoteDispatch(claimed.ID, func() {})
 
 	releaseCalled := false
 	summary := state.ResultSummary{
@@ -570,8 +643,7 @@ func TestDispatcherCompleteRemoteRetry(t *testing.T) {
 		Reason:  state.TerminationReasonFailure,
 	}
 
-	dispatcher.completeRemote(claimed, pool, summary, func() { releaseCalled = true })
-	dispatcher.wg.Wait()
+	dispatcher.CompleteRemote(claimed, pool, summary, func() { releaseCalled = true })
 
 	if !releaseCalled {
 		t.Fatalf("expected release to be invoked")
@@ -587,10 +659,10 @@ func TestDispatcherCompleteRemoteRetry(t *testing.T) {
 		t.Fatalf("expected no ACK during retry, got %d", queue.ackCount)
 	}
 
-	if completed, failed, cancelled := dispatcher.statsCounters(); completed != 0 || failed != 0 || cancelled != 0 {
+	if completed, failed, cancelled := dispatcher.StatsCounters(); completed != 0 || failed != 0 || cancelled != 0 {
 		t.Fatalf("expected counters to remain zero, got %d/%d/%d", completed, failed, cancelled)
 	}
-	if dispatcher.inflight.Load() != 0 {
+	if dispatcher.Inflight() != 0 {
 		t.Fatalf("expected inflight to be zero")
 	}
 }
@@ -763,9 +835,9 @@ func TestFailurePolicyRetryReleasesWorkflow(t *testing.T) {
 	})
 
 	pool := pools.NewLocal("local", state.Selector{}, 1)
-	dispatcher := newDispatcher(ctx, queue, store, manager, run, nil, nil, nil, telemetry.NoopLogger{}, 5*time.Millisecond, 0, 1, policy, []*poolBinding{{pool: pool}}, manager.Clock())
-	dispatcher.start()
-	defer dispatcher.stop()
+	dispatcher := newTestDispatcher(ctx, queue, store, manager, run, nil, nil, nil, telemetry.NoopLogger{}, 5*time.Millisecond, 0, 1, policy, []*poolBinding{{Pool: pool}}, manager.Clock())
+	dispatcher.Start()
+	defer dispatcher.Stop()
 
 	select {
 	case <-requeue:
@@ -911,9 +983,9 @@ func TestDispatcherEmitsCancelledEventOnExplicitCancel(t *testing.T) {
 	run := runner.New(local.Factory{}, registry.Default(), br)
 
 	pool := pools.NewLocal("local", state.Selector{}, 1)
-	dispatcher := newDispatcher(ctx, queue, store, manager, run, teleDispatcher, nil, nil, telemetry.NoopLogger{}, 5*time.Millisecond, 0, 0, nil, []*poolBinding{{pool: pool}}, baseManager.Clock())
-	dispatcher.start()
-	defer dispatcher.stop()
+	dispatcher := newTestDispatcher(ctx, queue, store, manager, run, teleDispatcher, nil, nil, telemetry.NoopLogger{}, 5*time.Millisecond, 0, 0, nil, []*poolBinding{{Pool: pool}}, baseManager.Clock())
+	dispatcher.Start()
+	defer dispatcher.Stop()
 
 	select {
 	case <-started:
@@ -921,7 +993,7 @@ func TestDispatcherEmitsCancelledEventOnExplicitCancel(t *testing.T) {
 		t.Fatalf("workflow did not start before timeout")
 	}
 
-	dispatcher.cancelWorkflow(id)
+	dispatcher.CancelWorkflow(id)
 	_ = queue.Cancel(ctx, id)
 
 	deadline := time.After(2 * time.Second)

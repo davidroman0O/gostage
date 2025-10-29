@@ -87,7 +87,7 @@ func TestRegisterWorkflowReturnsAssignments(t *testing.T) {
 	if inlineIDs.Stages[0].ID == "" {
 		t.Fatalf("inline ids not populated")
 	}
-	resolved, err := inlineRef.resolve()
+	resolved, err := resolveWorkflowReferenceForTest(inlineRef)
 	if err != nil {
 		t.Fatalf("resolve inline: %v", err)
 	}

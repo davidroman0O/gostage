@@ -30,32 +30,33 @@ func TestProcessSupervisorExhaustsRestarts(t *testing.T) {
 		BinaryPath:     crashScript,
 		MaxRestarts:    2,
 		RestartBackoff: 10 * time.Millisecond,
+		AuthToken:      "supervisor-secret",
 	}
 
 	binding := &poolBinding{
-		pool: pools.NewLocal("remote-crash", state.Selector{}, 1),
-		remote: &remoteBinding{
-			spawner: &spawnerBinding{
-				name: spCfg.Name,
-				cfg:  spCfg,
-				process: spawner.NewProcessSpawner(spawner.Config{
+		Pool: pools.NewLocal("remote-crash", state.Selector{}, 1),
+		Remote: &remoteBinding{
+			Spawner: &spawnerBinding{
+				Name: spCfg.Name,
+				Cfg:  spCfg,
+				Process: spawner.NewProcessSpawner(spawner.Config{
 					BinaryPath:     spCfg.BinaryPath,
 					MaxRestarts:    spCfg.MaxRestarts,
 					RestartBackoff: spCfg.RestartBackoff,
 				}),
 			},
-			poolCfg: PoolConfig{Name: "remote-crash", Slots: 1},
+			PoolCfg: PoolConfig{Name: "remote-crash", Slots: 1},
 		},
 	}
 
-	dispatcher := newDispatcher(ctx, queue, nil, nil, nil, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{binding}, time.Now)
+	dispatcher := newTestDispatcher(ctx, queue, nil, nil, nil, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{binding}, time.Now)
 	rc, err := newRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, []*poolBinding{binding}, time.Now, RemoteBridgeConfig{BindAddress: "127.0.0.1:0"})
 	if err != nil {
 		t.Fatalf("newRemoteCoordinator: %v", err)
 	}
-	defer rc.shutdown()
+	defer rc.ShutdownForTest()
 
-	if err := rc.launchSpawner(binding); err != nil {
+	if err := rc.LaunchSpawnerForTest(binding); err != nil {
 		t.Fatalf("launchSpawner: %v", err)
 	}
 

@@ -92,6 +92,9 @@ type TelemetryDispatcher struct {
 
 	metrics telemetryMetrics
 	wg      locks.WaitGroup
+
+	coverageMu locks.RWMutex
+	coverage   map[string]map[telemetry.EventKind]int
 }
 
 // DiagnosticsWriter is the minimal interface needed to push diagnostic events.
@@ -135,6 +138,10 @@ func (d *TelemetryDispatcher) run() {
 func (d *TelemetryDispatcher) Dispatch(evt telemetry.Event) error {
 	if evt.Timestamp.IsZero() {
 		evt.Timestamp = time.Now()
+	}
+
+	if evt.WorkflowID != "" && evt.Kind != "" {
+		d.recordCoverage(evt.WorkflowID, evt.Kind)
 	}
 
 	switch d.cfg.OverflowStrategy {
@@ -228,6 +235,53 @@ func (d *TelemetryDispatcher) report(evt diagnostics.Event) {
 	if d.diag != nil {
 		d.diag.Write(evt)
 	}
+}
+
+func (d *TelemetryDispatcher) recordCoverage(workflowID string, kind telemetry.EventKind) {
+	d.coverageMu.Lock()
+	if d.coverage == nil {
+		d.coverage = make(map[string]map[telemetry.EventKind]int)
+	}
+	set := d.coverage[workflowID]
+	if set == nil {
+		set = make(map[telemetry.EventKind]int, 4)
+		d.coverage[workflowID] = set
+	}
+	set[kind]++
+	d.coverageMu.Unlock()
+}
+
+// Coverage returns a snapshot of telemetry events observed for the workflow.
+func (d *TelemetryDispatcher) Coverage(workflowID string) map[telemetry.EventKind]int {
+	if workflowID == "" {
+		return nil
+	}
+	d.coverageMu.RLock()
+	defer d.coverageMu.RUnlock()
+	if d.coverage == nil {
+		return nil
+	}
+	set := d.coverage[workflowID]
+	if len(set) == 0 {
+		return nil
+	}
+	out := make(map[telemetry.EventKind]int, len(set))
+	for kind, count := range set {
+		out[kind] = count
+	}
+	return out
+}
+
+// ClearCoverage removes coverage tracking for the workflow ID.
+func (d *TelemetryDispatcher) ClearCoverage(workflowID string) {
+	if workflowID == "" {
+		return
+	}
+	d.coverageMu.Lock()
+	if d.coverage != nil {
+		delete(d.coverage, workflowID)
+	}
+	d.coverageMu.Unlock()
 }
 
 // Register adds a sink (idempotent for nil values).

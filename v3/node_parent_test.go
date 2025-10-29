@@ -20,9 +20,8 @@ func TestParentNodeStreamTelemetryWithoutDispatcher(t *testing.T) {
 		}
 	}()
 
-	parent := &parentNode{
-		base: base,
-	}
+	parent := newParentNodeForTest()
+	parent.SetBaseForTest(base)
 
 	events := make(chan telemetry.Event, 1)
 	cancelStream := parent.StreamTelemetry(ctx, func(evt telemetry.Event) {

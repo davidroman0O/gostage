@@ -36,13 +36,13 @@ func TestRemoteCoordinatorBindAdvertiseAddress(t *testing.T) {
 	health := node.NewHealthDispatcher()
 
 	binding := &poolBinding{
-		pool: pools.NewLocal("remote", state.Selector{}, 1),
-		remote: &remoteBinding{
-			poolCfg: PoolConfig{Name: "remote", Slots: 1},
+		Pool: pools.NewLocal("remote", state.Selector{}, 1),
+		Remote: &remoteBinding{
+			PoolCfg: PoolConfig{Name: "remote", Slots: 1},
 		},
 	}
 
-	dispatcher := newDispatcher(ctx, queue, nil, nil, nil, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{binding}, time.Now)
+	dispatcher := newTestDispatcher(ctx, queue, nil, nil, nil, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{binding}, time.Now)
 	rc, err := newRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, telemetry.NoopLogger{}, []*poolBinding{binding}, time.Now, RemoteBridgeConfig{
 		BindAddress:      "127.0.0.1:0",
 		AdvertiseAddress: "bridge.service",
@@ -50,12 +50,13 @@ func TestRemoteCoordinatorBindAdvertiseAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newRemoteCoordinator: %v", err)
 	}
-	defer rc.shutdown()
+	defer rc.ShutdownForTest()
 
-	if !strings.HasPrefix(rc.bindAddress, "127.0.0.1:") {
-		t.Fatalf("expected bind address on 127.0.0.1, got %s", rc.bindAddress)
+	bindAddress := rc.BindAddressForTest()
+	if !strings.HasPrefix(bindAddress, "127.0.0.1:") {
+		t.Fatalf("expected bind address on 127.0.0.1, got %s", bindAddress)
 	}
-	_, port, err := net.SplitHostPort(rc.bindAddress)
+	_, port, err := net.SplitHostPort(bindAddress)
 	if err != nil {
 		t.Fatalf("split bind address: %v", err)
 	}
@@ -63,8 +64,9 @@ func TestRemoteCoordinatorBindAdvertiseAddress(t *testing.T) {
 	if port != "" {
 		wantAdvertise = wantAdvertise + ":" + port
 	}
-	if rc.address != wantAdvertise {
-		t.Fatalf("expected advertise address %s, got %s", wantAdvertise, rc.address)
+	advertised := rc.AddressForTest()
+	if advertised != wantAdvertise {
+		t.Fatalf("expected advertise address %s, got %s", wantAdvertise, advertised)
 	}
 }
 
@@ -75,15 +77,15 @@ func TestRemoteCoordinatorTLSHandshake(t *testing.T) {
 	health := node.NewHealthDispatcher()
 
 	binding := &poolBinding{
-		pool: pools.NewLocal("remote", state.Selector{}, 1),
-		remote: &remoteBinding{
-			poolCfg: PoolConfig{Name: "remote", Slots: 1},
+		Pool: pools.NewLocal("remote", state.Selector{}, 1),
+		Remote: &remoteBinding{
+			PoolCfg: PoolConfig{Name: "remote", Slots: 1},
 		},
 	}
 
 	certPath, keyPath := writeTestCertificate(t, "server")
 
-	dispatcher := newDispatcher(ctx, queue, nil, nil, nil, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{binding}, time.Now)
+	dispatcher := newTestDispatcher(ctx, queue, nil, nil, nil, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{binding}, time.Now)
 	rc, err := newRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, telemetry.NoopLogger{}, []*poolBinding{binding}, time.Now, RemoteBridgeConfig{
 		BindAddress: "127.0.0.1:0",
 		TLS: TLSFiles{
@@ -96,13 +98,13 @@ func TestRemoteCoordinatorTLSHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newRemoteCoordinator: %v", err)
 	}
-	defer rc.shutdown()
+	defer rc.ShutdownForTest()
 
 	dialCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
 
 	// Insecure dial should fail when TLS is required.
-	connPlain, err := grpc.DialContext(dialCtx, rc.address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	connPlain, err := grpc.DialContext(dialCtx, rc.AddressForTest(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("dial insecure connection: %v", err)
 	}
@@ -121,7 +123,7 @@ func TestRemoteCoordinatorTLSHandshake(t *testing.T) {
 	}
 
 	// Dial without client cert should fail due to mutual TLS requirement.
-	connNoClient, err := grpc.DialContext(dialCtx, rc.address, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
+	connNoClient, err := grpc.DialContext(dialCtx, rc.AddressForTest(), grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
 		RootCAs:    caPool,
 		MinVersion: tls.VersionTLS12,
 	})))
@@ -138,7 +140,7 @@ func TestRemoteCoordinatorTLSHandshake(t *testing.T) {
 		t.Fatalf("load client cert: %v", err)
 	}
 
-	conn, err := grpc.DialContext(dialCtx, rc.address, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
+	conn, err := grpc.DialContext(dialCtx, rc.AddressForTest(), grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
 		Certificates: []tls.Certificate{clientCert},
 		RootCAs:      caPool,
 		MinVersion:   tls.VersionTLS12,
@@ -157,29 +159,29 @@ func TestRemoteCoordinatorTokenValidation(t *testing.T) {
 	diag := &diagCollector{}
 
 	binding := &poolBinding{
-		pool: pools.NewLocal("remote", state.Selector{}, 1),
-		remote: &remoteBinding{
-			poolCfg: PoolConfig{Name: "remote", Slots: 1},
+		Pool: pools.NewLocal("remote", state.Selector{}, 1),
+		Remote: &remoteBinding{
+			PoolCfg: PoolConfig{Name: "remote", Slots: 1},
 		},
 	}
 
-	dispatcher := newDispatcher(ctx, queue, nil, nil, nil, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{binding}, time.Now)
+	dispatcher := newTestDispatcher(ctx, queue, nil, nil, nil, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{binding}, time.Now)
 	rc, err := newRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, []*poolBinding{binding}, time.Now, RemoteBridgeConfig{})
 	if err != nil {
 		t.Fatalf("newRemoteCoordinator: %v", err)
 	}
-	defer rc.shutdown()
+	defer rc.ShutdownForTest()
 
-	sp := &spawnerBinding{name: "remote-spawner", cfg: SpawnerConfig{Name: "remote-spawner", AuthToken: "secret"}}
-	binding.remote.spawner = sp
-	if pool := rc.pools["remote"]; pool != nil {
-		pool.binding.remote.spawner = sp
+	sp := &spawnerBinding{Name: "remote-spawner", Cfg: SpawnerConfig{Name: "remote-spawner", AuthToken: "secret"}}
+	binding.Remote.Spawner = sp
+	if pool := rc.PoolsForTest()["remote"]; pool != nil {
+		pool.Binding.Remote.Spawner = sp
 	}
 
 	dialCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
-	conn, err := grpc.DialContext(dialCtx, rc.address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.DialContext(dialCtx, rc.AddressForTest(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -210,7 +212,7 @@ func TestRemoteCoordinatorTokenValidation(t *testing.T) {
 		t.Fatalf("expected diagnostics for invalid token")
 	}
 
-	connOK, err := grpc.DialContext(dialCtx, rc.address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	connOK, err := grpc.DialContext(dialCtx, rc.AddressForTest(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("dial (valid): %v", err)
 	}
