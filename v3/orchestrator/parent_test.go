@@ -1,4 +1,4 @@
-package gostage
+package orchestrator
 
 import (
 	"context"
@@ -20,7 +20,7 @@ func TestParentNodeStreamTelemetryWithoutDispatcher(t *testing.T) {
 		}
 	}()
 
-	parent := newParentNodeForTest()
+	parent := NewTestNode()
 	parent.SetBaseForTest(base)
 
 	events := make(chan telemetry.Event, 1)

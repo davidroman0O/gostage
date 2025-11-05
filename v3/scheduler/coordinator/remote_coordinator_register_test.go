@@ -1,4 +1,4 @@
-package gostage
+package coordinator
 
 import (
 	"context"
@@ -8,11 +8,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/davidroman0O/gostage/v3/bootstrap"
 	"github.com/davidroman0O/gostage/v3/diagnostics"
 	"github.com/davidroman0O/gostage/v3/node"
 	"github.com/davidroman0O/gostage/v3/pools"
 	"github.com/davidroman0O/gostage/v3/process"
 	processproto "github.com/davidroman0O/gostage/v3/process/proto"
+	"github.com/davidroman0O/gostage/v3/runner"
 	"github.com/davidroman0O/gostage/v3/scheduler"
 	"github.com/davidroman0O/gostage/v3/state"
 	"github.com/davidroman0O/gostage/v3/telemetry"
@@ -45,12 +47,12 @@ func testBinaryPath(t *testing.T) string {
 	return path
 }
 
-func buildRemoteCoordinatorForTest(t *testing.T, ctx context.Context, diag node.DiagnosticsWriter, bindings []*poolBinding) (*remoteCoordinator, *node.HealthDispatcher) {
+func buildRemoteCoordinatorForTest(t *testing.T, ctx context.Context, diag node.DiagnosticsWriter, bindings []*Binding) (*RemoteCoordinator, *node.HealthDispatcher) {
 	t.Helper()
 	queue := state.NewMemoryQueue()
 	health := node.NewHealthDispatcher()
 	base := node.New(ctx, nil, node.TelemetryDispatcherConfig{})
-	originalSpawners := make([]*spawnerBinding, len(bindings))
+	originalSpawners := make([]*SpawnerBinding, len(bindings))
 	for i, binding := range bindings {
 		if binding != nil && binding.Remote != nil {
 			originalSpawners[i] = binding.Remote.Spawner
@@ -59,9 +61,9 @@ func buildRemoteCoordinatorForTest(t *testing.T, ctx context.Context, diag node.
 	}
 
 	dispatcher := newTestDispatcher(ctx, queue, nil, nil, nil, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, 0, 0, 0, nil, bindings, time.Now)
-	rc, err := newRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, bindings, time.Now, RemoteBridgeConfig{})
+	rc, err := NewRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, bindings, time.Now, RemoteBridgeConfig{})
 	if err != nil {
-		t.Fatalf("newRemoteCoordinator: %v", err)
+		t.Fatalf("NewRemoteCoordinator: %v", err)
 	}
 	for i, binding := range bindings {
 		if binding != nil && binding.Remote != nil {
@@ -74,16 +76,50 @@ func buildRemoteCoordinatorForTest(t *testing.T, ctx context.Context, diag node.
 	return rc, health
 }
 
+func newTestDispatcher(
+	ctx context.Context,
+	queue state.Queue,
+	store state.Store,
+	manager state.Manager,
+	run *runner.Runner,
+	telemetryDisp scheduler.TelemetryDispatcher,
+	diag scheduler.DiagnosticsWriter,
+	health scheduler.HealthPublisher,
+	logger telemetry.Logger,
+	claimInterval, jitter time.Duration,
+	maxInFlight int,
+	failure bootstrap.FailurePolicy,
+	bindings []*Binding,
+	clock func() time.Time,
+) *scheduler.Dispatcher {
+	schedBindings := make([]*scheduler.Binding, 0, len(bindings))
+	for _, binding := range bindings {
+		if binding == nil {
+			continue
+		}
+		schedBindings = append(schedBindings, &scheduler.Binding{Pool: binding.Pool, Remote: binding.Remote})
+	}
+
+	opts := scheduler.Options{
+		ClaimInterval: claimInterval,
+		Jitter:        jitter,
+		MaxInFlight:   maxInFlight,
+		FailurePolicy: failure,
+		Clock:         clock,
+	}
+	return scheduler.New(ctx, queue, store, manager, run, telemetryDisp, diag, health, logger, schedBindings, opts)
+}
+
 func TestRemoteCoordinatorPoolMetadataEncoding(t *testing.T) {
 	ctx := context.Background()
 	diag := &diagCollector{}
 
-	spBinding := &spawnerBinding{Name: "remote-spawner", Cfg: SpawnerConfig{Name: "remote-spawner"}}
-	binding := &poolBinding{
+	spBinding := &SpawnerBinding{Name: "remote-spawner", Cfg: bootstrap.SpawnerConfig{Name: "remote-spawner"}}
+	binding := &Binding{
 		Pool: pools.NewLocal("remote", state.Selector{}, 1),
-		Remote: &remoteBinding{
+		Remote: &RemoteBinding{
 			Spawner: spBinding,
-			PoolCfg: PoolConfig{
+			PoolCfg: bootstrap.PoolConfig{
 				Name:  "remote",
 				Slots: 1,
 				Metadata: map[string]any{
@@ -95,7 +131,7 @@ func TestRemoteCoordinatorPoolMetadataEncoding(t *testing.T) {
 		},
 	}
 
-	rc, _ := buildRemoteCoordinatorForTest(t, ctx, diag, []*poolBinding{binding})
+	rc, _ := buildRemoteCoordinatorForTest(t, ctx, diag, []*Binding{binding})
 	specs := rc.PoolSpecsForSpawnerForTest(spBinding)
 	if len(specs) != 1 {
 		t.Fatalf("expected 1 pool spec, got %d", len(specs))
@@ -113,11 +149,11 @@ func TestRemoteCoordinatorPoolMetadataEncoding(t *testing.T) {
 
 	t.Run("panic on unencodable metadata", func(t *testing.T) {
 		badDiag := &diagCollector{}
-		badBinding := &poolBinding{
+		badBinding := &Binding{
 			Pool: pools.NewLocal("bad-remote", state.Selector{}, 1),
-			Remote: &remoteBinding{
+			Remote: &RemoteBinding{
 				Spawner: spBinding,
-				PoolCfg: PoolConfig{
+				PoolCfg: bootstrap.PoolConfig{
 					Name:  "bad-remote",
 					Slots: 1,
 					Metadata: map[string]any{
@@ -127,7 +163,7 @@ func TestRemoteCoordinatorPoolMetadataEncoding(t *testing.T) {
 			},
 		}
 
-		rcBad, _ := buildRemoteCoordinatorForTest(t, ctx, badDiag, []*poolBinding{badBinding})
+		rcBad, _ := buildRemoteCoordinatorForTest(t, ctx, badDiag, []*Binding{badBinding})
 		defer func() {
 			if r := recover(); r == nil {
 				t.Fatalf("expected panic when encoding invalid metadata")
@@ -157,23 +193,23 @@ func TestRemoteCoordinatorRegisterMultiplePools(t *testing.T) {
 	ctx := context.Background()
 	diag := &diagCollector{}
 
-	spBinding := &spawnerBinding{Name: "remote-spawner", Cfg: SpawnerConfig{Name: "remote-spawner"}}
-	bindingA := &poolBinding{
+	spBinding := &SpawnerBinding{Name: "remote-spawner", Cfg: bootstrap.SpawnerConfig{Name: "remote-spawner"}}
+	bindingA := &Binding{
 		Pool: pools.NewLocal("remote-a", state.Selector{}, 1),
-		Remote: &remoteBinding{
+		Remote: &RemoteBinding{
 			Spawner: spBinding,
-			PoolCfg: PoolConfig{Name: "remote-a", Slots: 1, Tags: []string{"remote"}},
+			PoolCfg: bootstrap.PoolConfig{Name: "remote-a", Slots: 1, Tags: []string{"remote"}},
 		},
 	}
-	bindingB := &poolBinding{
+	bindingB := &Binding{
 		Pool: pools.NewLocal("remote-b", state.Selector{}, 1),
-		Remote: &remoteBinding{
+		Remote: &RemoteBinding{
 			Spawner: spBinding,
-			PoolCfg: PoolConfig{Name: "remote-b", Slots: 2, Tags: []string{"remote"}},
+			PoolCfg: bootstrap.PoolConfig{Name: "remote-b", Slots: 2, Tags: []string{"remote"}},
 		},
 	}
 
-	rc, health := buildRemoteCoordinatorForTest(t, ctx, diag, []*poolBinding{bindingA, bindingB})
+	rc, health := buildRemoteCoordinatorForTest(t, ctx, diag, []*Binding{bindingA, bindingB})
 	events := make(chan node.HealthEvent, 4)
 	stop := health.Subscribe(func(evt node.HealthEvent) { events <- evt })
 	defer stop()
@@ -215,16 +251,16 @@ func TestRemoteCoordinatorRegisterUnknownPoolDiagnostic(t *testing.T) {
 	ctx := context.Background()
 	diag := &diagCollector{}
 
-	spBinding := &spawnerBinding{Name: "remote-spawner", Cfg: SpawnerConfig{Name: "remote-spawner"}}
-	binding := &poolBinding{
+	spBinding := &SpawnerBinding{Name: "remote-spawner", Cfg: bootstrap.SpawnerConfig{Name: "remote-spawner"}}
+	binding := &Binding{
 		Pool: pools.NewLocal("remote-a", state.Selector{}, 1),
-		Remote: &remoteBinding{
+		Remote: &RemoteBinding{
 			Spawner: spBinding,
-			PoolCfg: PoolConfig{Name: "remote-a", Slots: 1},
+			PoolCfg: bootstrap.PoolConfig{Name: "remote-a", Slots: 1},
 		},
 	}
 
-	rc, health := buildRemoteCoordinatorForTest(t, ctx, diag, []*poolBinding{binding})
+	rc, health := buildRemoteCoordinatorForTest(t, ctx, diag, []*Binding{binding})
 	events := make(chan node.HealthEvent, 2)
 	stop := health.Subscribe(func(evt node.HealthEvent) { events <- evt })
 	defer stop()
@@ -271,23 +307,23 @@ func TestRemoteCoordinatorRegisterMissingPoolHealth(t *testing.T) {
 	ctx := context.Background()
 	diag := &diagCollector{}
 
-	spBinding := &spawnerBinding{Name: "remote-spawner", Cfg: SpawnerConfig{Name: "remote-spawner"}}
-	bindingA := &poolBinding{
+	spBinding := &SpawnerBinding{Name: "remote-spawner", Cfg: bootstrap.SpawnerConfig{Name: "remote-spawner"}}
+	bindingA := &Binding{
 		Pool: pools.NewLocal("remote-a", state.Selector{}, 1),
-		Remote: &remoteBinding{
+		Remote: &RemoteBinding{
 			Spawner: spBinding,
-			PoolCfg: PoolConfig{Name: "remote-a", Slots: 1},
+			PoolCfg: bootstrap.PoolConfig{Name: "remote-a", Slots: 1},
 		},
 	}
-	bindingB := &poolBinding{
+	bindingB := &Binding{
 		Pool: pools.NewLocal("remote-b", state.Selector{}, 1),
-		Remote: &remoteBinding{
+		Remote: &RemoteBinding{
 			Spawner: spBinding,
-			PoolCfg: PoolConfig{Name: "remote-b", Slots: 1},
+			PoolCfg: bootstrap.PoolConfig{Name: "remote-b", Slots: 1},
 		},
 	}
 
-	rc, health := buildRemoteCoordinatorForTest(t, ctx, diag, []*poolBinding{bindingA, bindingB})
+	rc, health := buildRemoteCoordinatorForTest(t, ctx, diag, []*Binding{bindingA, bindingB})
 	events := make(chan node.HealthEvent, 4)
 	stop := health.Subscribe(func(evt node.HealthEvent) { events <- evt })
 	defer stop()
@@ -340,19 +376,19 @@ func TestRemoteCoordinatorMetadataValidation(t *testing.T) {
 
 	t.Run("matching metadata", func(t *testing.T) {
 		diag := &diagCollector{}
-		spBinding := &spawnerBinding{Name: "remote-spawner", Cfg: SpawnerConfig{
+		spBinding := &SpawnerBinding{Name: "remote-spawner", Cfg: bootstrap.SpawnerConfig{
 			Name:     "remote-spawner",
 			Metadata: map[string]string{"region": "us-east"},
 			Tags:     []string{"remote"},
 		}}
-		binding := &poolBinding{
+		binding := &Binding{
 			Pool: pools.NewLocal("remote", state.Selector{}, 1),
-			Remote: &remoteBinding{
+			Remote: &RemoteBinding{
 				Spawner: spBinding,
-				PoolCfg: PoolConfig{Name: "remote", Slots: 1},
+				PoolCfg: bootstrap.PoolConfig{Name: "remote", Slots: 1},
 			},
 		}
-		rc, _ := buildRemoteCoordinatorForTest(t, ctx, diag, []*poolBinding{binding})
+		rc, _ := buildRemoteCoordinatorForTest(t, ctx, diag, []*Binding{binding})
 		req := &processproto.RegisterNode{
 			NodeId: "child-1",
 			Metadata: map[string]string{
@@ -379,18 +415,18 @@ func TestRemoteCoordinatorMetadataValidation(t *testing.T) {
 
 	t.Run("missing metadata emits diagnostic", func(t *testing.T) {
 		diag := &diagCollector{}
-		spBinding := &spawnerBinding{Name: "remote-spawner", Cfg: SpawnerConfig{
+		spBinding := &SpawnerBinding{Name: "remote-spawner", Cfg: bootstrap.SpawnerConfig{
 			Name:     "remote-spawner",
 			Metadata: map[string]string{"region": "us-west"},
 		}}
-		binding := &poolBinding{
+		binding := &Binding{
 			Pool: pools.NewLocal("remote", state.Selector{}, 1),
-			Remote: &remoteBinding{
+			Remote: &RemoteBinding{
 				Spawner: spBinding,
-				PoolCfg: PoolConfig{Name: "remote", Slots: 1},
+				PoolCfg: bootstrap.PoolConfig{Name: "remote", Slots: 1},
 			},
 		}
-		rc, _ := buildRemoteCoordinatorForTest(t, ctx, diag, []*poolBinding{binding})
+		rc, _ := buildRemoteCoordinatorForTest(t, ctx, diag, []*Binding{binding})
 		req := &processproto.RegisterNode{
 			NodeId:   "child-1",
 			Metadata: map[string]string{"tags": "remote"},
@@ -431,28 +467,28 @@ func TestRemoteCoordinatorValidation(t *testing.T) {
 	health := node.NewHealthDispatcher()
 	binary := testBinaryPath(t)
 
-	newBindings := func(sp *spawnerBinding) []*poolBinding {
-		return []*poolBinding{
+	newBindings := func(sp *SpawnerBinding) []*Binding {
+		return []*Binding{
 			{
 				Pool: pools.NewLocal("remote", state.Selector{}, 1),
-				Remote: &remoteBinding{
+				Remote: &RemoteBinding{
 					Spawner: sp,
-					PoolCfg: PoolConfig{Name: "remote", Slots: 1},
+					PoolCfg: bootstrap.PoolConfig{Name: "remote", Slots: 1},
 				},
 			},
 		}
 	}
 
-	makeDispatcher := func(diag scheduler.DiagnosticsWriter, bindings []*poolBinding) *scheduler.Dispatcher {
+	makeDispatcher := func(diag scheduler.DiagnosticsWriter, bindings []*Binding) *scheduler.Dispatcher {
 		return newTestDispatcher(ctx, queue, nil, manager, nil, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, 0, 0, 0, nil, bindings, time.Now)
 	}
 
 	t.Run("missing auth token", func(t *testing.T) {
-		bindings := newBindings(&spawnerBinding{Name: "remote", Cfg: SpawnerConfig{Name: "remote", BinaryPath: binary}})
+		bindings := newBindings(&SpawnerBinding{Name: "remote", Cfg: bootstrap.SpawnerConfig{Name: "remote", BinaryPath: binary}})
 		diag := &diagCollector{}
 		dispatcher := makeDispatcher(diag, bindings)
-		_, err := newRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, bindings, time.Now, RemoteBridgeConfig{})
-		if err == nil || !errors.Is(err, ErrRemoteMissingAuthToken) {
+		_, err := NewRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, bindings, time.Now, RemoteBridgeConfig{})
+		if err == nil || !errors.Is(err, ErrMissingAuthToken) {
 			t.Fatalf("expected missing auth token error, got %v", err)
 		}
 		events := diag.Events()
@@ -469,7 +505,7 @@ func TestRemoteCoordinatorValidation(t *testing.T) {
 	})
 
 	t.Run("partial TLS configuration", func(t *testing.T) {
-		bindings := newBindings(&spawnerBinding{Name: "remote-tls", Cfg: SpawnerConfig{
+		bindings := newBindings(&SpawnerBinding{Name: "remote-tls", Cfg: bootstrap.SpawnerConfig{
 			Name:       "remote-tls",
 			BinaryPath: binary,
 			AuthToken:  "secret",
@@ -479,8 +515,8 @@ func TestRemoteCoordinatorValidation(t *testing.T) {
 		}})
 		diag := &diagCollector{}
 		dispatcher := makeDispatcher(diag, bindings)
-		_, err := newRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, bindings, time.Now, RemoteBridgeConfig{})
-		if err == nil || !errors.Is(err, ErrRemoteMissingTLSPair) {
+		_, err := NewRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, bindings, time.Now, RemoteBridgeConfig{})
+		if err == nil || !errors.Is(err, ErrMissingTLSPair) {
 			t.Fatalf("expected TLS validation error, got %v", err)
 		}
 		events := diag.Events()
@@ -501,7 +537,7 @@ func TestRemoteCoordinatorValidation(t *testing.T) {
 	})
 
 	t.Run("missing TLS CA", func(t *testing.T) {
-		bindings := newBindings(&spawnerBinding{Name: "remote-tls-ca", Cfg: SpawnerConfig{
+		bindings := newBindings(&SpawnerBinding{Name: "remote-tls-ca", Cfg: bootstrap.SpawnerConfig{
 			Name:       "remote-tls-ca",
 			BinaryPath: binary,
 			AuthToken:  "secret",
@@ -512,8 +548,8 @@ func TestRemoteCoordinatorValidation(t *testing.T) {
 		}})
 		diag := &diagCollector{}
 		dispatcher := makeDispatcher(diag, bindings)
-		_, err := newRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, bindings, time.Now, RemoteBridgeConfig{})
-		if err == nil || !errors.Is(err, ErrRemoteMissingTLSCA) {
+		_, err := NewRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, bindings, time.Now, RemoteBridgeConfig{})
+		if err == nil || !errors.Is(err, ErrMissingTLSCA) {
 			t.Fatalf("expected missing TLS CA error, got %v", err)
 		}
 	})

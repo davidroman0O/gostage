@@ -1,10 +1,11 @@
-package gostage
+package coordinator
 
 import (
 	"context"
 	"testing"
 	"time"
 
+	"github.com/davidroman0O/gostage/v3/bootstrap"
 	"github.com/davidroman0O/gostage/v3/pools"
 	"github.com/davidroman0O/gostage/v3/state"
 )
@@ -13,20 +14,20 @@ func TestRemoteCoordinatorOnLeaseAckReleasesJob(t *testing.T) {
 	ctx := context.Background()
 	diag := &diagCollector{}
 
-	binding := &poolBinding{
+	binding := &Binding{
 		Pool: pools.NewLocal("remote", state.Selector{}, 1),
-		Remote: &remoteBinding{
-			PoolCfg: PoolConfig{Name: "remote", Slots: 1},
+		Remote: &RemoteBinding{
+			PoolCfg: bootstrap.PoolConfig{Name: "remote", Slots: 1},
 		},
 	}
-	rc, _ := buildRemoteCoordinatorForTest(t, ctx, diag, []*poolBinding{binding})
+	rc, _ := buildRemoteCoordinatorForTest(t, ctx, diag, []*Binding{binding})
 
 	remotePool := rc.PoolsForTest()["remote"]
-	remotePool.Worker = newRemoteWorkerForTest(true, nil)
+	remotePool.Worker = NewRemoteWorkerForTest(true, nil)
 
 	releaseCalled := false
 	workflowID := "workflow-1"
-	rc.JobsForTest()[workflowID] = &remoteJob{
+	rc.JobsForTest()[workflowID] = &RemoteJob{
 		Workflow: &state.ClaimedWorkflow{
 			QueuedWorkflow: state.QueuedWorkflow{
 				ID: state.WorkflowID(workflowID),
@@ -63,13 +64,13 @@ func TestRemoteCoordinatorOnLeaseAckUnknownWorkflow(t *testing.T) {
 	ctx := context.Background()
 	diag := &diagCollector{}
 
-	binding := &poolBinding{
+	binding := &Binding{
 		Pool: pools.NewLocal("remote", state.Selector{}, 1),
-		Remote: &remoteBinding{
-			PoolCfg: PoolConfig{Name: "remote", Slots: 1},
+		Remote: &RemoteBinding{
+			PoolCfg: bootstrap.PoolConfig{Name: "remote", Slots: 1},
 		},
 	}
-	rc, _ := buildRemoteCoordinatorForTest(t, ctx, diag, []*poolBinding{binding})
+	rc, _ := buildRemoteCoordinatorForTest(t, ctx, diag, []*Binding{binding})
 
 	err := rc.OnLeaseAck(ctx, nil, "missing", "lease", state.ResultSummary{})
 	if err == nil {

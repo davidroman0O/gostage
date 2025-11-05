@@ -187,6 +187,7 @@ type Snapshot struct {
 	Completed  int
 	Failed     int
 	Cancelled  int
+	Skipped    int
 	Pools      []PoolSnapshot
 }
 

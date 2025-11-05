@@ -18,6 +18,12 @@ type telemetryManager struct {
 	clock      func() time.Time
 }
 
+var autoSuppressKinds = map[telemetry.EventKind]struct{}{
+	telemetry.EventWorkflowCancelled: {},
+	telemetry.EventStageRemoved:      {},
+	telemetry.EventActionRemoved:     {},
+}
+
 func WrapWithTelemetry(delegate state.Manager, dispatcher *node.TelemetryDispatcher) state.Manager {
 	if dispatcher == nil {
 		return delegate
@@ -320,6 +326,11 @@ func (m *telemetryManager) emit(evt telemetry.Event) {
 		evt.Timestamp = m.now()
 	}
 	_ = m.dispatcher.Dispatch(evt)
+	if evt.WorkflowID != "" {
+		if _, ok := autoSuppressKinds[evt.Kind]; ok {
+			m.SuppressWorkflowEvents(evt.WorkflowID, evt.Kind)
+		}
+	}
 }
 
 func (m *telemetryManager) now() time.Time {

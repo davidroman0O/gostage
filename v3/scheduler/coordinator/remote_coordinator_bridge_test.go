@@ -1,4 +1,4 @@
-package gostage
+package coordinator
 
 import (
 	"context"
@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/davidroman0O/gostage/v3/bootstrap"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -35,20 +37,20 @@ func TestRemoteCoordinatorBindAdvertiseAddress(t *testing.T) {
 	base := node.New(ctx, nil, node.TelemetryDispatcherConfig{})
 	health := node.NewHealthDispatcher()
 
-	binding := &poolBinding{
+	binding := &Binding{
 		Pool: pools.NewLocal("remote", state.Selector{}, 1),
-		Remote: &remoteBinding{
-			PoolCfg: PoolConfig{Name: "remote", Slots: 1},
+		Remote: &RemoteBinding{
+			PoolCfg: bootstrap.PoolConfig{Name: "remote", Slots: 1},
 		},
 	}
 
-	dispatcher := newTestDispatcher(ctx, queue, nil, nil, nil, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{binding}, time.Now)
-	rc, err := newRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, telemetry.NoopLogger{}, []*poolBinding{binding}, time.Now, RemoteBridgeConfig{
+	dispatcher := newTestDispatcher(ctx, queue, nil, nil, nil, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*Binding{binding}, time.Now)
+	rc, err := NewRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, telemetry.NoopLogger{}, []*Binding{binding}, time.Now, RemoteBridgeConfig{
 		BindAddress:      "127.0.0.1:0",
 		AdvertiseAddress: "bridge.service",
 	})
 	if err != nil {
-		t.Fatalf("newRemoteCoordinator: %v", err)
+		t.Fatalf("NewRemoteCoordinator: %v", err)
 	}
 	defer rc.ShutdownForTest()
 
@@ -76,17 +78,17 @@ func TestRemoteCoordinatorTLSHandshake(t *testing.T) {
 	base := node.New(ctx, nil, node.TelemetryDispatcherConfig{})
 	health := node.NewHealthDispatcher()
 
-	binding := &poolBinding{
+	binding := &Binding{
 		Pool: pools.NewLocal("remote", state.Selector{}, 1),
-		Remote: &remoteBinding{
-			PoolCfg: PoolConfig{Name: "remote", Slots: 1},
+		Remote: &RemoteBinding{
+			PoolCfg: bootstrap.PoolConfig{Name: "remote", Slots: 1},
 		},
 	}
 
 	certPath, keyPath := writeTestCertificate(t, "server")
 
-	dispatcher := newTestDispatcher(ctx, queue, nil, nil, nil, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{binding}, time.Now)
-	rc, err := newRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, telemetry.NoopLogger{}, []*poolBinding{binding}, time.Now, RemoteBridgeConfig{
+	dispatcher := newTestDispatcher(ctx, queue, nil, nil, nil, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*Binding{binding}, time.Now)
+	rc, err := NewRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), base.DiagnosticsWriter(), health, telemetry.NoopLogger{}, []*Binding{binding}, time.Now, RemoteBridgeConfig{
 		BindAddress: "127.0.0.1:0",
 		TLS: TLSFiles{
 			CertPath: certPath,
@@ -96,7 +98,7 @@ func TestRemoteCoordinatorTLSHandshake(t *testing.T) {
 		RequireClientCert: true,
 	})
 	if err != nil {
-		t.Fatalf("newRemoteCoordinator: %v", err)
+		t.Fatalf("NewRemoteCoordinator: %v", err)
 	}
 	defer rc.ShutdownForTest()
 
@@ -158,21 +160,21 @@ func TestRemoteCoordinatorTokenValidation(t *testing.T) {
 	health := node.NewHealthDispatcher()
 	diag := &diagCollector{}
 
-	binding := &poolBinding{
+	binding := &Binding{
 		Pool: pools.NewLocal("remote", state.Selector{}, 1),
-		Remote: &remoteBinding{
-			PoolCfg: PoolConfig{Name: "remote", Slots: 1},
+		Remote: &RemoteBinding{
+			PoolCfg: bootstrap.PoolConfig{Name: "remote", Slots: 1},
 		},
 	}
 
-	dispatcher := newTestDispatcher(ctx, queue, nil, nil, nil, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{binding}, time.Now)
-	rc, err := newRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, []*poolBinding{binding}, time.Now, RemoteBridgeConfig{})
+	dispatcher := newTestDispatcher(ctx, queue, nil, nil, nil, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*Binding{binding}, time.Now)
+	rc, err := NewRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, []*Binding{binding}, time.Now, RemoteBridgeConfig{})
 	if err != nil {
-		t.Fatalf("newRemoteCoordinator: %v", err)
+		t.Fatalf("NewRemoteCoordinator: %v", err)
 	}
 	defer rc.ShutdownForTest()
 
-	sp := &spawnerBinding{Name: "remote-spawner", Cfg: SpawnerConfig{Name: "remote-spawner", AuthToken: "secret"}}
+	sp := &SpawnerBinding{Name: "remote-spawner", Cfg: bootstrap.SpawnerConfig{Name: "remote-spawner", AuthToken: "secret"}}
 	binding.Remote.Spawner = sp
 	if pool := rc.PoolsForTest()["remote"]; pool != nil {
 		pool.Binding.Remote.Spawner = sp

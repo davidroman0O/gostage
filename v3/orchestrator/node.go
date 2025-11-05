@@ -157,7 +157,7 @@ func (n *Node) stats(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	completed64, failed64, cancelled64 := n.dispatcher.StatsCounters()
+	completed64, failed64, cancelled64, skipped64 := n.dispatcher.StatsCounters()
 	snapshot := Snapshot{
 		UpdatedAt:  time.Now(),
 		QueueDepth: stats.Pending,
@@ -165,6 +165,7 @@ func (n *Node) stats(ctx context.Context) (Snapshot, error) {
 		Completed:  int(completed64),
 		Failed:     int(failed64),
 		Cancelled:  int(cancelled64),
+		Skipped:    int(skipped64),
 		Pools:      make([]PoolSnapshot, 0, len(n.pools)),
 	}
 	for _, binding := range n.pools {

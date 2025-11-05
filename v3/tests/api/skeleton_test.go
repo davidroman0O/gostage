@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/davidroman0O/gostage/v3"
+	gostage "github.com/davidroman0O/gostage/v3"
 )
 
 func TestRunStub(t *testing.T) {

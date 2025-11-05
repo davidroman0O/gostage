@@ -1,4 +1,4 @@
-package gostage
+package gostage_test
 
 import (
 	"context"
@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	gostage "github.com/davidroman0O/gostage/v3"
+	"github.com/davidroman0O/gostage/v3/internal/gostagetest"
 	"github.com/davidroman0O/gostage/v3/state"
 	statetest "github.com/davidroman0O/gostage/v3/state/testkit"
 	_ "modernc.org/sqlite"
@@ -81,7 +83,7 @@ func TestPoolMetadataToStrings(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		if got := poolMetadataToStrings(tc.input); !reflect.DeepEqual(got, tc.expect) {
+		if got := gostagetest.PoolMetadataToStrings(tc.input); !reflect.DeepEqual(got, tc.expect) {
 			t.Fatalf("%s: expected %v, got %v", tc.name, tc.expect, got)
 		}
 	}
@@ -94,7 +96,7 @@ func TestPoolMetadataToStringsPanicsOnEncodeError(t *testing.T) {
 		}
 	}()
 
-	poolMetadataToStrings(map[string]any{"bad": badJSON{}})
+	gostagetest.PoolMetadataToStrings(map[string]any{"bad": badJSON{}})
 }
 
 func TestRunWithSQLiteExistingDBPreservesPragmas(t *testing.T) {
@@ -128,12 +130,12 @@ func TestRunWithSQLiteExistingDBPreservesPragmas(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	node, diag, err := Run(ctx,
-		WithQueue(queue),
-		WithStore(store),
-		WithStateObserver(observer),
-		WithStateReader(observer.Reader()),
-		WithSQLite(SQLiteConfig{
+	node, diag, err := gostage.Run(ctx,
+		gostage.WithQueue(queue),
+		gostage.WithStore(store),
+		gostage.WithStateObserver(observer),
+		gostage.WithStateReader(observer.Reader()),
+		gostage.WithSQLite(gostage.SQLiteConfig{
 			DB:              db,
 			ApplyMigrations: false,
 			DisableWAL:      true,

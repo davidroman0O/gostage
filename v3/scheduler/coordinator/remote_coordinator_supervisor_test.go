@@ -1,4 +1,4 @@
-package gostage
+package coordinator
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/davidroman0O/gostage/v3/bootstrap"
 	"github.com/davidroman0O/gostage/v3/diagnostics"
 	"github.com/davidroman0O/gostage/v3/node"
 	"github.com/davidroman0O/gostage/v3/pools"
@@ -25,7 +26,7 @@ func TestProcessSupervisorExhaustsRestarts(t *testing.T) {
 	health := node.NewHealthDispatcher()
 	diag := &diagCollector{}
 
-	spCfg := SpawnerConfig{
+	spCfg := bootstrap.SpawnerConfig{
 		Name:           "crashy",
 		BinaryPath:     crashScript,
 		MaxRestarts:    2,
@@ -33,10 +34,10 @@ func TestProcessSupervisorExhaustsRestarts(t *testing.T) {
 		AuthToken:      "supervisor-secret",
 	}
 
-	binding := &poolBinding{
+	binding := &Binding{
 		Pool: pools.NewLocal("remote-crash", state.Selector{}, 1),
-		Remote: &remoteBinding{
-			Spawner: &spawnerBinding{
+		Remote: &RemoteBinding{
+			Spawner: &SpawnerBinding{
 				Name: spCfg.Name,
 				Cfg:  spCfg,
 				Process: spawner.NewProcessSpawner(spawner.Config{
@@ -45,14 +46,14 @@ func TestProcessSupervisorExhaustsRestarts(t *testing.T) {
 					RestartBackoff: spCfg.RestartBackoff,
 				}),
 			},
-			PoolCfg: PoolConfig{Name: "remote-crash", Slots: 1},
+			PoolCfg: bootstrap.PoolConfig{Name: "remote-crash", Slots: 1},
 		},
 	}
 
-	dispatcher := newTestDispatcher(ctx, queue, nil, nil, nil, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{binding}, time.Now)
-	rc, err := newRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, []*poolBinding{binding}, time.Now, RemoteBridgeConfig{BindAddress: "127.0.0.1:0"})
+	dispatcher := newTestDispatcher(ctx, queue, nil, nil, nil, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*Binding{binding}, time.Now)
+	rc, err := NewRemoteCoordinator(ctx, dispatcher, queue, base.TelemetryDispatcher(), diag, health, telemetry.NoopLogger{}, []*Binding{binding}, time.Now, RemoteBridgeConfig{BindAddress: "127.0.0.1:0"})
 	if err != nil {
-		t.Fatalf("newRemoteCoordinator: %v", err)
+		t.Fatalf("NewRemoteCoordinator: %v", err)
 	}
 	defer rc.ShutdownForTest()
 

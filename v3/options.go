@@ -11,11 +11,28 @@ import (
 const defaultClaimInterval = 50 * time.Millisecond
 
 type (
-	Option          = bootstrap.Option
-	OptionFunc      = bootstrap.OptionFunc
-	ChildOption     = bootstrap.ChildOption
-	ChildOptionFunc = bootstrap.ChildOptionFunc
+	Option            = bootstrap.Option
+	OptionFunc        = bootstrap.OptionFunc
+	ChildOption       = bootstrap.ChildOption
+	ChildOptionFunc   = bootstrap.ChildOptionFunc
+	FailureAction     = bootstrap.FailureAction
+	FailureOutcome    = bootstrap.FailureOutcome
+	FailureContext    = bootstrap.FailureContext
+	FailurePolicy     = bootstrap.FailurePolicy
+	FailurePolicyFunc = bootstrap.FailurePolicyFunc
 )
+
+const (
+	FailureActionAck      = bootstrap.FailureActionAck
+	FailureActionRetry    = bootstrap.FailureActionRetry
+	FailureActionFinalize = bootstrap.FailureActionFinalize
+)
+
+func AckOutcome() FailureOutcome   { return bootstrap.AckOutcome() }
+func RetryOutcome() FailureOutcome { return bootstrap.RetryOutcome() }
+func CancelOutcome(reason TerminationReason) FailureOutcome {
+	return bootstrap.CancelOutcome(reason)
+}
 
 // WithTelemetrySink registers telemetry sinks that will receive events emitted by the node.
 func WithTelemetrySink(sink telemetry.Sink) Option {

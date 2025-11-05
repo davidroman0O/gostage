@@ -1,4 +1,4 @@
-package gostage
+package orchestrator
 
 import (
 	"context"
@@ -24,7 +24,7 @@ func TestTelemetryManagerEmitsWorkflowStatus(t *testing.T) {
 	sink := telemetry.NewChannelSink(8)
 	_ = dispatcher.Register(sink)
 
-	wrapped := wrapWithTelemetry(manager, dispatcher)
+	wrapped := WrapWithTelemetry(manager, dispatcher)
 
 	wf := state.WorkflowRecord{
 		ID:   state.WorkflowID("wf-1"),
@@ -68,7 +68,7 @@ func TestTelemetryManagerEmitsActionProgress(t *testing.T) {
 	sink := telemetry.NewChannelSink(4)
 	_ = dispatcher.Register(sink)
 
-	wrapped := wrapWithTelemetry(manager, dispatcher)
+	wrapped := WrapWithTelemetry(manager, dispatcher)
 
 	wf := state.WorkflowRecord{
 		ID:   state.WorkflowID("wf-2"),
@@ -130,7 +130,7 @@ func TestTelemetryManagerSuppressWorkflowEvents(t *testing.T) {
 	sink := telemetry.NewChannelSink(8)
 	_ = dispatcher.Register(sink)
 
-	wrapped := wrapWithTelemetry(manager, dispatcher)
+	wrapped := WrapWithTelemetry(manager, dispatcher)
 
 	suppressor, ok := wrapped.(interface {
 		SuppressWorkflowEvents(string, ...telemetry.EventKind)
@@ -180,5 +180,50 @@ func TestTelemetryManagerSuppressWorkflowEvents(t *testing.T) {
 	evt := <-sink.C()
 	if evt.Kind != telemetry.EventWorkflowCompleted {
 		t.Fatalf("expected workflow.completed after suppression cleared, got %s", evt.Kind)
+	}
+}
+
+func TestTelemetryManagerAutoSuppressesRemovalEvents(t *testing.T) {
+	store := state.NewMemoryStore()
+	manager, err := state.NewStoreManager(store)
+	if err != nil {
+		t.Fatalf("store manager: %v", err)
+	}
+
+	dispatcher := node.NewTelemetryDispatcher(context.Background(), nil, node.TelemetryDispatcherConfig{})
+	defer dispatcher.Close()
+
+	sink := telemetry.NewChannelSink(4)
+	_ = dispatcher.Register(sink)
+
+	wrapped := WrapWithTelemetry(manager, dispatcher)
+
+	wf := state.WorkflowRecord{ID: state.WorkflowID("wf-auto")}
+	if err := wrapped.WorkflowRegistered(context.Background(), wf); err != nil {
+		t.Fatalf("workflow registered: %v", err)
+	}
+	<-sink.C() // drain workflow.registered
+
+	stage := state.StageRecord{ID: "stage-1"}
+	if err := wrapped.StageRegistered(context.Background(), string(wf.ID), stage); err != nil {
+		t.Fatalf("stage registered: %v", err)
+	}
+	<-sink.C()
+
+	if err := wrapped.StageRemoved(context.Background(), string(wf.ID), stage.ID, "runner"); err != nil {
+		t.Fatalf("stage removed: %v", err)
+	}
+	first := <-sink.C()
+	if first.Kind != telemetry.EventStageRemoved {
+		t.Fatalf("expected stage.removed, got %s", first.Kind)
+	}
+
+	if err := wrapped.StageRemoved(context.Background(), string(wf.ID), stage.ID, "store"); err != nil {
+		t.Fatalf("duplicate stage removed: %v", err)
+	}
+	select {
+	case evt := <-sink.C():
+		t.Fatalf("unexpected duplicate telemetry event: %s", evt.Kind)
+	case <-time.After(50 * time.Millisecond):
 	}
 }

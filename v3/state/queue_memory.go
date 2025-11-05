@@ -25,6 +25,7 @@ type MemoryQueue struct {
 type memQueueItem struct {
 	queued   QueuedWorkflow
 	metadata map[string]any
+	worker   string
 }
 
 const memoryQueueAuditLimit = DefaultAuditLogLimit
@@ -84,6 +85,7 @@ func (q *MemoryQueue) Claim(ctx context.Context, sel Selector, workerID string) 
 	item := q.items[index]
 	q.items = append(q.items[:index], q.items[index+1:]...)
 	item.queued.Attempt++
+	item.worker = workerID
 	claimed := &ClaimedWorkflow{
 		QueuedWorkflow: item.queued,
 		ClaimedAt:      time.Now(),
@@ -130,7 +132,11 @@ func (q *MemoryQueue) Release(ctx context.Context, id WorkflowID) error {
 		}
 		return a.queued.Priority > b.queued.Priority
 	})
-	q.recordAuditLocked("release", id, item.queued.Attempt, "", nil)
+	meta := map[string]any{"reason": "retry"}
+	if item.worker != "" {
+		meta["pool"] = item.worker
+	}
+	q.recordAuditLocked("release", id, item.queued.Attempt, item.worker, meta)
 	q.cond.Signal()
 	return nil
 }
@@ -146,8 +152,22 @@ func (q *MemoryQueue) Ack(ctx context.Context, id WorkflowID, summary ResultSumm
 	if item != nil && summary.Attempt == 0 {
 		summary.Attempt = item.queued.Attempt
 	}
+	reason := summary.Reason
+	if reason == "" {
+		reason = TerminationReasonUnknown
+	}
+	meta := map[string]any{
+		"reason":  string(reason),
+		"success": summary.Success,
+	}
+	if summary.Duration > 0 {
+		meta["duration"] = summary.Duration
+	}
+	if item != nil && item.worker != "" {
+		meta["pool"] = item.worker
+	}
 	q.mu.Lock()
-	q.recordAuditLocked("ack", id, summary.Attempt, "", nil)
+	q.recordAuditLocked("ack", id, summary.Attempt, item.worker, meta)
 	q.mu.Unlock()
 	if ch != nil {
 		ch <- summary
@@ -158,19 +178,29 @@ func (q *MemoryQueue) Ack(ctx context.Context, id WorkflowID, summary ResultSumm
 func (q *MemoryQueue) Cancel(_ context.Context, id WorkflowID) error {
 	key := string(id)
 	q.mu.Lock()
-	if _, ok := q.inflight[key]; ok {
-		q.recordAuditLocked("cancel", id, 0, "", map[string]any{
-			"state": "inflight",
-		})
+	if item, ok := q.inflight[key]; ok {
+		meta := map[string]any{
+			"state":  "inflight",
+			"reason": "cancel",
+		}
+		if item.worker != "" {
+			meta["pool"] = item.worker
+		}
+		q.recordAuditLocked("cancel", id, 0, item.worker, meta)
 		q.mu.Unlock()
 		return nil
 	}
 	for idx, item := range q.items {
 		if item.queued.ID == id {
 			q.items = append(q.items[:idx], q.items[idx+1:]...)
-			q.recordAuditLocked("cancel", id, item.queued.Attempt, "", map[string]any{
-				"state": "pending",
-			})
+			meta := map[string]any{
+				"state":  "pending",
+				"reason": "cancel",
+			}
+			if item.worker != "" {
+				meta["pool"] = item.worker
+			}
+			q.recordAuditLocked("cancel", id, item.queued.Attempt, item.worker, meta)
 			q.mu.Unlock()
 			q.cond.Signal()
 			return nil

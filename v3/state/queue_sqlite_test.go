@@ -155,4 +155,25 @@ func TestSQLiteQueueAuditLog(t *testing.T) {
 	if records[0].Attempt != run2.Attempt {
 		t.Fatalf("expected ack attempt %d, got %d", run2.Attempt, records[0].Attempt)
 	}
+	if records[0].Metadata == nil {
+		t.Fatalf("expected metadata on ack record")
+	}
+	if reason, ok := records[0].Metadata["reason"].(string); !ok || reason != string(TerminationReasonUnknown) {
+		t.Fatalf("expected ack reason 'unknown', got %+v", records[0].Metadata)
+	}
+	if success, ok := records[0].Metadata["success"].(bool); !ok || !success {
+		t.Fatalf("expected ack success metadata true, got %+v", records[0].Metadata)
+	}
+	if pool, ok := records[0].Metadata["pool"].(string); !ok || pool != "worker-2" {
+		t.Fatalf("expected ack pool worker-2, got %+v", records[0].Metadata)
+	}
+	if records[2].Metadata == nil {
+		t.Fatalf("expected release metadata")
+	}
+	if relReason, ok := records[2].Metadata["reason"].(string); !ok || relReason != "retry" {
+		t.Fatalf("expected release reason retry, got %+v", records[2].Metadata)
+	}
+	if pool, ok := records[2].Metadata["pool"].(string); !ok || pool != "worker-1" {
+		t.Fatalf("expected release pool worker-1, got %+v", records[2].Metadata)
+	}
 }

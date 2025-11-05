@@ -16,6 +16,31 @@ import (
 	"github.com/davidroman0O/gostage/v3/workflow"
 )
 
+func intMeta(val any) (int, bool) {
+	switch v := val.(type) {
+	case int:
+		return v, true
+	case int8:
+		return int(v), true
+	case int16:
+		return int(v), true
+	case int32:
+		return int(v), true
+	case int64:
+		return int(v), true
+	case uint:
+		return int(v), true
+	case uint32:
+		return int(v), true
+	case uint64:
+		return int(v), true
+	case float64:
+		return int(v), true
+	default:
+		return 0, false
+	}
+}
+
 func TestCancelWorkflowEmitsTelemetry(t *testing.T) {
 	ctx := context.Background()
 	tele := node.NewTelemetryDispatcher(ctx, nil, node.TelemetryDispatcherConfig{})
@@ -171,6 +196,15 @@ func TestCompleteRemoteMissingReasonDiagnostic(t *testing.T) {
 	workflowID, ok := reasonEvent.Metadata["workflow_id"].(string)
 	if !ok || workflowID != "wf" {
 		t.Fatalf("expected workflow metadata on reason diagnostic, got %+v", reasonEvent.Metadata)
+	}
+	if attemptVal, ok := intMeta(reasonEvent.Metadata["attempt"]); !ok || attemptVal != 1 {
+		t.Fatalf("expected attempt metadata of 1, got %+v", reasonEvent.Metadata)
+	}
+	if poolVal, ok := reasonEvent.Metadata["pool"].(string); !ok || poolVal != pool.Name() {
+		t.Fatalf("expected pool metadata of %s, got %+v", pool.Name(), reasonEvent.Metadata)
+	}
+	if stateVal, ok := reasonEvent.Metadata["final_state"].(string); !ok || stateVal != string(runner.StatusFailed) {
+		t.Fatalf("expected final_state metadata of %s, got %+v", runner.StatusFailed, reasonEvent.Metadata)
 	}
 	if len(manager.summaries) != 1 {
 		t.Fatalf("expected one stored summary, got %d", len(manager.summaries))

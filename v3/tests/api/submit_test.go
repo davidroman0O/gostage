@@ -1,28 +1,31 @@
-package gostage
+package gostage_test
 
 import (
 	"context"
 	"testing"
 
 	"github.com/davidroman0O/gostage/v3/bootstrap"
+	"github.com/davidroman0O/gostage/v3/internal/gostagetest"
 	"github.com/davidroman0O/gostage/v3/pools"
 	"github.com/davidroman0O/gostage/v3/state"
 	"github.com/davidroman0O/gostage/v3/workflow"
+
+	gostage "github.com/davidroman0O/gostage/v3"
 )
 
 func TestSubmitOptionsPopulateRequest(t *testing.T) {
 	req := bootstrap.NewSubmitRequest()
 
-	apply := func(opt SubmitOption) {
-		applySubmitOptionForTest(opt, req)
+	apply := func(opt gostage.SubmitOption) {
+		gostagetest.ApplySubmitOption(opt, req)
 	}
 
-	apply(WithPriority(7))
-	apply(WithTags("priority", "payments"))
+	apply(gostage.WithPriority(7))
+	apply(gostage.WithTags("priority", "payments"))
 	initial := map[string]any{"seed": true}
-	apply(WithInitialStore(initial))
+	apply(gostage.WithInitialStore(initial))
 	meta := map[string]any{"region": "us"}
-	apply(WithMetadata(meta))
+	apply(gostage.WithMetadata(meta))
 
 	if req.Priority != state.Priority(7) {
 		t.Fatalf("expected priority 7, got %d", req.Priority)
@@ -46,10 +49,10 @@ func TestParentSubmitMetadataPrecedence(t *testing.T) {
 	queue := &captureQueue{}
 	store := state.NewMemoryStore()
 	pool := pools.NewLocal("local", state.Selector{All: []string{"order"}}, 1)
-	parent := newParentNodeForTest()
+	parent := gostagetest.NewParentNode()
 	parent.SetQueueForTest(queue)
 	parent.SetStoreForTest(store)
-	parent.SetPoolsForTest([]*poolBinding{{Pool: pool}})
+	parent.SetPoolsForTest([]*gostagetest.PoolBinding{{Pool: pool}})
 
 	def := workflow.Definition{
 		ID:   "wf",
@@ -60,13 +63,13 @@ func TestParentSubmitMetadataPrecedence(t *testing.T) {
 		},
 	}
 
-	ref := WorkflowDefinition(def)
+	ref := gostage.WorkflowDefinition(def)
 	initialStore := map[string]any{"seed": true}
 
 	id, err := parent.Submit(context.Background(), ref,
-		WithTags("priority"),
-		WithMetadata(map[string]any{"region": "eu", "priority": 5}),
-		WithInitialStore(initialStore),
+		gostage.WithTags("priority"),
+		gostage.WithMetadata(map[string]any{"region": "eu", "priority": 5}),
+		gostage.WithInitialStore(initialStore),
 	)
 	if err != nil {
 		t.Fatalf("submit failed: %v", err)

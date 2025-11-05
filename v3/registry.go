@@ -10,6 +10,7 @@ type (
 	ActionFactory     = orchestrator.ActionFactory
 	ActionOption      = orchestrator.ActionOption
 	WorkflowReference = orchestrator.WorkflowReference
+	SubmitOption      = orchestrator.SubmitOption
 )
 
 func WithActionDescription(desc string) ActionOption {
@@ -62,4 +63,20 @@ func WorkflowIDs(id string) (workflow.IDAssignment, bool) {
 
 func WorkflowReferenceIDs(ref WorkflowReference) (workflow.IDAssignment, bool) {
 	return orchestrator.WorkflowReferenceIDs(ref)
+}
+
+func WithPriority(priority int) SubmitOption {
+	return orchestrator.WithPriority(priority)
+}
+
+func WithTags(tags ...string) SubmitOption {
+	return orchestrator.WithTags(tags...)
+}
+
+func WithInitialStore(values map[string]any) SubmitOption {
+	return orchestrator.WithInitialStore(values)
+}
+
+func WithMetadata(values map[string]any) SubmitOption {
+	return orchestrator.WithMetadata(values)
 }

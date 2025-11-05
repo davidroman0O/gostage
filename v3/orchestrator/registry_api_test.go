@@ -1,4 +1,4 @@
-package gostage
+package orchestrator
 
 import (
 	"testing"
@@ -87,7 +87,7 @@ func TestRegisterWorkflowReturnsAssignments(t *testing.T) {
 	if inlineIDs.Stages[0].ID == "" {
 		t.Fatalf("inline ids not populated")
 	}
-	resolved, err := resolveWorkflowReferenceForTest(inlineRef)
+	resolved, err := ResolveWorkflowReferenceForTest(inlineRef)
 	if err != nil {
 		t.Fatalf("resolve inline: %v", err)
 	}

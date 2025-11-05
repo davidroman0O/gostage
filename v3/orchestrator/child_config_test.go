@@ -1,4 +1,4 @@
-package gostage
+package orchestrator
 
 import (
 	"context"
@@ -7,22 +7,21 @@ import (
 
 	"github.com/davidroman0O/gostage/v3/bootstrap"
 	"github.com/davidroman0O/gostage/v3/child"
-	"github.com/davidroman0O/gostage/v3/orchestrator"
 )
 
 func resetChildRegistrations() {
-	orchestrator.ResetChildRegistrationsForTest()
+	ResetChildRegistrationsForTest()
 }
 
 func TestRunChildModeExecutesHandler(t *testing.T) {
-	originalDetect := orchestrator.ChildDetectForTest()
+	originalDetect := ChildDetectForTest()
 	t.Cleanup(func() {
-		orchestrator.SetChildDetectForTest(originalDetect)
+		SetChildDetectForTest(originalDetect)
 		resetChildRegistrations()
 	})
 
 	sentinelErr := errors.New("sentinel")
-	orchestrator.SetChildDetectForTest(func(args []string, getenv child.GetenvFunc) (child.Config, bool, error) {
+	SetChildDetectForTest(func(args []string, getenv child.GetenvFunc) (child.Config, bool, error) {
 		return child.Config{Address: "127.0.0.1:12345"}, true, nil
 	})
 
@@ -48,13 +47,13 @@ func TestRunChildModeExecutesHandler(t *testing.T) {
 }
 
 func TestRunChildModeMetadataConflictFails(t *testing.T) {
-	originalDetect := orchestrator.ChildDetectForTest()
+	originalDetect := ChildDetectForTest()
 	t.Cleanup(func() {
-		orchestrator.SetChildDetectForTest(originalDetect)
+		SetChildDetectForTest(originalDetect)
 		resetChildRegistrations()
 	})
 
-	orchestrator.SetChildDetectForTest(func(args []string, getenv child.GetenvFunc) (child.Config, bool, error) {
+	SetChildDetectForTest(func(args []string, getenv child.GetenvFunc) (child.Config, bool, error) {
 		return child.Config{
 			Address:  "127.0.0.1:12345",
 			Metadata: map[string]string{"region": "parent"},
@@ -82,7 +81,7 @@ func TestRunChildModeMetadataConflictFails(t *testing.T) {
 
 func TestMergeChildConfigUsesOptions(t *testing.T) {
 	logger := &stubLogger{}
-	reg := orchestrator.NewChildHandlerRegistration(bootstrap.ChildOptions{
+	reg := NewChildHandlerRegistration(bootstrap.ChildOptions{
 		Pools: []PoolConfig{{
 			Name:     "remote",
 			Slots:    2,
@@ -103,7 +102,7 @@ func TestMergeChildConfigUsesOptions(t *testing.T) {
 		Tags:      []string{"remote", "child"},
 	})
 
-	cfg, err := orchestrator.MergeChildConfigForTest(child.Config{}, reg)
+	cfg, err := MergeChildConfigForTest(child.Config{}, reg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -138,7 +137,7 @@ func TestMergeChildConfigUsesOptions(t *testing.T) {
 	t.Run("metadata scenarios", func(t *testing.T) {
 		t.Run("matching value succeeds", func(t *testing.T) {
 			base := child.Config{Metadata: map[string]string{"region": "us"}}
-			merged, err := orchestrator.MergeChildConfigForTest(base, reg)
+			merged, err := MergeChildConfigForTest(base, reg)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -149,7 +148,7 @@ func TestMergeChildConfigUsesOptions(t *testing.T) {
 
 		t.Run("distinct keys succeed", func(t *testing.T) {
 			base := child.Config{Metadata: map[string]string{"env": "prod"}}
-			merged, err := orchestrator.MergeChildConfigForTest(base, reg)
+			merged, err := MergeChildConfigForTest(base, reg)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -163,14 +162,14 @@ func TestMergeChildConfigUsesOptions(t *testing.T) {
 
 		t.Run("conflicting values fail", func(t *testing.T) {
 			base := child.Config{Metadata: map[string]string{"region": "eu"}}
-			_, err := orchestrator.MergeChildConfigForTest(base, reg)
+			_, err := MergeChildConfigForTest(base, reg)
 			if err == nil {
 				t.Fatalf("expected conflict error")
 			}
 			if !errors.Is(err, bootstrap.ErrChildMetadataConflict) {
 				t.Fatalf("expected ErrChildMetadataConflict, got %v", err)
 			}
-			var conflictErr *orchestrator.ChildMetadataConflictError
+			var conflictErr *ChildMetadataConflictError
 			if !errors.As(err, &conflictErr) {
 				t.Fatalf("expected ChildMetadataConflictError, got %T", err)
 			}
@@ -194,7 +193,7 @@ func TestMergeChildConfigUsesOptions(t *testing.T) {
 		Logger: baseLogger,
 		Tags:   []string{"existing"},
 	}
-	merged, err := orchestrator.MergeChildConfigForTest(base, reg)
+	merged, err := MergeChildConfigForTest(base, reg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

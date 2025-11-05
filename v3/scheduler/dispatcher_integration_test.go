@@ -1,4 +1,4 @@
-package gostage
+package scheduler_test
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	gostage "github.com/davidroman0O/gostage/v3"
 	"github.com/davidroman0O/gostage/v3/broker"
 	"github.com/davidroman0O/gostage/v3/node"
 	"github.com/davidroman0O/gostage/v3/pools"
@@ -18,8 +19,34 @@ import (
 	"github.com/davidroman0O/gostage/v3/scheduler"
 	"github.com/davidroman0O/gostage/v3/state"
 	"github.com/davidroman0O/gostage/v3/telemetry"
+	telemetrymanager "github.com/davidroman0O/gostage/v3/telemetry/manager"
 	"github.com/davidroman0O/gostage/v3/workflow"
 )
+
+func toInt(val any) (int, bool) {
+	switch v := val.(type) {
+	case int:
+		return v, true
+	case int8:
+		return int(v), true
+	case int16:
+		return int(v), true
+	case int32:
+		return int(v), true
+	case int64:
+		return int(v), true
+	case uint:
+		return int(v), true
+	case uint32:
+		return int(v), true
+	case uint64:
+		return int(v), true
+	case float64:
+		return int(v), true
+	default:
+		return 0, false
+	}
+}
 
 func TestDispatcherMaxInFlight(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -30,7 +57,7 @@ func TestDispatcherMaxInFlight(t *testing.T) {
 	started := make(chan struct{}, 4)
 	release := make(chan struct{})
 
-	MustRegisterAction("test.block", func() ActionFunc {
+	gostage.MustRegisterAction("test.block", func() gostage.ActionFunc {
 		return func(actionCtx rt.Context) error {
 			started <- struct{}{}
 			select {
@@ -76,7 +103,7 @@ func TestDispatcherMaxInFlight(t *testing.T) {
 	run := runner.New(local.Factory{}, registry.Default(), br)
 
 	pool := pools.NewLocal("local", state.Selector{}, 2)
-	bindings := []*poolBinding{{Pool: pool}}
+	bindings := []*scheduler.Binding{{Pool: pool}}
 
 	dispatcher := newTestDispatcher(ctx, queue, store, manager, run, nil, nil, nil, telemetry.NoopLogger{}, 5*time.Millisecond, 0, 1, nil, bindings, manager.Clock())
 	dispatcher.Start()
@@ -111,7 +138,7 @@ func TestDispatcherMissingTerminationReasonDiagnostic(t *testing.T) {
 	registry.SetDefault(registry.NewSafeRegistry())
 
 	const failAction = "test.fail.reason"
-	MustRegisterAction(failAction, func() ActionFunc {
+	gostage.MustRegisterAction(failAction, func() gostage.ActionFunc {
 		return func(actionCtx rt.Context) error {
 			return errors.New("boom")
 		}
@@ -151,20 +178,20 @@ func TestDispatcherMissingTerminationReasonDiagnostic(t *testing.T) {
 	defer diagHub.Close()
 	diagCh := diagHub.Subscribe()
 
-	manager := wrapWithTelemetry(baseManager, teleDispatcher)
+	manager := telemetrymanager.Wrap(baseManager, teleDispatcher)
 	br := broker.NewLocal(manager)
 	run := runner.New(local.Factory{}, registry.Default(), br)
 
-	policy := FailurePolicyFunc(func(context.Context, FailureContext) FailureOutcome {
-		return FailureOutcome{
-			Action:     FailureActionAck,
+	policy := gostage.FailurePolicyFunc(func(context.Context, gostage.FailureContext) gostage.FailureOutcome {
+		return gostage.FailureOutcome{
+			Action:     gostage.FailureActionAck,
 			FinalState: runner.StatusFailed,
 			Reason:     "",
 		}
 	})
 
 	pool := pools.NewLocal("local", state.Selector{}, 1)
-	dispatcher := newTestDispatcher(ctx, queue, store, manager, run, teleDispatcher, diagHub, nil, telemetry.NoopLogger{}, 5*time.Millisecond, 0, 0, policy, []*poolBinding{{Pool: pool}}, baseManager.Clock())
+	dispatcher := newTestDispatcher(ctx, queue, store, manager, run, teleDispatcher, diagHub, nil, telemetry.NoopLogger{}, 5*time.Millisecond, 0, 0, policy, []*scheduler.Binding{{Pool: pool}}, baseManager.Clock())
 	dispatcher.Start()
 	defer dispatcher.Stop()
 
@@ -179,6 +206,18 @@ func TestDispatcherMissingTerminationReasonDiagnostic(t *testing.T) {
 		select {
 		case evt := <-diagCh:
 			if evt.Component == "dispatcher.reason.missing" {
+				if evt.Metadata == nil {
+					t.Fatalf("expected metadata on reason diagnostic")
+				}
+				if attemptVal, ok := toInt(evt.Metadata["attempt"]); !ok || attemptVal != 1 {
+					t.Fatalf("expected attempt metadata of 1, got %+v", evt.Metadata)
+				}
+				if poolVal, ok := evt.Metadata["pool"].(string); !ok || poolVal != "local" {
+					t.Fatalf("expected pool 'local', got %+v", evt.Metadata)
+				}
+				if stateVal, ok := evt.Metadata["final_state"].(string); !ok || stateVal != string(runner.StatusFailed) {
+					t.Fatalf("expected final_state=failed, got %+v", evt.Metadata)
+				}
 				return
 			}
 		case <-timeout:
@@ -197,7 +236,7 @@ func TestDispatcherPublishesHealthOnClaimError(t *testing.T) {
 		events <- evt
 	})
 
-	dispatcher := newTestDispatcher(ctx, queue, nil, nil, nil, nil, nil, health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{{Pool: pools.NewLocal("local", state.Selector{}, 1)}}, time.Now)
+	dispatcher := newTestDispatcher(ctx, queue, nil, nil, nil, nil, nil, health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*scheduler.Binding{{Pool: pools.NewLocal("local", state.Selector{}, 1)}}, time.Now)
 	dispatcher.PollOnce()
 
 	select {
@@ -214,7 +253,7 @@ func TestDispatcherHealthTracksLastError(t *testing.T) {
 	ctx := context.Background()
 	health := node.NewHealthDispatcher()
 	pool := pools.NewLocal("local", state.Selector{}, 1)
-	bindings := []*poolBinding{{Pool: pool}}
+	bindings := []*scheduler.Binding{{Pool: pool}}
 	dispatcher := newTestDispatcher(ctx, nil, nil, nil, nil, nil, nil, health, telemetry.NoopLogger{}, 0, 0, 0, nil, bindings, time.Now)
 
 	events := make(chan node.HealthEvent, 2)
@@ -273,7 +312,7 @@ func TestDispatcherStoresSummaryBeforeAck(t *testing.T) {
 	ctx := context.Background()
 	registry.SetDefault(registry.NewSafeRegistry())
 
-	MustRegisterAction("test.success", func() ActionFunc {
+	gostage.MustRegisterAction("test.success", func() gostage.ActionFunc {
 		return func(rt.Context) error {
 			return nil
 		}
@@ -305,7 +344,7 @@ func TestDispatcherStoresSummaryBeforeAck(t *testing.T) {
 	run := runner.New(local.Factory{}, registry.Default(), br)
 
 	pool := pools.NewLocal("local", state.Selector{}, 1)
-	dispatcher := newTestDispatcher(ctx, queue, nil, manager, run, nil, nil, nil, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{{Pool: pool}}, manager.Clock())
+	dispatcher := newTestDispatcher(ctx, queue, nil, manager, run, nil, nil, nil, telemetry.NoopLogger{}, 0, 0, 0, nil, []*scheduler.Binding{{Pool: pool}}, manager.Clock())
 
 	if _, err := queue.Enqueue(ctx, normalized.Clone(), state.PriorityDefault, nil); err != nil {
 		t.Fatalf("enqueue: %v", err)
@@ -351,7 +390,7 @@ func TestDispatcherSuppressesWorkflowTelemetry(t *testing.T) {
 	defer telemetryDisp.Close()
 	health := node.NewHealthDispatcher()
 
-	managerWithTelemetry := wrapWithTelemetry(manager, telemetryDisp)
+	managerWithTelemetry := telemetrymanager.Wrap(manager, telemetryDisp)
 
 	sink := telemetry.NewChannelSink(8)
 	_ = telemetryDisp.Register(sink)
@@ -360,7 +399,7 @@ func TestDispatcherSuppressesWorkflowTelemetry(t *testing.T) {
 	run := runner.New(local.Factory{}, registry.Default(), br, runner.WithDefaultLogger(telemetry.NoopLogger{}))
 
 	pool := pools.NewLocal("remote", state.Selector{}, 1)
-	dispatcher := newTestDispatcher(ctx, queue, store, managerWithTelemetry, run, telemetryDisp, nil, health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{{Pool: pool}}, manager.Clock())
+	dispatcher := newTestDispatcher(ctx, queue, store, managerWithTelemetry, run, telemetryDisp, nil, health, telemetry.NoopLogger{}, 0, 0, 0, nil, []*scheduler.Binding{{Pool: pool}}, manager.Clock())
 
 	wf := state.WorkflowRecord{
 		ID:   state.WorkflowID("wf-remote"),
@@ -527,7 +566,7 @@ func TestDispatcherCompleteRemoteAck(t *testing.T) {
 	}
 
 	pool := pools.NewLocal("remote", state.Selector{}, 1)
-	dispatcher := newTestDispatcher(ctx, queue, store, manager, nil, nil, nil, nil, telemetry.NoopLogger{}, 0, 0, 0, nil, []*poolBinding{{Pool: pool}}, manager.Clock())
+	dispatcher := newTestDispatcher(ctx, queue, store, manager, nil, nil, nil, nil, telemetry.NoopLogger{}, 0, 0, 0, nil, []*scheduler.Binding{{Pool: pool}}, manager.Clock())
 
 	def := workflow.Definition{Name: "remote"}
 	def, _, err = workflow.EnsureIDs(def)
@@ -589,8 +628,8 @@ func TestDispatcherCompleteRemoteAck(t *testing.T) {
 	if result.Reason != state.TerminationReasonSuccess {
 		t.Fatalf("expected reason success, got %s", result.Reason)
 	}
-	if completed, failed, cancelled := dispatcher.StatsCounters(); completed != 1 || failed != 0 || cancelled != 0 {
-		t.Fatalf("unexpected counters: %d/%d/%d", completed, failed, cancelled)
+	if completed, failed, cancelled, skipped := dispatcher.StatsCounters(); completed != 1 || failed != 0 || cancelled != 0 || skipped != 0 {
+		t.Fatalf("unexpected counters: %d/%d/%d/%d", completed, failed, cancelled, skipped)
 	}
 	if dispatcher.Inflight() != 0 {
 		t.Fatalf("expected inflight to be zero")
@@ -604,14 +643,14 @@ func TestDispatcherCompleteRemoteRetry(t *testing.T) {
 	queue := newMetadataQueue()
 
 	pool := pools.NewLocal("remote", state.Selector{}, 1)
-	policy := FailurePolicyFunc(func(context.Context, FailureContext) FailureOutcome {
-		return FailureOutcome{
-			Action: FailureActionRetry,
+	policy := gostage.FailurePolicyFunc(func(context.Context, gostage.FailureContext) gostage.FailureOutcome {
+		return gostage.FailureOutcome{
+			Action: gostage.FailureActionRetry,
 			Reason: state.TerminationReasonFailure,
 		}
 	})
 
-	dispatcher := newTestDispatcher(ctx, queue, nil, nil, nil, nil, nil, nil, telemetry.NoopLogger{}, 0, 0, 0, policy, []*poolBinding{{Pool: pool}}, time.Now)
+	dispatcher := newTestDispatcher(ctx, queue, nil, nil, nil, nil, nil, nil, telemetry.NoopLogger{}, 0, 0, 0, policy, []*scheduler.Binding{{Pool: pool}}, time.Now)
 
 	def := workflow.Definition{Name: "remote-retry"}
 	def, _, err := workflow.EnsureIDs(def)
@@ -659,8 +698,8 @@ func TestDispatcherCompleteRemoteRetry(t *testing.T) {
 		t.Fatalf("expected no ACK during retry, got %d", queue.ackCount)
 	}
 
-	if completed, failed, cancelled := dispatcher.StatsCounters(); completed != 0 || failed != 0 || cancelled != 0 {
-		t.Fatalf("expected counters to remain zero, got %d/%d/%d", completed, failed, cancelled)
+	if completed, failed, cancelled, skipped := dispatcher.StatsCounters(); completed != 0 || failed != 0 || cancelled != 0 || skipped != 0 {
+		t.Fatalf("expected counters to remain zero, got %d/%d/%d/%d", completed, failed, cancelled, skipped)
 	}
 	if dispatcher.Inflight() != 0 {
 		t.Fatalf("expected inflight to be zero")
@@ -794,7 +833,7 @@ func TestFailurePolicyRetryReleasesWorkflow(t *testing.T) {
 	var attempts int32
 	requeue := make(chan struct{}, 1)
 
-	MustRegisterAction("test.fail-once", func() ActionFunc {
+	gostage.MustRegisterAction("test.fail-once", func() gostage.ActionFunc {
 		return func(actionCtx rt.Context) error {
 			if atomic.AddInt32(&attempts, 1) == 1 {
 				return errors.New("first attempt failed")
@@ -827,15 +866,15 @@ func TestFailurePolicyRetryReleasesWorkflow(t *testing.T) {
 	br := broker.NewLocal(manager)
 	run := runner.New(local.Factory{}, registry.Default(), br)
 
-	policy := FailurePolicyFunc(func(_ context.Context, info FailureContext) FailureOutcome {
+	policy := gostage.FailurePolicyFunc(func(_ context.Context, info gostage.FailureContext) gostage.FailureOutcome {
 		if info.Err != nil && info.Attempt < 2 {
-			return RetryOutcome()
+			return gostage.RetryOutcome()
 		}
-		return AckOutcome()
+		return gostage.AckOutcome()
 	})
 
 	pool := pools.NewLocal("local", state.Selector{}, 1)
-	dispatcher := newTestDispatcher(ctx, queue, store, manager, run, nil, nil, nil, telemetry.NoopLogger{}, 5*time.Millisecond, 0, 1, policy, []*poolBinding{{Pool: pool}}, manager.Clock())
+	dispatcher := newTestDispatcher(ctx, queue, store, manager, run, nil, nil, nil, telemetry.NoopLogger{}, 5*time.Millisecond, 0, 1, policy, []*scheduler.Binding{{Pool: pool}}, manager.Clock())
 	dispatcher.Start()
 	defer dispatcher.Stop()
 
@@ -931,7 +970,7 @@ func TestDispatcherEmitsCancelledEventOnExplicitCancel(t *testing.T) {
 	var once sync.Once
 
 	const actionID = "test.wait.cancel"
-	MustRegisterAction(actionID, func() ActionFunc {
+	gostage.MustRegisterAction(actionID, func() gostage.ActionFunc {
 		return func(actionCtx rt.Context) error {
 			once.Do(func() { close(started) })
 			<-actionCtx.Done()
@@ -977,13 +1016,13 @@ func TestDispatcherEmitsCancelledEventOnExplicitCancel(t *testing.T) {
 	unregister := teleDispatcher.Register(sink)
 	defer unregister()
 
-	manager := wrapWithTelemetry(baseManager, teleDispatcher)
+	manager := telemetrymanager.Wrap(baseManager, teleDispatcher)
 
 	br := broker.NewLocal(manager)
 	run := runner.New(local.Factory{}, registry.Default(), br)
 
 	pool := pools.NewLocal("local", state.Selector{}, 1)
-	dispatcher := newTestDispatcher(ctx, queue, store, manager, run, teleDispatcher, nil, nil, telemetry.NoopLogger{}, 5*time.Millisecond, 0, 0, nil, []*poolBinding{{Pool: pool}}, baseManager.Clock())
+	dispatcher := newTestDispatcher(ctx, queue, store, manager, run, teleDispatcher, nil, nil, telemetry.NoopLogger{}, 5*time.Millisecond, 0, 0, nil, []*scheduler.Binding{{Pool: pool}}, baseManager.Clock())
 	dispatcher.Start()
 	defer dispatcher.Stop()
 

@@ -1,4 +1,4 @@
-package gostage
+package coordinator
 
 import (
 	"context"
@@ -32,7 +32,7 @@ func (r *diagRecorder) Events() []diagnostics.Event {
 
 func TestRemoteCoordinatorOnLogPublishesDiagnostics(t *testing.T) {
 	rec := &diagRecorder{}
-	rc := newRemoteCoordinatorBareForTest(rec, telemetry.NoopLogger{})
+	rc := NewRemoteCoordinatorBareForTest(rec, telemetry.NoopLogger{})
 
 	entry := process.LogEntry{
 		OccurredAt:  time.Now(),
@@ -72,7 +72,7 @@ func TestRemoteCoordinatorOnLogPublishesDiagnostics(t *testing.T) {
 
 func TestRemoteCoordinatorForwardChildLog(t *testing.T) {
 	recorder := &diagRecorder{}
-	rc := newRemoteCoordinatorBareForTest(recorder, telemetry.NoopLogger{})
+	rc := NewRemoteCoordinatorBareForTest(recorder, telemetry.NoopLogger{})
 
 	rc.ForwardChildLogForTest("pool-1", diagnostics.Event{
 		Component: "spawner.process.stdout",

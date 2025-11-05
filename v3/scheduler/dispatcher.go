@@ -59,6 +59,7 @@ type Dispatcher struct {
 	completed atomic.Int64
 	failed    atomic.Int64
 	cancelled atomic.Int64
+	skipped   atomic.Int64
 	wg        sync.WaitGroup
 	clock     func() time.Time
 }
@@ -105,10 +106,10 @@ func (d *Dispatcher) SuppressWorkflowTelemetry(id state.WorkflowID, kinds ...tel
 	d.suppressWorkflowTelemetry(id, kinds...)
 }
 
-// StatsCounters returns completion/failure/cancellation counters.
-func (d *Dispatcher) StatsCounters() (completed, failed, cancelled int64) {
-	c, f, cn := d.statsCounters()
-	return int64(c), int64(f), int64(cn)
+// StatsCounters returns completion/failure/cancellation/skip counters.
+func (d *Dispatcher) StatsCounters() (completed, failed, cancelled, skipped int64) {
+	c, f, cn, sk := d.statsCounters()
+	return int64(c), int64(f), int64(cn), int64(sk)
 }
 
 // HealthInfo returns health metadata for the specified pool.
@@ -385,7 +386,7 @@ func (d *Dispatcher) execute(pool *pools.Local, release func(), claimed *state.C
 	}
 	result.state = finalState
 	result.report.Status = executionStatusToWorkflow(result.state)
-	result.reason = d.normalizeReason(claimed.ID, outcome.Reason, finalState, result.result.Success)
+	result.reason = d.normalizeReason(claimed.ID, outcome.Reason, finalState, result.result.Success, claimed.Attempt, pool.Name())
 
 	switch outcome.Action {
 	case bootstrap.FailureActionRetry:
@@ -492,6 +493,7 @@ func (d *Dispatcher) runWorkflow(ctx context.Context, pool *pools.Local, claimed
 		state:      finalState,
 		clock:      d.clock,
 		dispatcher: d,
+		pool:       pool.Name(),
 	}, nil
 }
 
@@ -612,16 +614,18 @@ func (d *Dispatcher) recordCompletion(state runner.ExecutionStatus) {
 		d.completed.Add(1)
 	case runner.StatusCancelled:
 		d.cancelled.Add(1)
+	case runner.StatusSkipped:
+		d.skipped.Add(1)
 	default:
 		d.failed.Add(1)
 	}
 }
 
-func (d *Dispatcher) statsCounters() (completed, failed, cancelled int) {
+func (d *Dispatcher) statsCounters() (completed, failed, cancelled, skipped int) {
 	if d == nil {
-		return 0, 0, 0
+		return 0, 0, 0, 0
 	}
-	return int(d.completed.Load()), int(d.failed.Load()), int(d.cancelled.Load())
+	return int(d.completed.Load()), int(d.failed.Load()), int(d.cancelled.Load()), int(d.skipped.Load())
 }
 
 func (d *Dispatcher) decideFailure(claimed *state.ClaimedWorkflow, result runResult) bootstrap.FailureOutcome {
@@ -870,6 +874,7 @@ func (d *Dispatcher) CompleteRemote(claimed *state.ClaimedWorkflow, pool *pools.
 		state:  runner.StatusCompleted,
 		reason: summary.Reason,
 		clock:  d.clock,
+		pool:   poolName,
 	}
 
 	if run.report.StartedAt.IsZero() {
@@ -905,7 +910,7 @@ func (d *Dispatcher) CompleteRemote(claimed *state.ClaimedWorkflow, pool *pools.
 	}
 	run.state = finalState
 	run.report.Status = executionStatusToWorkflow(run.state)
-	run.reason = d.normalizeReason(claimed.ID, outcome.Reason, run.state, run.result.Success)
+	run.reason = d.normalizeReason(claimed.ID, outcome.Reason, run.state, run.result.Success, attempt, poolName)
 	run.report.Reason = run.reason
 
 	switch outcome.Action {
@@ -995,6 +1000,7 @@ type runResult struct {
 	reason     state.TerminationReason
 	clock      func() time.Time
 	dispatcher *Dispatcher
+	pool       string
 }
 
 func (r runResult) toSummary() state.ResultSummary {
@@ -1010,9 +1016,17 @@ func (r runResult) toSummary() state.ResultSummary {
 	if wfID == "" && r.claimed != nil {
 		wfID = r.claimed.ID
 	}
+	attemptVal := r.report.Attempt
+	if attemptVal == 0 && r.claimed != nil && r.claimed.Attempt > 0 {
+		attemptVal = r.claimed.Attempt
+	}
+	if attemptVal == 0 && r.result.Attempt > 0 {
+		attemptVal = r.result.Attempt
+	}
+
 	var reason state.TerminationReason
 	if r.dispatcher != nil {
-		reason = r.dispatcher.normalizeReason(wfID, r.reason, r.state, r.result.Success)
+		reason = r.dispatcher.normalizeReason(wfID, r.reason, r.state, r.result.Success, attemptVal, r.pool)
 	} else {
 		reason = normalizeReasonValue(r.reason, r.state, r.result.Success)
 	}
@@ -1060,15 +1074,8 @@ func (r runResult) toSummary() state.ResultSummary {
 			}
 		}
 	}
-	if summary.Attempt == 0 {
-		switch {
-		case r.report.Attempt > 0:
-			summary.Attempt = r.report.Attempt
-		case r.claimed != nil && r.claimed.Attempt > 0:
-			summary.Attempt = r.claimed.Attempt
-		case r.result.Attempt > 0:
-			summary.Attempt = r.result.Attempt
-		}
+	if summary.Attempt == 0 && attemptVal > 0 {
+		summary.Attempt = attemptVal
 	}
 	if r.result.Error != nil {
 		summary.Error = r.result.Error.Error()
@@ -1233,13 +1240,19 @@ func copyStringMap(src map[string]string) map[string]string {
 	return dst
 }
 
-func (d *Dispatcher) normalizeReason(id state.WorkflowID, reason state.TerminationReason, finalState runner.ExecutionStatus, success bool) state.TerminationReason {
+func (d *Dispatcher) normalizeReason(id state.WorkflowID, reason state.TerminationReason, finalState runner.ExecutionStatus, success bool, attempt int, pool string) state.TerminationReason {
 	normalized := normalizeReasonValue(reason, finalState, success)
 	if reason == "" && d != nil {
 		meta := map[string]any{
 			"workflow_id": string(id),
 			"final_state": string(finalState),
 			"success":     success,
+		}
+		if attempt > 0 {
+			meta["attempt"] = attempt
+		}
+		if pool != "" {
+			meta["pool"] = pool
 		}
 		d.reportErrorWithMetadata("dispatcher.reason.missing", fmt.Errorf("workflow %s missing termination reason", id), meta)
 	}

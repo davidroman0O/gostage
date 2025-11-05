@@ -268,7 +268,11 @@ func (q *SQLiteQueue) Release(ctx context.Context, id WorkflowID) error {
 	}); err != nil {
 		return err
 	}
-	q.recordAudit(ctx, id, "release", 0, worker, nil)
+	metadata := map[string]any{"reason": "retry"}
+	if worker != "" {
+		metadata["pool"] = worker
+	}
+	q.recordAudit(ctx, id, "release", 0, worker, metadata)
 	q.setWorker(id, "")
 	return nil
 }
@@ -280,7 +284,21 @@ func (q *SQLiteQueue) Ack(ctx context.Context, id WorkflowID, summary ResultSumm
 	}); err != nil {
 		return err
 	}
-	q.recordAudit(ctx, id, "ack", summary.Attempt, worker, nil)
+	reason := summary.Reason
+	if reason == "" {
+		reason = TerminationReasonUnknown
+	}
+	metadata := map[string]any{
+		"reason":  string(reason),
+		"success": summary.Success,
+	}
+	if summary.Duration > 0 {
+		metadata["duration"] = summary.Duration
+	}
+	if worker != "" {
+		metadata["pool"] = worker
+	}
+	q.recordAudit(ctx, id, "ack", summary.Attempt, worker, metadata)
 	q.setWorker(id, "")
 	return nil
 }
@@ -292,7 +310,11 @@ func (q *SQLiteQueue) Cancel(ctx context.Context, id WorkflowID) error {
 	}); err != nil {
 		return err
 	}
-	q.recordAudit(ctx, id, "cancel", 0, worker, nil)
+	metadata := map[string]any{"reason": "cancel"}
+	if worker != "" {
+		metadata["pool"] = worker
+	}
+	q.recordAudit(ctx, id, "cancel", 0, worker, metadata)
 	q.setWorker(id, "")
 	return nil
 }
