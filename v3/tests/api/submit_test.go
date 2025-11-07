@@ -2,16 +2,189 @@ package gostage_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/davidroman0O/gostage/v3/bootstrap"
+	"github.com/davidroman0O/gostage/v3/e2e/testkit"
 	"github.com/davidroman0O/gostage/v3/internal/gostagetest"
 	"github.com/davidroman0O/gostage/v3/pools"
+	rt "github.com/davidroman0O/gostage/v3/runtime"
 	"github.com/davidroman0O/gostage/v3/state"
 	"github.com/davidroman0O/gostage/v3/workflow"
 
 	gostage "github.com/davidroman0O/gostage/v3"
 )
+
+// serializeDef is a test helper to serialize workflow.Definition to []byte
+func serializeDef(def workflow.Definition) []byte {
+	data, _ := json.Marshal(def)
+	return data
+}
+
+// deserializeDef is a test helper to deserialize []byte back to workflow.Definition
+func deserializeDef(data []byte) workflow.Definition {
+	var def workflow.Definition
+	_ = json.Unmarshal(data, &def)
+	return def
+}
+
+func TestSubmitWorkflowID(t *testing.T) {
+	ctx := context.Background()
+	testkit.ResetRegistry(t)
+
+	// Register action and workflow
+	gostage.MustRegisterAction("test.echo", func(ctx rt.Context) error {
+		return nil
+	})
+
+	def := workflow.Definition{
+		ID: "test-workflow",
+		Stages: []workflow.Stage{
+			{
+				Name: "stage1",
+				Actions: []workflow.Action{
+					{Ref: "test.echo"},
+				},
+			},
+		},
+	}
+
+	workflowID, _ := gostage.MustRegisterWorkflow(def)
+
+	queue := &captureQueue{}
+	store := state.NewMemoryStore()
+	pool := pools.NewLocal("local", state.Selector{}, 1) // Empty selector accepts all workflows
+	parent := gostagetest.NewParentNode()
+	parent.SetQueueForTest(queue)
+	parent.SetStoreForTest(store)
+	parent.SetPoolsForTest([]*gostagetest.PoolBinding{{Pool: pool}})
+
+	// Test SubmitWorkflowID
+	runID, err := parent.SubmitWorkflowID(ctx, workflowID)
+	if err != nil {
+		t.Fatalf("SubmitWorkflowID: %v", err)
+	}
+	if runID == "" {
+		t.Fatal("expected non-empty run ID")
+	}
+}
+
+func TestSubmitDefinition(t *testing.T) {
+	ctx := context.Background()
+	testkit.ResetRegistry(t)
+
+	gostage.MustRegisterAction("test.echo", func(ctx rt.Context) error {
+		return nil
+	})
+
+	def := workflow.Definition{
+		ID: "inline-workflow",
+		Stages: []workflow.Stage{
+			{
+				Name: "stage1",
+				Actions: []workflow.Action{
+					{Ref: "test.echo"},
+				},
+			},
+		},
+	}
+
+	queue := &captureQueue{}
+	store := state.NewMemoryStore()
+	pool := pools.NewLocal("local", state.Selector{}, 1)
+	parent := gostagetest.NewParentNode()
+	parent.SetQueueForTest(queue)
+	parent.SetStoreForTest(store)
+	parent.SetPoolsForTest([]*gostagetest.PoolBinding{{Pool: pool}})
+
+	// Test SubmitDefinition
+	runID, err := parent.SubmitDefinition(ctx, def)
+	if err != nil {
+		t.Fatalf("SubmitDefinition: %v", err)
+	}
+	if runID == "" {
+		t.Fatal("expected non-empty run ID")
+	}
+}
+
+func TestSubmitWorkflowIDWithOptions(t *testing.T) {
+	ctx := context.Background()
+	testkit.ResetRegistry(t)
+
+	gostage.MustRegisterAction("test.echo", func(ctx rt.Context) error {
+		return nil
+	})
+
+	def := workflow.Definition{
+		ID: "test-workflow",
+		Stages: []workflow.Stage{
+			{
+				Name: "stage1",
+				Actions: []workflow.Action{
+					{Ref: "test.echo"},
+				},
+			},
+		},
+	}
+
+	workflowID, _ := gostage.MustRegisterWorkflow(def)
+
+	queue := &captureQueue{}
+	store := state.NewMemoryStore()
+	pool := pools.NewLocal("local", state.Selector{All: []string{"test"}}, 1)
+	parent := gostagetest.NewParentNode()
+	parent.SetQueueForTest(queue)
+	parent.SetStoreForTest(store)
+	parent.SetPoolsForTest([]*gostagetest.PoolBinding{{Pool: pool}})
+
+	// Test SubmitWorkflowID with options
+	runID, err := parent.SubmitWorkflowID(ctx, workflowID, gostage.WithTags("test", "example"))
+	if err != nil {
+		t.Fatalf("SubmitWorkflowID with options: %v", err)
+	}
+	if runID == "" {
+		t.Fatal("expected non-empty run ID")
+	}
+}
+
+func TestSubmitDefinitionWithOptions(t *testing.T) {
+	ctx := context.Background()
+	testkit.ResetRegistry(t)
+
+	gostage.MustRegisterAction("test.echo", func(ctx rt.Context) error {
+		return nil
+	})
+
+	def := workflow.Definition{
+		ID: "inline-workflow",
+		Stages: []workflow.Stage{
+			{
+				Name: "stage1",
+				Actions: []workflow.Action{
+					{Ref: "test.echo"},
+				},
+			},
+		},
+	}
+
+	queue := &captureQueue{}
+	store := state.NewMemoryStore()
+	pool := pools.NewLocal("local", state.Selector{}, 1)
+	parent := gostagetest.NewParentNode()
+	parent.SetQueueForTest(queue)
+	parent.SetStoreForTest(store)
+	parent.SetPoolsForTest([]*gostagetest.PoolBinding{{Pool: pool}})
+
+	// Test SubmitDefinition with options
+	runID, err := parent.SubmitDefinition(ctx, def, gostage.WithInitialStore(map[string]any{"key": "value"}))
+	if err != nil {
+		t.Fatalf("SubmitDefinition with options: %v", err)
+	}
+	if runID == "" {
+		t.Fatal("expected non-empty run ID")
+	}
+}
 
 func TestSubmitOptionsPopulateRequest(t *testing.T) {
 	req := bootstrap.NewSubmitRequest()
@@ -106,14 +279,16 @@ type captureQueue struct {
 	lastMetadata   map[string]any
 }
 
-func (q *captureQueue) Enqueue(_ context.Context, def workflow.Definition, _ state.Priority, metadata map[string]any) (state.WorkflowID, error) {
-	q.lastDefinition = def
+func (q *captureQueue) Enqueue(_ context.Context, defBytes []byte, _ state.Priority, metadata map[string]any) (state.WorkflowID, error) {
+	q.lastDefinition = deserializeDef(defBytes)
 	if metadata != nil {
 		copied := make(map[string]any, len(metadata))
 		for k, v := range metadata {
 			copied[k] = v
 		}
 		q.lastMetadata = copied
+	} else {
+		q.lastMetadata = nil
 	}
 	return state.WorkflowID("queued"), nil
 }
