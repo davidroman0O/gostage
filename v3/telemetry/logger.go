@@ -2,14 +2,8 @@ package telemetry
 
 import "log"
 
-// Logger is a minimal structured logging interface used during workflow
-// execution. Implementations can wrap the host application's logging stack.
-type Logger interface {
-	Debug(msg string, kv ...any)
-	Info(msg string, kv ...any)
-	Warn(msg string, kv ...any)
-	Error(msg string, kv ...any)
-}
+// Logger is defined in interfaces.go.
+// NoopLogger and StdLogger provide implementations.
 
 // NoopLogger drops all log messages. Useful during tests.
 type NoopLogger struct{}
