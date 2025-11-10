@@ -5,16 +5,19 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/davidroman0O/gostage/v3/metadata"
 	"github.com/davidroman0O/gostage/v3/registry"
 	rt "github.com/davidroman0O/gostage/v3/runtime"
 )
 
 func TestDefinitionJSONRoundTrip(t *testing.T) {
+	meta := metadata.New()
+	meta.Set("foo", "bar")
 	def := Definition{
 		ID:         "wf-json",
 		Name:       "JSON Workflow",
 		Tags:       []string{"a", "b"},
-		Metadata:   map[string]any{"foo": "bar"},
+		Metadata:   meta,
 		Middleware: []string{"wf-log"},
 		Stages: []Stage{
 			{

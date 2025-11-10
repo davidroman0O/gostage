@@ -26,9 +26,10 @@ func Materialize(def Definition, reg registry.Registry) (rt.Workflow, error) {
 
 	wf := newRuntimeWorkflow(normalized.ID, normalized.Name, normalized.Description)
 	wf.tags = append(wf.tags, normalized.Tags...)
-	if len(normalized.Metadata) > 0 {
-		for k, v := range normalized.Metadata {
-			wf.metadata[k] = v
+	// Copy metadata using Keys() iteration
+	for _, key := range normalized.Metadata.Keys() {
+		if val, ok := normalized.Metadata.Get(key); ok {
+			wf.metadata[key] = val
 		}
 	}
 	if normalized.Type != "" {

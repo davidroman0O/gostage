@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/davidroman0O/gostage/v3/internal/clock"
 	rt "github.com/davidroman0O/gostage/v3/runtime"
 )
 
@@ -12,9 +13,10 @@ import (
 // added wraps the innermost execution.
 //
 // Example:
-//   builder := NewMiddlewareBuilder()
-//   builder.Workflow(loggingMiddleware).Stage(timingMiddleware).Action(retryMiddleware)
-//   wfMw, stMw, actMw := builder.Build()
+//
+//	builder := NewMiddlewareBuilder()
+//	builder.Workflow(loggingMiddleware).Stage(timingMiddleware).Action(retryMiddleware)
+//	wfMw, stMw, actMw := builder.Build()
 type MiddlewareBuilder struct {
 	workflow []rt.WorkflowMiddleware
 	stage    []rt.StageMiddleware
@@ -118,9 +120,10 @@ func (b *MiddlewareBuilder) WithLogging(logger rt.Logger) *MiddlewareBuilder {
 // WithTiming adds timing middleware that measures execution duration.
 // This is a convenience method for common middleware patterns.
 func (b *MiddlewareBuilder) WithTiming() *MiddlewareBuilder {
+	c := clock.DefaultClock()
 	b.Workflow(func(next rt.WorkflowStageRunnerFunc) rt.WorkflowStageRunnerFunc {
 		return func(ctx context.Context, stage rt.Stage, workflow rt.Workflow, log rt.Logger) error {
-			start := time.Now()
+			start := c.Now()
 			err := next(ctx, stage, workflow, log)
 			duration := time.Since(start)
 			log.Info("workflow duration: id=%s duration=%v", workflow.ID(), duration)
@@ -129,7 +132,7 @@ func (b *MiddlewareBuilder) WithTiming() *MiddlewareBuilder {
 	})
 	b.Stage(func(next rt.StageRunnerFunc) rt.StageRunnerFunc {
 		return func(ctx context.Context, stage rt.Stage, workflow rt.Workflow, log rt.Logger) error {
-			start := time.Now()
+			start := c.Now()
 			err := next(ctx, stage, workflow, log)
 			duration := time.Since(start)
 			log.Info("stage duration: id=%s duration=%v", stage.ID(), duration)
@@ -138,7 +141,7 @@ func (b *MiddlewareBuilder) WithTiming() *MiddlewareBuilder {
 	})
 	b.Action(func(next rt.ActionRunnerFunc) rt.ActionRunnerFunc {
 		return func(ctx rt.Context, action rt.Action, index int, isLast bool) error {
-			start := time.Now()
+			start := c.Now()
 			err := next(ctx, action, index, isLast)
 			duration := time.Since(start)
 			ctx.Logger().Info("action duration: name=%s duration=%v", action.Name(), duration)
@@ -147,4 +150,3 @@ func (b *MiddlewareBuilder) WithTiming() *MiddlewareBuilder {
 	})
 	return b
 }
-

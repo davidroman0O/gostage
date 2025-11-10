@@ -3,6 +3,7 @@ package workflow
 import (
 	"time"
 
+	"github.com/davidroman0O/gostage/v3/internal/clock"
 	"github.com/davidroman0O/gostage/v3/internal/locks"
 	internalstore "github.com/davidroman0O/gostage/v3/internal/store"
 	"github.com/davidroman0O/gostage/v3/registry"
@@ -13,6 +14,7 @@ import (
 
 const actionMutationSource = "runtime.ActionMutation"
 
+// RuntimeWorkflow provides runtime workflow construction and mutation capabilities.
 type RuntimeWorkflow struct {
 	id           string
 	name         string
@@ -50,7 +52,9 @@ type RuntimeToggle struct {
 	Timestamp time.Time
 }
 
-// WorkflowRuntimeSnapshot captures runtime-only mutations applied to the workflow.
+// RuntimeSnapshot captures runtime-only mutations applied to the workflow.
+//
+//nolint:revive // exported: Workflow prefix clarifies this is a workflow snapshot
 type WorkflowRuntimeSnapshot struct {
 	DynamicStages []RuntimeStageAddition
 	Disabled      map[string]RuntimeToggle
@@ -82,10 +86,12 @@ func NewRuntimeWorkflow(id, name, description string) *RuntimeWorkflow {
 	return newRuntimeWorkflow(id, name, description)
 }
 
+// AddStage adds stages to the workflow.
 func (w *RuntimeWorkflow) AddStage(stages ...rt.Stage) {
 	w.stages = append(w.stages, stages...)
 }
 
+// AddTags adds tags to the workflow, avoiding duplicates.
 func (w *RuntimeWorkflow) AddTags(tags ...string) {
 	for _, tag := range tags {
 		if !contains(w.tags, tag) {
@@ -94,25 +100,41 @@ func (w *RuntimeWorkflow) AddTags(tags ...string) {
 	}
 }
 
+// Use adds middleware to the workflow.
 func (w *RuntimeWorkflow) Use(mw ...rt.WorkflowMiddleware) {
 	w.middlewares = append(w.middlewares, mw...)
 }
 
+// Metadata returns the workflow metadata map.
 func (w *RuntimeWorkflow) Metadata() map[string]any { return w.metadata }
 
+// Store returns the workflow's key-value store handle.
 func (w *RuntimeWorkflow) Store() store.Handle { return store.FromInternal(w.store) }
 
+// InitialStore returns the workflow's initial store handle.
 func (w *RuntimeWorkflow) InitialStore() store.Handle { return store.FromInternal(w.store) }
 
-func (w *RuntimeWorkflow) ID() string          { return w.id }
-func (w *RuntimeWorkflow) Name() string        { return w.name }
+// ID returns the workflow ID.
+func (w *RuntimeWorkflow) ID() string { return w.id }
+
+// Name returns the workflow name.
+func (w *RuntimeWorkflow) Name() string { return w.name }
+
+// Description returns the workflow description.
 func (w *RuntimeWorkflow) Description() string { return w.description }
-func (w *RuntimeWorkflow) Tags() []string      { return append([]string(nil), w.tags...) }
-func (w *RuntimeWorkflow) Stages() []rt.Stage  { return append([]rt.Stage(nil), w.stages...) }
+
+// Tags returns a copy of the workflow tags.
+func (w *RuntimeWorkflow) Tags() []string { return append([]string(nil), w.tags...) }
+
+// Stages returns a copy of the workflow stages.
+func (w *RuntimeWorkflow) Stages() []rt.Stage { return append([]rt.Stage(nil), w.stages...) }
+
+// Middlewares returns a copy of the workflow middlewares.
 func (w *RuntimeWorkflow) Middlewares() []rt.WorkflowMiddleware {
 	return append([]rt.WorkflowMiddleware(nil), w.middlewares...)
 }
 
+// RuntimeState returns a snapshot of runtime-only mutations applied to the workflow.
 func (w *RuntimeWorkflow) RuntimeState() WorkflowRuntimeSnapshot {
 	w.runtime.mu.RLock()
 	defer w.runtime.mu.RUnlock()
@@ -128,6 +150,7 @@ func (w *RuntimeWorkflow) RuntimeState() WorkflowRuntimeSnapshot {
 	}
 }
 
+// DisabledSnapshot returns maps of disabled actions and stages.
 func (w *RuntimeWorkflow) DisabledSnapshot() (map[string]bool, map[string]bool) {
 	if len(w.stages) == 0 {
 		return nil, nil
@@ -155,24 +178,28 @@ func (w *RuntimeWorkflow) DisabledSnapshot() (map[string]bool, map[string]bool) 
 	return actionDisabled, stageDisabled
 }
 
+// RecordDynamicStage records a dynamically added stage.
 func (w *RuntimeWorkflow) RecordDynamicStage(stage rt.Stage, createdBy string) {
 	w.runtime.mu.Lock()
 	w.runtime.dynamicStages = append(w.runtime.dynamicStages, RuntimeStageAddition{
 		Stage:     stage,
 		CreatedBy: createdBy,
-		Timestamp: time.Now(),
+		Timestamp: clock.DefaultClock().Now(),
 	})
 	w.runtime.mu.Unlock()
 }
 
+// RecordStageDisabled records that a stage was disabled at runtime.
 func (w *RuntimeWorkflow) RecordStageDisabled(stageID, createdBy string) {
 	w.recordStageToggle(&w.runtime.disabled, stageID, createdBy)
 }
 
+// RecordStageEnabled records that a stage was enabled at runtime.
 func (w *RuntimeWorkflow) RecordStageEnabled(stageID, createdBy string) {
 	w.recordStageToggle(&w.runtime.enabled, stageID, createdBy)
 }
 
+// RecordStageRemoved records that a stage was removed at runtime.
 func (w *RuntimeWorkflow) RecordStageRemoved(stageID, createdBy string) {
 	w.recordStageToggle(&w.runtime.removed, stageID, createdBy)
 }
@@ -182,14 +209,17 @@ func (w *RuntimeWorkflow) recordStageToggle(target *map[string]RuntimeToggle, id
 	if *target == nil {
 		*target = make(map[string]RuntimeToggle)
 	}
-	(*target)[id] = RuntimeToggle{CreatedBy: createdBy, Timestamp: time.Now()}
+	(*target)[id] = RuntimeToggle{CreatedBy: createdBy, Timestamp: clock.DefaultClock().Now()}
 	w.runtime.mu.Unlock()
 }
 
-var _ rt.Workflow = (*RuntimeWorkflow)(nil)
-var _ rt.RuntimeWorkflowRecorder = (*RuntimeWorkflow)(nil)
-var _ rt.DisableSnapshotProvider = (*RuntimeWorkflow)(nil)
+var (
+	_ rt.Workflow                = (*RuntimeWorkflow)(nil)
+	_ rt.RuntimeWorkflowRecorder = (*RuntimeWorkflow)(nil)
+	_ rt.DisableSnapshotProvider = (*RuntimeWorkflow)(nil)
+)
 
+// RuntimeStage provides runtime stage construction and mutation capabilities.
 type RuntimeStage struct {
 	id          string
 	name        string
@@ -253,10 +283,12 @@ func NewRuntimeStage(id, name, description string) *RuntimeStage {
 	return newRuntimeStage(id, name, description)
 }
 
+// AddActions adds actions to the stage.
 func (s *RuntimeStage) AddActions(actions ...rt.Action) {
 	s.actions = append(s.actions, actions...)
 }
 
+// AddTags adds tags to the stage.
 func (s *RuntimeStage) AddTags(tags ...string) {
 	for _, tag := range tags {
 		if !contains(s.tags, tag) {
@@ -265,14 +297,17 @@ func (s *RuntimeStage) AddTags(tags ...string) {
 	}
 }
 
+// WithMiddleware adds stage-level middleware.
 func (s *RuntimeStage) WithMiddleware(mw ...rt.StageMiddleware) {
 	s.middlewares = append(s.middlewares, mw...)
 }
 
+// WithActionMiddleware adds action-level middleware.
 func (s *RuntimeStage) WithActionMiddleware(mw ...rt.ActionMiddleware) {
 	s.actionMW = append(s.actionMW, mw...)
 }
 
+// SetInitialStore sets the initial store for the stage.
 func (s *RuntimeStage) SetInitialStore(st store.Handle) {
 	if st.IsZero() {
 		s.initial = store.New()
@@ -281,25 +316,40 @@ func (s *RuntimeStage) SetInitialStore(st store.Handle) {
 	s.initial = store.Clone(st)
 }
 
-func (s *RuntimeStage) ID() string                 { return s.id }
-func (s *RuntimeStage) Name() string               { return s.name }
-func (s *RuntimeStage) Description() string        { return s.description }
-func (s *RuntimeStage) Tags() []string             { return append([]string(nil), s.tags...) }
+// ID returns the stage identifier.
+func (s *RuntimeStage) ID() string { return s.id }
+
+// Name returns the stage name.
+func (s *RuntimeStage) Name() string { return s.name }
+
+// Description returns the stage description.
+func (s *RuntimeStage) Description() string { return s.description }
+
+// Tags returns a copy of the stage tags.
+func (s *RuntimeStage) Tags() []string { return append([]string(nil), s.tags...) }
+
+// InitialStore returns the initial store handle.
 func (s *RuntimeStage) InitialStore() store.Handle { return s.initial }
+
+// Middlewares returns a copy of the stage middlewares.
 func (s *RuntimeStage) Middlewares() []rt.StageMiddleware {
 	return append([]rt.StageMiddleware(nil), s.middlewares...)
 }
 
+// ActionMiddlewares returns a copy of the action middlewares.
 func (s *RuntimeStage) ActionMiddlewares() []rt.ActionMiddleware {
 	return append([]rt.ActionMiddleware(nil), s.actionMW...)
 }
 
+// ActionList returns a copy of the action list.
 func (s *RuntimeStage) ActionList() []rt.Action {
 	return append([]rt.Action(nil), s.actions...)
 }
 
+// Actions returns an action mutation interface.
 func (s *RuntimeStage) Actions() rt.ActionMutation { return &actionMutation{stage: s} }
 
+// RuntimeState returns a snapshot of runtime-only mutations applied to the stage.
 func (s *RuntimeStage) RuntimeState() StageRuntimeSnapshot {
 	s.runtime.mu.RLock()
 	defer s.runtime.mu.RUnlock()
@@ -315,24 +365,28 @@ func (s *RuntimeStage) RuntimeState() StageRuntimeSnapshot {
 	}
 }
 
+// RecordDynamicAction records a dynamically added action.
 func (s *RuntimeStage) RecordDynamicAction(action rt.Action, createdBy string) {
 	s.runtime.mu.Lock()
 	s.runtime.dynamicActions = append(s.runtime.dynamicActions, RuntimeActionAddition{
 		Action:    action,
 		CreatedBy: createdBy,
-		Timestamp: time.Now(),
+		Timestamp: clock.DefaultClock().Now(),
 	})
 	s.runtime.mu.Unlock()
 }
 
+// RecordActionDisabled records that an action was disabled at runtime.
 func (s *RuntimeStage) RecordActionDisabled(id, createdBy string) {
 	s.recordToggle(&s.runtime.disabled, id, createdBy)
 }
 
+// RecordActionEnabled records that an action was enabled at runtime.
 func (s *RuntimeStage) RecordActionEnabled(id, createdBy string) {
 	s.recordToggle(&s.runtime.enabled, id, createdBy)
 }
 
+// RecordActionRemoved records that an action was removed at runtime.
 func (s *RuntimeStage) RecordActionRemoved(id, createdBy string) {
 	s.recordToggle(&s.runtime.removed, id, createdBy)
 }
@@ -342,12 +396,14 @@ func (s *RuntimeStage) recordToggle(target *map[string]RuntimeToggle, id, create
 	if *target == nil {
 		*target = make(map[string]RuntimeToggle)
 	}
-	(*target)[id] = RuntimeToggle{CreatedBy: createdBy, Timestamp: time.Now()}
+	(*target)[id] = RuntimeToggle{CreatedBy: createdBy, Timestamp: clock.DefaultClock().Now()}
 	s.runtime.mu.Unlock()
 }
 
-var _ rt.Stage = (*RuntimeStage)(nil)
-var _ rt.RuntimeStageRecorder = (*RuntimeStage)(nil)
+var (
+	_ rt.Stage                = (*RuntimeStage)(nil)
+	_ rt.RuntimeStageRecorder = (*RuntimeStage)(nil)
+)
 
 type actionMutation struct {
 	stage *RuntimeStage
@@ -368,11 +424,11 @@ func (m *actionMutation) Remove(id string) bool {
 	if id == "" {
 		return false
 	}
-	if _, idx := m.stage.actionByID(id); idx == -1 {
+	_, idx := m.stage.actionByID(id)
+	if idx == -1 {
 		return false
-	} else {
-		m.stage.actions = append(m.stage.actions[:idx], m.stage.actions[idx+1:]...)
 	}
+	m.stage.actions = append(m.stage.actions[:idx], m.stage.actions[idx+1:]...)
 	delete(m.stage.disabled, id)
 	m.stage.RecordActionRemoved(id, actionMutationSource)
 	return true
@@ -533,17 +589,6 @@ func hasAny(values []string, targets []string) bool {
 		}
 	}
 	return false
-}
-
-func cloneMap(src map[string]any) map[string]any {
-	if src == nil {
-		return nil
-	}
-	dup := make(map[string]any, len(src))
-	for k, v := range src {
-		dup[k] = v
-	}
-	return dup
 }
 
 func copyRuntimeToggleMap(src map[string]RuntimeToggle) map[string]RuntimeToggle {

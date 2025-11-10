@@ -1,18 +1,22 @@
 package workflow
 
-import "maps"
+import (
+	"maps"
+
+	"github.com/davidroman0O/gostage/v3/metadata"
+)
 
 // Definition describes a workflow definition as referenced by the runtime.
 type Definition struct {
-	ID          string         `json:"id"`
-	Name        string         `json:"name,omitempty"`
-	Description string         `json:"description,omitempty"`
-	Tags        []string       `json:"tags,omitempty"`
-	Metadata    map[string]any `json:"metadata,omitempty"`
-	Stages      []Stage        `json:"stages,omitempty"`
-	Type        string         `json:"type,omitempty"`
-	Payload     map[string]any `json:"payload,omitempty"`
-	Middleware  []string       `json:"middleware,omitempty"`
+	ID          string            `json:"id"`
+	Name        string            `json:"name,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Tags        []string          `json:"tags,omitempty"`
+	Metadata    metadata.Metadata `json:"metadata,omitempty"`
+	Stages      []Stage           `json:"stages,omitempty"`
+	Type        string            `json:"type,omitempty"`
+	Payload     map[string]any    `json:"payload,omitempty"`
+	Middleware  []string          `json:"middleware,omitempty"`
 }
 
 // Clone returns a deep copy of the definition so runtime mutations do not
@@ -20,11 +24,16 @@ type Definition struct {
 func (d Definition) Clone() Definition {
 	out := d
 	out.Tags = append([]string(nil), d.Tags...)
-	out.Metadata = maps.Clone(d.Metadata)
+	out.Metadata = d.Metadata.Clone()
 	out.Payload = maps.Clone(d.Payload)
 	out.Stages = cloneStages(d.Stages)
 	out.Middleware = append([]string(nil), d.Middleware...)
 	return out
+}
+
+// GetMetadataString is a convenience method for accessing metadata strings.
+func (d Definition) GetMetadataString(key string) (string, bool) {
+	return d.Metadata.GetString(key)
 }
 
 // Stage represents a sequential set of actions executed within a workflow.
@@ -38,6 +47,7 @@ type Stage struct {
 	InitialStore map[string]any `json:"initialStore,omitempty"`
 }
 
+// Clone creates a deep copy of the stage.
 func (s Stage) Clone() Stage {
 	out := s
 	out.Tags = append([]string(nil), s.Tags...)
@@ -58,6 +68,7 @@ type Action struct {
 	Middleware  []string `json:"middleware,omitempty"`
 }
 
+// Clone creates a deep copy of the action.
 func (a Action) Clone() Action {
 	out := a
 	out.Tags = append([]string(nil), a.Tags...)

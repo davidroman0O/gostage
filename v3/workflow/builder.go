@@ -1,9 +1,13 @@
 package workflow
 
 import (
-	"fmt"
 	"slices"
+
+	gostageerrors "github.com/davidroman0O/gostage/v3/internal/errors"
+	"github.com/davidroman0O/gostage/v3/metadata"
 )
+
+var errHelper = gostageerrors.NewHelper("workflow")
 
 // Builder constructs workflow definitions with validation.
 type Builder struct {
@@ -16,40 +20,44 @@ func New(id string) *Builder {
 	return &Builder{
 		def: Definition{
 			ID:         id,
-			Metadata:   make(map[string]any),
+			Metadata:   metadata.New(),
 			Middleware: make([]string, 0),
 		},
 	}
 }
 
+// Named sets the workflow name.
 func (b *Builder) Named(name string) *Builder {
 	b.def.Name = name
 	return b
 }
 
+// Describe sets the workflow description.
 func (b *Builder) Describe(desc string) *Builder {
 	b.def.Description = desc
 	return b
 }
 
+// WithTags adds tags to the workflow, avoiding duplicates.
 func (b *Builder) WithTags(tags ...string) *Builder {
 	b.def.Tags = appendUnique(b.def.Tags, tags...)
 	return b
 }
 
+// Metadata sets a metadata key-value pair.
 func (b *Builder) Metadata(key string, value any) *Builder {
-	if b.def.Metadata == nil {
-		b.def.Metadata = make(map[string]any)
-	}
-	b.def.Metadata[key] = value
+	// Metadata is always initialized in New(), so no need to check
+	b.def.Metadata.Set(key, value)
 	return b
 }
 
+// Type sets the workflow type.
 func (b *Builder) Type(t string) *Builder {
 	b.def.Type = t
 	return b
 }
 
+// Payload sets the workflow payload.
 func (b *Builder) Payload(payload map[string]any) *Builder {
 	if payload == nil {
 		b.def.Payload = nil
@@ -64,11 +72,13 @@ func (b *Builder) Payload(payload map[string]any) *Builder {
 	return b
 }
 
+// Use adds middleware IDs to the workflow.
 func (b *Builder) Use(ids ...string) *Builder {
 	b.def.Middleware = appendUnique(b.def.Middleware, ids...)
 	return b
 }
 
+// Stage adds a stage to the workflow.
 func (b *Builder) Stage(stage *StageBuilder) *Builder {
 	if stage == nil {
 		return b
@@ -82,18 +92,21 @@ func (b *Builder) Stage(stage *StageBuilder) *Builder {
 	return b
 }
 
+// Build constructs the final workflow definition with validation.
 func (b *Builder) Build() (Definition, error) {
 	if b.err != nil {
 		return Definition{}, b.err
 	}
 	if b.def.ID == "" {
-		return Definition{}, fmt.Errorf("workflow: id is required")
+		return Definition{}, errHelper.Newf(gostageerrors.ErrCodeInvalidConfiguration, "id is required")
 	}
 	seenStage := make(map[string]struct{})
 	for _, stage := range b.def.Stages {
 		if stage.ID != "" {
 			if _, ok := seenStage[stage.ID]; ok {
-				return Definition{}, fmt.Errorf("workflow: duplicate stage id %q", stage.ID)
+				return Definition{}, errHelper.WithContext(errHelper.Newf(gostageerrors.ErrCodeInvalidConfiguration, "duplicate stage id %q", stage.ID), map[string]any{
+					"stage_id": stage.ID,
+				})
 			}
 			seenStage[stage.ID] = struct{}{}
 		}
@@ -109,6 +122,7 @@ type StageBuilder struct {
 	stage Stage
 }
 
+// StageDef creates a new stage builder with the given ID.
 func StageDef(id string) *StageBuilder {
 	return &StageBuilder{
 		stage: Stage{
@@ -119,21 +133,25 @@ func StageDef(id string) *StageBuilder {
 	}
 }
 
+// Named sets the stage name.
 func (s *StageBuilder) Named(name string) *StageBuilder {
 	s.stage.Name = name
 	return s
 }
 
+// Describe sets the stage description.
 func (s *StageBuilder) Describe(desc string) *StageBuilder {
 	s.stage.Description = desc
 	return s
 }
 
+// AddTags adds tags to the stage, avoiding duplicates.
 func (s *StageBuilder) AddTags(tags ...string) *StageBuilder {
 	s.stage.Tags = appendUnique(s.stage.Tags, tags...)
 	return s
 }
 
+// WithInitialStore sets the initial store values for the stage.
 func (s *StageBuilder) WithInitialStore(values map[string]any) *StageBuilder {
 	if values == nil {
 		s.stage.InitialStore = nil
@@ -148,6 +166,7 @@ func (s *StageBuilder) WithInitialStore(values map[string]any) *StageBuilder {
 	return s
 }
 
+// Use adds a middleware ID to the stage.
 func (s *StageBuilder) Use(id string) *StageBuilder {
 	if id != "" {
 		s.stage.Middleware = appendUnique(s.stage.Middleware, id)
@@ -155,6 +174,7 @@ func (s *StageBuilder) Use(id string) *StageBuilder {
 	return s
 }
 
+// Action adds an action to the stage.
 func (s *StageBuilder) Action(action *ActionBuilder) *StageBuilder {
 	if action == nil {
 		return s
@@ -167,17 +187,24 @@ func (s *StageBuilder) Action(action *ActionBuilder) *StageBuilder {
 	return s
 }
 
+// Build constructs the final stage definition with validation.
 func (s *StageBuilder) Build() (Stage, error) {
 	actionIDs := make(map[string]struct{})
 	for _, act := range s.stage.Actions {
 		if act.ID != "" {
 			if _, ok := actionIDs[act.ID]; ok {
-				return Stage{}, fmt.Errorf("workflow: duplicate action id %s in stage %s", act.ID, s.stage.ID)
+				return Stage{}, errHelper.WithContext(errHelper.Newf(gostageerrors.ErrCodeInvalidConfiguration, "duplicate action id %s in stage %s", act.ID, s.stage.ID), map[string]any{
+					"action_id": act.ID,
+					"stage_id":  s.stage.ID,
+				})
 			}
 			actionIDs[act.ID] = struct{}{}
 		}
 		if act.Ref == "" {
-			return Stage{}, fmt.Errorf("workflow: action %s requires registry ref", act.ID)
+			return Stage{}, errHelper.WithContext(errHelper.Newf(gostageerrors.ErrCodeInvalidConfiguration, "action %s requires registry ref", act.ID), map[string]any{
+				"action_id": act.ID,
+				"stage_id":  s.stage.ID,
+			})
 		}
 	}
 	return s.stage.Clone(), nil
@@ -189,6 +216,7 @@ type ActionBuilder struct {
 	err    error
 }
 
+// ActionDef creates a new action builder with the given reference.
 func ActionDef(ref string) *ActionBuilder {
 	return &ActionBuilder{
 		action: Action{
@@ -198,21 +226,25 @@ func ActionDef(ref string) *ActionBuilder {
 	}
 }
 
+// ID sets the action ID.
 func (a *ActionBuilder) ID(id string) *ActionBuilder {
 	a.action.ID = id
 	return a
 }
 
+// Describe sets the action description.
 func (a *ActionBuilder) Describe(desc string) *ActionBuilder {
 	a.action.Description = desc
 	return a
 }
 
+// AddTags adds tags to the action, avoiding duplicates.
 func (a *ActionBuilder) AddTags(tags ...string) *ActionBuilder {
 	a.action.Tags = appendUnique(a.action.Tags, tags...)
 	return a
 }
 
+// Use adds a middleware ID to the action.
 func (a *ActionBuilder) Use(id string) *ActionBuilder {
 	if id != "" {
 		a.action.Middleware = appendUnique(a.action.Middleware, id)
@@ -220,12 +252,13 @@ func (a *ActionBuilder) Use(id string) *ActionBuilder {
 	return a
 }
 
+// Build constructs the final action definition with validation.
 func (a *ActionBuilder) Build() (Action, error) {
 	if a.err != nil {
 		return Action{}, a.err
 	}
 	if a.action.Ref == "" {
-		return Action{}, fmt.Errorf("workflow: action ref required")
+		return Action{}, errHelper.Newf(gostageerrors.ErrCodeInvalidConfiguration, "action ref required")
 	}
 	return a.action.Clone(), nil
 }
@@ -235,12 +268,18 @@ func validateStage(stage Stage) error {
 	for _, action := range stage.Actions {
 		if action.ID != "" {
 			if _, ok := actionIDs[action.ID]; ok {
-				return fmt.Errorf("workflow: duplicate action id %s in stage %s", action.ID, stage.ID)
+				return errHelper.WithContext(errHelper.Newf(gostageerrors.ErrCodeInvalidConfiguration, "duplicate action id %s in stage %s", action.ID, stage.ID), map[string]any{
+					"action_id": action.ID,
+					"stage_id":  stage.ID,
+				})
 			}
 			actionIDs[action.ID] = struct{}{}
 		}
 		if action.Ref == "" {
-			return fmt.Errorf("workflow: action %s missing ref", action.ID)
+			return errHelper.WithContext(errHelper.Newf(gostageerrors.ErrCodeInvalidConfiguration, "action %s missing ref", action.ID), map[string]any{
+				"action_id": action.ID,
+				"stage_id":  stage.ID,
+			})
 		}
 	}
 	return nil
