@@ -2,6 +2,8 @@ package telemetry
 
 import (
 	"time"
+
+	"github.com/davidroman0O/gostage/v3/internal/clock"
 )
 
 // EventBuilder provides a fluent API for constructing telemetry events with consistent structure.
@@ -17,7 +19,7 @@ func NewEvent(kind EventKind) *EventBuilder {
 		event: Event{
 			SchemaVersion: DefaultEventSchema,
 			Kind:          kind,
-			Timestamp:     time.Now(),
+			Timestamp:     clock.DefaultClock().Now(),
 			Metadata:      make(map[string]any),
 		},
 	}
@@ -110,7 +112,7 @@ func (b *EventBuilder) Build() Event {
 	}
 	// Ensure timestamp is set
 	if b.event.Timestamp.IsZero() {
-		b.event.Timestamp = time.Now()
+		b.event.Timestamp = clock.DefaultClock().Now()
 	}
 	// Ensure schema version is set
 	if b.event.SchemaVersion == 0 {
@@ -166,11 +168,10 @@ func NormalizeEvent(evt Event) Event {
 		evt.SchemaVersion = DefaultEventSchema
 	}
 	if evt.Timestamp.IsZero() {
-		evt.Timestamp = time.Now()
+		evt.Timestamp = clock.DefaultClock().Now()
 	}
 	if evt.Metadata == nil {
 		evt.Metadata = make(map[string]any)
 	}
 	return evt
 }
-

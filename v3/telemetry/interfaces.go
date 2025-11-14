@@ -13,9 +13,13 @@ type Logger interface {
 type LogLevel int
 
 const (
+	// LogLevelDebug represents debug-level logging.
 	LogLevelDebug LogLevel = iota
+	// LogLevelInfo represents info-level logging.
 	LogLevelInfo
+	// LogLevelWarn represents warn-level logging.
 	LogLevelWarn
+	// LogLevelError represents error-level logging.
 	LogLevelError
 )
 
@@ -36,4 +40,3 @@ type Dispatcher interface {
 	ClearCoverage(workflowID string)
 	Close()
 }
-

@@ -2,9 +2,10 @@ package manager
 
 import (
 	"context"
-	"sync"
 	"time"
 
+	"github.com/davidroman0O/gostage/v3/internal/clock"
+	"github.com/davidroman0O/gostage/v3/internal/locks"
 	"github.com/davidroman0O/gostage/v3/node"
 	"github.com/davidroman0O/gostage/v3/state"
 	"github.com/davidroman0O/gostage/v3/telemetry"
@@ -20,9 +21,9 @@ var autoSuppressKinds = map[telemetry.EventKind]struct{}{
 type Manager struct {
 	delegate   state.Manager
 	dispatcher *node.TelemetryDispatcher
-	mu         sync.RWMutex
+	mu         *locks.OrderedRWMutex
 	suppressed map[string]map[telemetry.EventKind]struct{}
-	clock      func() time.Time
+	clock      clock.Clock
 }
 
 // Wrap returns a manager that emits telemetry events via the provided dispatcher.
@@ -31,18 +32,20 @@ func Wrap(delegate state.Manager, dispatcher *node.TelemetryDispatcher) state.Ma
 	if dispatcher == nil {
 		return delegate
 	}
-	clock := time.Now
+	var c clock.Clock = clock.DefaultClock()
 	if delegate != nil {
-		if provider, ok := delegate.(interface{ Clock() func() time.Time }); ok {
-			if c := provider.Clock(); c != nil {
-				clock = c
+		if provider, ok := delegate.(interface{ Clock() clock.Clock }); ok {
+			if clk := provider.Clock(); clk != nil {
+				c = clk
 			}
 		}
 	}
 	return &Manager{
 		delegate:   delegate,
 		dispatcher: dispatcher,
-		clock:      clock,
+		clock:      c,
+		mu:         locks.NewOrderedRWMutex(locks.LockOrderTelemetry),
+		suppressed: make(map[string]map[telemetry.EventKind]struct{}),
 	}
 }
 
@@ -52,6 +55,7 @@ func WrapWithTelemetry(delegate state.Manager, dispatcher *node.TelemetryDispatc
 	return Wrap(delegate, dispatcher)
 }
 
+// WorkflowRegistered records a workflow registration and emits telemetry.
 func (m *Manager) WorkflowRegistered(ctx context.Context, wf state.WorkflowRecord) error {
 	if err := m.delegate.WorkflowRegistered(ctx, wf); err != nil {
 		return err
@@ -68,6 +72,7 @@ func (m *Manager) WorkflowRegistered(ctx context.Context, wf state.WorkflowRecor
 	return nil
 }
 
+// WorkflowStatus updates workflow status and emits telemetry.
 func (m *Manager) WorkflowStatus(ctx context.Context, workflowID string, status state.WorkflowState) error {
 	if err := m.delegate.WorkflowStatus(ctx, workflowID, status); err != nil {
 		return err
@@ -101,6 +106,7 @@ func (m *Manager) WorkflowStatus(ctx context.Context, workflowID string, status 
 	return nil
 }
 
+// StageRegistered records a stage registration and emits telemetry.
 func (m *Manager) StageRegistered(ctx context.Context, workflowID string, stage state.StageRecord) error {
 	if err := m.delegate.StageRegistered(ctx, workflowID, stage); err != nil {
 		return err
@@ -120,6 +126,7 @@ func (m *Manager) StageRegistered(ctx context.Context, workflowID string, stage 
 	return nil
 }
 
+// StageStatus updates stage status and emits telemetry.
 func (m *Manager) StageStatus(ctx context.Context, workflowID, stageID string, status state.WorkflowState) error {
 	if err := m.delegate.StageStatus(ctx, workflowID, stageID, status); err != nil {
 		return err
@@ -154,6 +161,7 @@ func (m *Manager) StageStatus(ctx context.Context, workflowID, stageID string, s
 	return nil
 }
 
+// ActionRegistered records an action registration and emits telemetry.
 func (m *Manager) ActionRegistered(ctx context.Context, workflowID, stageID string, action state.ActionRecord) error {
 	if err := m.delegate.ActionRegistered(ctx, workflowID, stageID, action); err != nil {
 		return err
@@ -174,6 +182,7 @@ func (m *Manager) ActionRegistered(ctx context.Context, workflowID, stageID stri
 	return nil
 }
 
+// ActionStatus updates action status and emits telemetry.
 func (m *Manager) ActionStatus(ctx context.Context, workflowID, stageID, actionName string, status state.WorkflowState) error {
 	if err := m.delegate.ActionStatus(ctx, workflowID, stageID, actionName, status); err != nil {
 		return err
@@ -209,6 +218,7 @@ func (m *Manager) ActionStatus(ctx context.Context, workflowID, stageID, actionN
 	return nil
 }
 
+// ActionProgress records action progress and emits telemetry.
 func (m *Manager) ActionProgress(ctx context.Context, workflowID, stageID, actionName string, progress int, message string) error {
 	if err := m.delegate.ActionProgress(ctx, workflowID, stageID, actionName, progress, message); err != nil {
 		return err
@@ -234,6 +244,7 @@ func (m *Manager) ActionProgress(ctx context.Context, workflowID, stageID, actio
 	return nil
 }
 
+// ActionEvent records an action event and emits telemetry.
 func (m *Manager) ActionEvent(ctx context.Context, workflowID, stageID, actionName, kind, message string, metadata map[string]any) error {
 	if err := m.delegate.ActionEvent(ctx, workflowID, stageID, actionName, kind, message, metadata); err != nil {
 		return err
@@ -256,6 +267,7 @@ func (m *Manager) ActionEvent(ctx context.Context, workflowID, stageID, actionNa
 	return nil
 }
 
+// ActionRemoved records action removal and emits telemetry.
 func (m *Manager) ActionRemoved(ctx context.Context, workflowID, stageID, actionName, createdBy string) error {
 	if err := m.delegate.ActionRemoved(ctx, workflowID, stageID, actionName, createdBy); err != nil {
 		return err
@@ -272,6 +284,7 @@ func (m *Manager) ActionRemoved(ctx context.Context, workflowID, stageID, action
 	return nil
 }
 
+// StageRemoved records stage removal and emits telemetry.
 func (m *Manager) StageRemoved(ctx context.Context, workflowID, stageID, createdBy string) error {
 	if err := m.delegate.StageRemoved(ctx, workflowID, stageID, createdBy); err != nil {
 		return err
@@ -287,6 +300,7 @@ func (m *Manager) StageRemoved(ctx context.Context, workflowID, stageID, created
 	return nil
 }
 
+// StoreExecutionSummary stores execution summary and emits telemetry.
 func (m *Manager) StoreExecutionSummary(ctx context.Context, workflowID string, report state.ExecutionReport) error {
 	if err := m.delegate.StoreExecutionSummary(ctx, workflowID, report); err != nil {
 		return err
@@ -347,9 +361,9 @@ func (m *Manager) emit(evt telemetry.Event) {
 
 func (m *Manager) now() time.Time {
 	if m != nil && m.clock != nil {
-		return m.clock()
+		return m.clock.Now()
 	}
-	return time.Now()
+	return clock.DefaultClock().Now()
 }
 
 // SuppressWorkflowEvents suppresses telemetry events of the specified kinds for the given workflow.
@@ -382,4 +396,3 @@ func (m *Manager) clearSuppressed(workflowID string) {
 	delete(m.suppressed, workflowID)
 	m.mu.Unlock()
 }
-

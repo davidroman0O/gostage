@@ -6,7 +6,7 @@ type Field struct {
 	Value any
 }
 
-// Field creates a Field with the given key and value.
+// NewField creates a Field with the given key and value.
 func NewField(key string, value any) Field {
 	return Field{Key: key, Value: value}
 }
@@ -74,4 +74,3 @@ func fieldsToKV(fields []Field) []any {
 	}
 	return kv
 }
-

@@ -11,6 +11,7 @@ type LoggingSink struct {
 	ctx    context.Context
 }
 
+// NewLoggingSink creates a new logging sink that writes events to a logger.
 func NewLoggingSink(ctx context.Context, logger Logger) *LoggingSink {
 	if ctx == nil {
 		ctx = context.Background()
@@ -27,6 +28,7 @@ func NewLoggerSink(std *log.Logger) *LoggingSink {
 	return NewLoggingSink(context.Background(), NewStdLogger(std))
 }
 
+// Record records a telemetry event to the logger.
 func (s *LoggingSink) Record(evt Event) {
 	s.logger.Info("telemetry",
 		"kind", string(evt.Kind),

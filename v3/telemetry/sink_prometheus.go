@@ -21,21 +21,21 @@ import (
 //   - gostage_telemetry_events_dropped_total: Counter of dropped telemetry events
 //
 // Usage:
-//   reg := prometheus.DefaultRegisterer
-//   sink := telemetry.NewPrometheusSink(reg)
-//   gostage.Run(ctx, gostage.WithTelemetrySink(sink))
 //
+//	reg := prometheus.DefaultRegisterer
+//	sink := telemetry.NewPrometheusSink(reg)
+//	gostage.Run(ctx, gostage.WithTelemetrySink(sink))
 type PromSink struct {
-	events              *prometheus.CounterVec
-	outcomes            *prometheus.CounterVec
-	outcomesByType      *prometheus.CounterVec
-	durations           prometheus.Observer
-	poolWorkflows       *prometheus.CounterVec
-	poolErrors          *prometheus.CounterVec
-	stageDurations      prometheus.Observer
-	actionDurations     prometheus.Observer
-	bufferUtilization   prometheus.Gauge
-	eventsDropped       prometheus.Counter
+	events            *prometheus.CounterVec
+	outcomes          *prometheus.CounterVec
+	outcomesByType    *prometheus.CounterVec
+	durations         prometheus.Observer
+	poolWorkflows     *prometheus.CounterVec
+	poolErrors        *prometheus.CounterVec
+	stageDurations    prometheus.Observer
+	actionDurations   prometheus.Observer
+	bufferUtilization prometheus.Gauge
+	eventsDropped     prometheus.Counter
 }
 
 // NewPrometheusSink constructs a metrics sink and registers it with the provided Registerer.
@@ -86,7 +86,7 @@ func NewPrometheusSink(reg prometheus.Registerer) Sink {
 		Name: "gostage_telemetry_events_dropped_total",
 		Help: "Total telemetry events dropped due to backpressure.",
 	})
-	
+
 	reg.MustRegister(events, outcomes, outcomesByType, duration, poolWorkflows, poolErrors,
 		stageDuration, actionDuration, bufferUtilization, eventsDropped)
 	return &PromSink{
@@ -103,12 +103,13 @@ func NewPrometheusSink(reg prometheus.Registerer) Sink {
 	}
 }
 
+// Record records a telemetry event and updates Prometheus metrics.
 func (s *PromSink) Record(evt Event) {
 	if s == nil {
 		return
 	}
 	s.events.WithLabelValues(string(evt.Kind)).Inc()
-	
+
 	// Extract pool from metadata if available
 	pool := ""
 	workflowType := ""
@@ -120,7 +121,7 @@ func (s *PromSink) Record(evt Event) {
 			workflowType = wt
 		}
 	}
-	
+
 	switch evt.Kind {
 	case EventWorkflowSummary:
 		// Outcome from metadata: success(bool) or reason(string)
@@ -186,4 +187,3 @@ func (s *PromSink) RecordDroppedEvent() {
 		s.eventsDropped.Inc()
 	}
 }
-
