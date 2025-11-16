@@ -6,8 +6,8 @@ import (
 	"time"
 
 	gostage "github.com/davidroman0O/gostage/v3"
-	rt "github.com/davidroman0O/gostage/v3/runtime"
-	"github.com/davidroman0O/gostage/v3/workflow"
+	rt "github.com/davidroman0O/gostage/v3/shared/runtime"
+	"github.com/davidroman0O/gostage/v3/shared/workflow"
 )
 
 func TestRunProvidesStateReaderWithoutSQLite(t *testing.T) {
@@ -72,7 +72,7 @@ func TestRunProvidesStateReaderWithoutSQLite(t *testing.T) {
 func registerTestWorkflow(t *testing.T, actionID string) (string, workflow.IDAssignment) {
 	t.Helper()
 	if err := gostage.RegisterAction(actionID, func() gostage.ActionFunc {
-		return func(ctx rt.Context) error {
+		return func(_ rt.Context) error {
 			return nil
 		}
 	}); err != nil {
@@ -95,5 +95,6 @@ func registerTestWorkflow(t *testing.T, actionID string) (string, workflow.IDAss
 
 func drainDiagnostics(diag <-chan gostage.DiagnosticEvent) {
 	for range diag {
+		_ = struct{}{} // Drain diagnostics channel
 	}
 }

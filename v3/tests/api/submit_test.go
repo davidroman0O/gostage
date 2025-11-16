@@ -5,22 +5,18 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/davidroman0O/gostage/v3/bootstrap"
+	"github.com/davidroman0O/gostage/v3/layers/orchestration/bootstrap"
 	"github.com/davidroman0O/gostage/v3/e2e/testkit"
-	"github.com/davidroman0O/gostage/v3/internal/gostagetest"
-	"github.com/davidroman0O/gostage/v3/pools"
-	rt "github.com/davidroman0O/gostage/v3/runtime"
-	"github.com/davidroman0O/gostage/v3/state"
-	"github.com/davidroman0O/gostage/v3/workflow"
+	"github.com/davidroman0O/gostage/v3/layers/foundation/gostagetest"
+	"github.com/davidroman0O/gostage/v3/shared/metadata"
+	"github.com/davidroman0O/gostage/v3/shared/pools"
+	rt "github.com/davidroman0O/gostage/v3/shared/runtime"
+	"github.com/davidroman0O/gostage/v3/layers/domain"
+	"github.com/davidroman0O/gostage/v3/layers/domain/store"
+	"github.com/davidroman0O/gostage/v3/shared/workflow"
 
 	gostage "github.com/davidroman0O/gostage/v3"
 )
-
-// serializeDef is a test helper to serialize workflow.Definition to []byte
-func serializeDef(def workflow.Definition) []byte {
-	data, _ := json.Marshal(def)
-	return data
-}
 
 // deserializeDef is a test helper to deserialize []byte back to workflow.Definition
 func deserializeDef(data []byte) workflow.Definition {
@@ -34,7 +30,7 @@ func TestSubmitWorkflowID(t *testing.T) {
 	testkit.ResetRegistry(t)
 
 	// Register action and workflow
-	gostage.MustRegisterAction("test.echo", func(ctx rt.Context) error {
+	gostage.MustRegisterAction("test.echo", func(_ rt.Context) error {
 		return nil
 	})
 
@@ -53,11 +49,12 @@ func TestSubmitWorkflowID(t *testing.T) {
 	workflowID, _ := gostage.MustRegisterWorkflow(def)
 
 	queue := &captureQueue{}
-	store := state.NewMemoryStore()
-	pool := pools.NewLocal("local", state.Selector{}, 1) // Empty selector accepts all workflows
+	memStore := store.NewMemoryStore()
+	storeAdapter := domain.NewStoreAdapter(memStore)
+	pool := pools.NewLocal("local", domain.Selector{}, 1) // Empty selector accepts all workflows
 	parent := gostagetest.NewParentNode()
 	parent.SetQueueForTest(queue)
-	parent.SetStoreForTest(store)
+	parent.SetStoreForTest(storeAdapter)
 	parent.SetPoolsForTest([]*gostagetest.PoolBinding{{Pool: pool}})
 
 	// Test SubmitWorkflowID
@@ -74,7 +71,7 @@ func TestSubmitDefinition(t *testing.T) {
 	ctx := context.Background()
 	testkit.ResetRegistry(t)
 
-	gostage.MustRegisterAction("test.echo", func(ctx rt.Context) error {
+	gostage.MustRegisterAction("test.echo", func(_ rt.Context) error {
 		return nil
 	})
 
@@ -91,11 +88,12 @@ func TestSubmitDefinition(t *testing.T) {
 	}
 
 	queue := &captureQueue{}
-	store := state.NewMemoryStore()
-	pool := pools.NewLocal("local", state.Selector{}, 1)
+	memStore := store.NewMemoryStore()
+	storeAdapter := domain.NewStoreAdapter(memStore)
+	pool := pools.NewLocal("local", domain.Selector{}, 1)
 	parent := gostagetest.NewParentNode()
 	parent.SetQueueForTest(queue)
-	parent.SetStoreForTest(store)
+	parent.SetStoreForTest(storeAdapter)
 	parent.SetPoolsForTest([]*gostagetest.PoolBinding{{Pool: pool}})
 
 	// Test SubmitDefinition
@@ -112,7 +110,7 @@ func TestSubmitWorkflowIDWithOptions(t *testing.T) {
 	ctx := context.Background()
 	testkit.ResetRegistry(t)
 
-	gostage.MustRegisterAction("test.echo", func(ctx rt.Context) error {
+	gostage.MustRegisterAction("test.echo", func(_ rt.Context) error {
 		return nil
 	})
 
@@ -131,11 +129,12 @@ func TestSubmitWorkflowIDWithOptions(t *testing.T) {
 	workflowID, _ := gostage.MustRegisterWorkflow(def)
 
 	queue := &captureQueue{}
-	store := state.NewMemoryStore()
-	pool := pools.NewLocal("local", state.Selector{All: []string{"test"}}, 1)
+	memStore := store.NewMemoryStore()
+	storeAdapter := domain.NewStoreAdapter(memStore)
+	pool := pools.NewLocal("local", domain.Selector{All: []string{"test"}}, 1)
 	parent := gostagetest.NewParentNode()
 	parent.SetQueueForTest(queue)
-	parent.SetStoreForTest(store)
+	parent.SetStoreForTest(storeAdapter)
 	parent.SetPoolsForTest([]*gostagetest.PoolBinding{{Pool: pool}})
 
 	// Test SubmitWorkflowID with options
@@ -152,7 +151,7 @@ func TestSubmitDefinitionWithOptions(t *testing.T) {
 	ctx := context.Background()
 	testkit.ResetRegistry(t)
 
-	gostage.MustRegisterAction("test.echo", func(ctx rt.Context) error {
+	gostage.MustRegisterAction("test.echo", func(_ rt.Context) error {
 		return nil
 	})
 
@@ -169,11 +168,12 @@ func TestSubmitDefinitionWithOptions(t *testing.T) {
 	}
 
 	queue := &captureQueue{}
-	store := state.NewMemoryStore()
-	pool := pools.NewLocal("local", state.Selector{}, 1)
+	memStore := store.NewMemoryStore()
+	storeAdapter := domain.NewStoreAdapter(memStore)
+	pool := pools.NewLocal("local", domain.Selector{}, 1)
 	parent := gostagetest.NewParentNode()
 	parent.SetQueueForTest(queue)
-	parent.SetStoreForTest(store)
+	parent.SetStoreForTest(storeAdapter)
 	parent.SetPoolsForTest([]*gostagetest.PoolBinding{{Pool: pool}})
 
 	// Test SubmitDefinition with options
@@ -200,7 +200,7 @@ func TestSubmitOptionsPopulateRequest(t *testing.T) {
 	meta := map[string]any{"region": "us"}
 	apply(gostage.WithMetadata(meta))
 
-	if req.Priority != state.Priority(7) {
+	if req.Priority != domain.Priority(7) {
 		t.Fatalf("expected priority 7, got %d", req.Priority)
 	}
 	if len(req.Tags) != 2 || req.Tags[0] != "priority" || req.Tags[1] != "payments" {
@@ -220,20 +220,21 @@ func TestSubmitOptionsPopulateRequest(t *testing.T) {
 
 func TestParentSubmitMetadataPrecedence(t *testing.T) {
 	queue := &captureQueue{}
-	store := state.NewMemoryStore()
-	pool := pools.NewLocal("local", state.Selector{All: []string{"order"}}, 1)
+	memStore := store.NewMemoryStore()
+	storeAdapter := domain.NewStoreAdapter(memStore)
+	pool := pools.NewLocal("local", domain.Selector{All: []string{"order"}}, 1)
 	parent := gostagetest.NewParentNode()
 	parent.SetQueueForTest(queue)
-	parent.SetStoreForTest(store)
+	parent.SetStoreForTest(storeAdapter)
 	parent.SetPoolsForTest([]*gostagetest.PoolBinding{{Pool: pool}})
 
 	def := workflow.Definition{
 		ID:   "wf",
 		Tags: []string{"order"},
-		Metadata: map[string]any{
+		Metadata: metadata.FromMap(map[string]any{
 			"region": "us",
 			"tier":   "gold",
-		},
+		}),
 	}
 
 	ref := gostage.WorkflowDefinition(def)
@@ -279,7 +280,7 @@ type captureQueue struct {
 	lastMetadata   map[string]any
 }
 
-func (q *captureQueue) Enqueue(_ context.Context, defBytes []byte, _ state.Priority, metadata map[string]any) (state.WorkflowID, error) {
+func (q *captureQueue) Enqueue(_ context.Context, defBytes []byte, _ domain.Priority, metadata map[string]any) (domain.WorkflowID, error) {
 	q.lastDefinition = deserializeDef(defBytes)
 	if metadata != nil {
 		copied := make(map[string]any, len(metadata))
@@ -290,20 +291,20 @@ func (q *captureQueue) Enqueue(_ context.Context, defBytes []byte, _ state.Prior
 	} else {
 		q.lastMetadata = nil
 	}
-	return state.WorkflowID("queued"), nil
+	return domain.WorkflowID("queued"), nil
 }
 
-func (q *captureQueue) Claim(context.Context, state.Selector, string) (*state.ClaimedWorkflow, error) {
-	return nil, state.ErrNoPending
+func (q *captureQueue) Claim(context.Context, domain.Selector, string) (*domain.ClaimedWorkflow, error) {
+	return nil, domain.ErrNoPending
 }
-func (q *captureQueue) Release(context.Context, state.WorkflowID) error                  { return nil }
-func (q *captureQueue) Ack(context.Context, state.WorkflowID, state.ResultSummary) error { return nil }
-func (q *captureQueue) Cancel(context.Context, state.WorkflowID) error                   { return nil }
-func (q *captureQueue) Stats(context.Context) (state.QueueStats, error) {
-	return state.QueueStats{}, nil
+func (q *captureQueue) Release(context.Context, domain.WorkflowID) error                  { return nil }
+func (q *captureQueue) Ack(context.Context, domain.WorkflowID, domain.ResultSummary) error { return nil }
+func (q *captureQueue) Cancel(context.Context, domain.WorkflowID) error                   { return nil }
+func (q *captureQueue) Stats(context.Context) (domain.QueueStats, error) {
+	return domain.QueueStats{}, nil
 }
-func (q *captureQueue) PendingCount(context.Context, state.Selector) (int, error) { return 0, nil }
-func (q *captureQueue) AuditLog(context.Context, int) ([]state.QueueAuditRecord, error) {
+func (q *captureQueue) PendingCount(context.Context, domain.Selector) (int, error) { return 0, nil }
+func (q *captureQueue) AuditLog(context.Context, int) ([]domain.QueueAuditRecord, error) {
 	return nil, nil
 }
 func (q *captureQueue) Close() error { return nil }

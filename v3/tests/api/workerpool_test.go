@@ -5,8 +5,9 @@ import (
 	"testing"
 
 	"github.com/davidroman0O/gostage/v3/e2e/testkit"
-	rt "github.com/davidroman0O/gostage/v3/runtime"
-	"github.com/davidroman0O/gostage/v3/workflow"
+	"github.com/davidroman0O/gostage/v3/layers/foundation/cleanup"
+	rt "github.com/davidroman0O/gostage/v3/shared/runtime"
+	"github.com/davidroman0O/gostage/v3/shared/workflow"
 
 	gostage "github.com/davidroman0O/gostage/v3"
 )
@@ -15,7 +16,7 @@ func TestWithWorkerPool(t *testing.T) {
 	ctx := context.Background()
 	testkit.ResetRegistry(t)
 
-	gostage.MustRegisterAction("test.echo", func(ctx rt.Context) error {
+	gostage.MustRegisterAction("test.echo", func(_ rt.Context) error {
 		return nil
 	})
 
@@ -41,7 +42,7 @@ func TestWithWorkerPool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run with WithWorkerPool: %v", err)
 	}
-	defer node.Close()
+	defer cleanup.SafeClose(node)
 
 	workflowID, _ := gostage.MustRegisterWorkflow(def)
 	runID, err := node.Submit(ctx, gostage.WorkflowRef(workflowID), gostage.WithTags("test"))
@@ -57,7 +58,7 @@ func TestWithPoolBackwardCompatibility(t *testing.T) {
 	ctx := context.Background()
 	testkit.ResetRegistry(t)
 
-	gostage.MustRegisterAction("test.echo", func(ctx rt.Context) error {
+	gostage.MustRegisterAction("test.echo", func(_ rt.Context) error {
 		return nil
 	})
 
@@ -76,7 +77,7 @@ func TestWithPoolBackwardCompatibility(t *testing.T) {
 	backends := testkit.NewMemoryBackends()
 	// Test backward compatibility: old WithPool with Slots still works
 	node, _, err := gostage.Run(ctx, append(testkit.MemoryOptions(backends),
-		gostage.WithPool(gostage.PoolConfig{
+		gostage.WithPool(gostage.PoolConfig{ //nolint:staticcheck // SA1019: gostage.WithPool is deprecated but intentionally used for backward compatibility test
 			Name:  "test-pool",
 			Slots: 2,
 			Tags:  []string{"test"},
@@ -84,7 +85,7 @@ func TestWithPoolBackwardCompatibility(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run with WithPool (backward compat): %v", err)
 	}
-	defer node.Close()
+	defer cleanup.SafeClose(node)
 
 	workflowID, _ := gostage.MustRegisterWorkflow(def)
 	runID, err := node.Submit(ctx, gostage.WorkflowRef(workflowID), gostage.WithTags("test"))
@@ -100,7 +101,7 @@ func TestWorkersTakesPrecedenceOverSlots(t *testing.T) {
 	ctx := context.Background()
 	testkit.ResetRegistry(t)
 
-	gostage.MustRegisterAction("test.echo", func(ctx rt.Context) error {
+	gostage.MustRegisterAction("test.echo", func(_ rt.Context) error {
 		return nil
 	})
 
@@ -116,7 +117,7 @@ func TestWorkersTakesPrecedenceOverSlots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	defer node.Close()
+	defer cleanup.SafeClose(node)
 
 	stats, err := node.Stats()
 	if err != nil {
@@ -134,7 +135,7 @@ func TestWithSimpleWorkerPool(t *testing.T) {
 	ctx := context.Background()
 	testkit.ResetRegistry(t)
 
-	gostage.MustRegisterAction("test.echo", func(ctx rt.Context) error {
+	gostage.MustRegisterAction("test.echo", func(_ rt.Context) error {
 		return nil
 	})
 
@@ -156,7 +157,7 @@ func TestWithSimpleWorkerPool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run with WithSimpleWorkerPool: %v", err)
 	}
-	defer node.Close()
+	defer cleanup.SafeClose(node)
 
 	workflowID, _ := gostage.MustRegisterWorkflow(def)
 	runID, err := node.Submit(ctx, gostage.WorkflowRef(workflowID), gostage.WithTags("test"))
@@ -172,7 +173,7 @@ func TestWithDefaultWorkerPool(t *testing.T) {
 	ctx := context.Background()
 	testkit.ResetRegistry(t)
 
-	gostage.MustRegisterAction("test.echo", func(ctx rt.Context) error {
+	gostage.MustRegisterAction("test.echo", func(_ rt.Context) error {
 		return nil
 	})
 
@@ -194,7 +195,7 @@ func TestWithDefaultWorkerPool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run with WithDefaultWorkerPool: %v", err)
 	}
-	defer node.Close()
+	defer cleanup.SafeClose(node)
 
 	workflowID, _ := gostage.MustRegisterWorkflow(def)
 	// Default pool accepts all workflows (no tags needed)
@@ -225,4 +226,3 @@ func TestWithChildWorkerPool(t *testing.T) {
 	// This test just verifies the API compiles and works
 	// Full child process testing happens in Phase 4
 }
-

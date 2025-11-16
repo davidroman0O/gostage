@@ -15,7 +15,7 @@ func TestStateAliasesExposePublicAPI(t *testing.T) {
 	_ = filter
 
 	var summary gostage.WorkflowSummary
-	if summary.WorkflowRecord.ID != "" {
+	if summary.ID != "" {
 		t.Fatalf("expected zero summary ID")
 	}
 
