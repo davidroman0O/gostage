@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/davidroman0O/gostage/v3/layers/foundation/locks"
+	"github.com/davidroman0O/gostage/v3/internal/foundation/locks"
 	rt "github.com/davidroman0O/gostage/v3/shared/runtime"
 )
 

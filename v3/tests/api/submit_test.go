@@ -5,14 +5,14 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/davidroman0O/gostage/v3/layers/orchestration/bootstrap"
+	"github.com/davidroman0O/gostage/v3/internal/orchestration/bootstrap"
 	"github.com/davidroman0O/gostage/v3/e2e/testkit"
-	"github.com/davidroman0O/gostage/v3/layers/foundation/gostagetest"
+	"github.com/davidroman0O/gostage/v3/internal/foundation/gostagetest"
 	"github.com/davidroman0O/gostage/v3/shared/metadata"
 	"github.com/davidroman0O/gostage/v3/shared/pools"
 	rt "github.com/davidroman0O/gostage/v3/shared/runtime"
-	"github.com/davidroman0O/gostage/v3/layers/domain"
-	"github.com/davidroman0O/gostage/v3/layers/domain/store"
+	"github.com/davidroman0O/gostage/v3/internal/domain"
+	"github.com/davidroman0O/gostage/v3/internal/domain/store"
 	"github.com/davidroman0O/gostage/v3/shared/workflow"
 
 	gostage "github.com/davidroman0O/gostage/v3"

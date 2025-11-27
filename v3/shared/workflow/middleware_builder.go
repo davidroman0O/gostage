@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/davidroman0O/gostage/v3/layers/foundation/clock"
+	"github.com/davidroman0O/gostage/v3/internal/foundation/clock"
 	rt "github.com/davidroman0O/gostage/v3/shared/runtime"
 )
 

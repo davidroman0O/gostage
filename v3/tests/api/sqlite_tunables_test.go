@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	gostage "github.com/davidroman0O/gostage/v3"
-	"github.com/davidroman0O/gostage/v3/layers/foundation/cleanup"
+	"github.com/davidroman0O/gostage/v3/internal/foundation/cleanup"
 	_ "modernc.org/sqlite"
 )
 

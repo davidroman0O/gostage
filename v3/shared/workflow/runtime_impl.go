@@ -3,11 +3,11 @@ package workflow
 import (
 	"time"
 
-	"github.com/davidroman0O/gostage/v3/layers/foundation/clock"
-	"github.com/davidroman0O/gostage/v3/layers/foundation/id"
-	"github.com/davidroman0O/gostage/v3/layers/foundation/locks"
-	internalstore "github.com/davidroman0O/gostage/v3/layers/foundation/store"
-	"github.com/davidroman0O/gostage/v3/layers/execution/registry"
+	"github.com/davidroman0O/gostage/v3/internal/foundation/clock"
+	"github.com/davidroman0O/gostage/v3/internal/foundation/id"
+	"github.com/davidroman0O/gostage/v3/internal/foundation/locks"
+	kvstore "github.com/davidroman0O/gostage/v3/shared/store/kvstore"
+	"github.com/davidroman0O/gostage/v3/internal/execution/registry"
 	rt "github.com/davidroman0O/gostage/v3/shared/runtime"
 	store "github.com/davidroman0O/gostage/v3/shared/store"
 )
@@ -21,7 +21,7 @@ type RuntimeWorkflow struct {
 	description  string
 	tags         []string
 	stages       []rt.Stage
-	store        *internalstore.KVStore
+	store        *kvstore.KVStore
 	metadata     map[string]any
 	workflowType string
 	payload      map[string]any
@@ -69,7 +69,7 @@ func newRuntimeWorkflow(id, name, description string) *RuntimeWorkflow {
 		description: description,
 		tags:        make([]string, 0),
 		stages:      make([]rt.Stage, 0),
-		store:       internalstore.NewKVStore(),
+		store:       kvstore.NewKVStore(),
 		metadata:    make(map[string]any),
 		middlewares: make([]rt.WorkflowMiddleware, 0),
 		runtime: workflowRuntime{

@@ -3,7 +3,7 @@ package workflow
 import (
 	"slices"
 
-	gostageerrors "github.com/davidroman0O/gostage/v3/layers/foundation/errors"
+	gostageerrors "github.com/davidroman0O/gostage/v3/internal/foundation/errors"
 	"github.com/davidroman0O/gostage/v3/shared/metadata"
 )
 

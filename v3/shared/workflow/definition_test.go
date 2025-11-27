@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/davidroman0O/gostage/v3/shared/metadata"
-	"github.com/davidroman0O/gostage/v3/layers/execution/registry"
+	"github.com/davidroman0O/gostage/v3/internal/execution/registry"
 	rt "github.com/davidroman0O/gostage/v3/shared/runtime"
 )
 

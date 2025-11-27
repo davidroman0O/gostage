@@ -9,13 +9,13 @@ import (
 	"time"
 
 	gostage "github.com/davidroman0O/gostage/v3"
-	"github.com/davidroman0O/gostage/v3/layers/foundation/clock"
-	"github.com/davidroman0O/gostage/v3/layers/foundation/gostagetest"
-	"github.com/davidroman0O/gostage/v3/layers/domain"
-	"github.com/davidroman0O/gostage/v3/layers/domain/queue"
-	"github.com/davidroman0O/gostage/v3/layers/domain/store"
-	"github.com/davidroman0O/gostage/v3/layers/domain/writer"
-	statetest "github.com/davidroman0O/gostage/v3/layers/domain/testkit"
+	"github.com/davidroman0O/gostage/v3/internal/foundation/clock"
+	"github.com/davidroman0O/gostage/v3/internal/foundation/gostagetest"
+	"github.com/davidroman0O/gostage/v3/internal/domain"
+	"github.com/davidroman0O/gostage/v3/internal/domain/queue"
+	"github.com/davidroman0O/gostage/v3/internal/domain/store"
+	"github.com/davidroman0O/gostage/v3/internal/domain/writer"
+	statetest "github.com/davidroman0O/gostage/v3/internal/domain/testkit"
 	_ "modernc.org/sqlite"
 )
 
