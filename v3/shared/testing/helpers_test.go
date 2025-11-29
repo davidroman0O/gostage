@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/davidroman0O/gostage/v3"
-	"github.com/davidroman0O/gostage/v3/layers/foundation/cleanup"
+	"github.com/davidroman0O/gostage/v3/internal/foundation/cleanup"
 	rt "github.com/davidroman0O/gostage/v3/shared/runtime"
 	"github.com/davidroman0O/gostage/v3/shared/store"
 	"github.com/davidroman0O/gostage/v3/shared/workflow"

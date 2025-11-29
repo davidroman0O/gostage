@@ -4,12 +4,12 @@ package store
 import (
 	"errors"
 
-	internal "github.com/davidroman0O/gostage/v3/layers/foundation/store"
+	kvstore "github.com/davidroman0O/gostage/v3/shared/store/kvstore"
 )
 
 // Handle wraps the internal KV store used during workflow execution.
 type Handle struct {
-	kv *internal.KVStore
+	kv *kvstore.KVStore
 }
 
 // Provider exposes a Store() Handle method (satisfied by runtime.Context).
@@ -22,11 +22,11 @@ var ErrNilHandle = errors.New("store: handle is nil")
 
 // New returns a fresh Handle backed by an empty KV store.
 func New() Handle {
-	return Handle{kv: internal.NewKVStore()}
+	return Handle{kv: kvstore.NewKVStore()}
 }
 
 // FromInternal wraps an existing internal KV store.
-func FromInternal(kv *internal.KVStore) Handle {
+func FromInternal(kv *kvstore.KVStore) Handle {
 	return Handle{kv: kv}
 }
 
@@ -61,7 +61,7 @@ func Get[T any](target Provider, key string) (T, error) {
 	if h.kv == nil {
 		return zero, ErrNilHandle
 	}
-	return internal.Get[T](h.kv, key)
+	return kvstore.Get[T](h.kv, key)
 }
 
 // MustGet retrieves the value and panics on error (useful for tests).
@@ -101,7 +101,7 @@ func Clone(target Provider) Handle {
 	if h.kv == nil {
 		return Handle{}
 	}
-	clone := internal.NewKVStore()
+	clone := kvstore.NewKVStore()
 	_, _, _ = clone.CopyFromWithOverwrite(h.kv)
 	return Handle{kv: clone}
 }

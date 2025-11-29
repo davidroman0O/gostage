@@ -6,7 +6,7 @@ import (
 
 	"github.com/davidroman0O/gostage/v3"
 	"github.com/davidroman0O/gostage/v3/e2e/testkit"
-	idgen "github.com/davidroman0O/gostage/v3/layers/foundation/id"
+	idgen "github.com/davidroman0O/gostage/v3/internal/foundation/id"
 	"github.com/davidroman0O/gostage/v3/shared/workflow"
 )
 
