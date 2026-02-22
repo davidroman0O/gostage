@@ -1,5 +1,7 @@
 .gocache
 .gomodcache
 **.zip
-
 **/**.db
+
+# OS files
+.DS_Store
