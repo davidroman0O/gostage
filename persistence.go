@@ -2,12 +2,13 @@ package gostage
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
 // Persistence defines the generic interface for workflow run persistence.
 // Implementations handle storing and retrieving workflow execution state.
-// The engine uses this to checkpoint after each step and support resume.
+// The engine uses this to flush state after each step and support resume.
 type Persistence interface {
 	// SaveRun persists a new or updated run state.
 	SaveRun(ctx context.Context, run *RunState) error
@@ -18,12 +19,15 @@ type Persistence interface {
 	// UpdateStepStatus updates the status of a specific step within a run.
 	UpdateStepStatus(ctx context.Context, runID RunID, stepID string, status Status) error
 
-	// SaveCheckpoint persists the store snapshot for a run.
-	// This is called after each step to enable resume from the last checkpoint.
-	SaveCheckpoint(ctx context.Context, runID RunID, storeData []byte) error
+	// SaveState persists dirty state entries for a run (per-key granularity).
+	// Each entry is a JSON-encoded value with its Go type name for round-trip fidelity.
+	SaveState(ctx context.Context, runID RunID, entries map[string]StateEntry) error
 
-	// LoadCheckpoint retrieves the last store snapshot for a run.
-	LoadCheckpoint(ctx context.Context, runID RunID) ([]byte, error)
+	// LoadState retrieves all state entries for a run.
+	LoadState(ctx context.Context, runID RunID) (map[string]StateEntry, error)
+
+	// DeleteState removes all state entries for a run.
+	DeleteState(ctx context.Context, runID RunID) error
 
 	// ListRuns returns runs matching the given filter.
 	ListRuns(ctx context.Context, filter RunFilter) ([]*RunState, error)
@@ -34,15 +38,17 @@ type Persistence interface {
 
 // RunState represents the persisted state of a workflow execution.
 type RunState struct {
-	RunID      RunID             `json:"run_id"`
-	WorkflowID string           `json:"workflow_id"`
-	Status     Status            `json:"status"`
-	CurrentStep string           `json:"current_step"`
-	StepStates map[string]Status `json:"step_states"`
-	BailReason string            `json:"bail_reason,omitempty"`
-	SuspendData map[string]any   `json:"suspend_data,omitempty"`
-	CreatedAt  time.Time         `json:"created_at"`
-	UpdatedAt  time.Time         `json:"updated_at"`
+	RunID       RunID             `json:"run_id"`
+	WorkflowID  string            `json:"workflow_id"`
+	Status      Status            `json:"status"`
+	CurrentStep string            `json:"current_step"`
+	StepStates  map[string]Status `json:"step_states"`
+	BailReason  string            `json:"bail_reason,omitempty"`
+	SuspendData map[string]any    `json:"suspend_data,omitempty"`
+	WakeAt      time.Time         `json:"wake_at,omitempty"`
+	Mutations   []Mutation        `json:"mutations,omitempty"`
+	CreatedAt   time.Time         `json:"created_at"`
+	UpdatedAt   time.Time         `json:"updated_at"`
 }
 
 // RunFilter specifies criteria for listing runs.
@@ -57,24 +63,30 @@ type RunFilter struct {
 
 // memoryPersistence is an in-memory implementation of Persistence.
 // Used as the default when no SQLite database is configured.
+// Thread-safe via RWMutex for concurrent workflow execution.
 type memoryPersistence struct {
-	runs        map[RunID]*RunState
-	checkpoints map[RunID][]byte
+	mu     sync.RWMutex
+	runs   map[RunID]*RunState
+	states map[RunID]map[string]StateEntry
 }
 
 func newMemoryPersistence() *memoryPersistence {
 	return &memoryPersistence{
-		runs:        make(map[RunID]*RunState),
-		checkpoints: make(map[RunID][]byte),
+		runs:   make(map[RunID]*RunState),
+		states: make(map[RunID]map[string]StateEntry),
 	}
 }
 
 func (m *memoryPersistence) SaveRun(_ context.Context, run *RunState) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.runs[run.RunID] = run
 	return nil
 }
 
 func (m *memoryPersistence) LoadRun(_ context.Context, runID RunID) (*RunState, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	run, ok := m.runs[runID]
 	if !ok {
 		return nil, &RunNotFoundError{RunID: runID}
@@ -83,6 +95,8 @@ func (m *memoryPersistence) LoadRun(_ context.Context, runID RunID) (*RunState, 
 }
 
 func (m *memoryPersistence) UpdateStepStatus(_ context.Context, runID RunID, stepID string, status Status) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	run, ok := m.runs[runID]
 	if !ok {
 		return &RunNotFoundError{RunID: runID}
@@ -95,20 +109,45 @@ func (m *memoryPersistence) UpdateStepStatus(_ context.Context, runID RunID, ste
 	return nil
 }
 
-func (m *memoryPersistence) SaveCheckpoint(_ context.Context, runID RunID, storeData []byte) error {
-	m.checkpoints[runID] = storeData
+func (m *memoryPersistence) SaveState(_ context.Context, runID RunID, entries map[string]StateEntry) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	existing, ok := m.states[runID]
+	if !ok {
+		existing = make(map[string]StateEntry, len(entries))
+		m.states[runID] = existing
+	}
+	for k, v := range entries {
+		existing[k] = v
+	}
 	return nil
 }
 
-func (m *memoryPersistence) LoadCheckpoint(_ context.Context, runID RunID) ([]byte, error) {
-	data, ok := m.checkpoints[runID]
+func (m *memoryPersistence) LoadState(_ context.Context, runID RunID) (map[string]StateEntry, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	entries, ok := m.states[runID]
 	if !ok {
-		return nil, &RunNotFoundError{RunID: runID}
+		return nil, nil
 	}
-	return data, nil
+	// Return a copy
+	out := make(map[string]StateEntry, len(entries))
+	for k, v := range entries {
+		out[k] = v
+	}
+	return out, nil
+}
+
+func (m *memoryPersistence) DeleteState(_ context.Context, runID RunID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.states, runID)
+	return nil
 }
 
 func (m *memoryPersistence) ListRuns(_ context.Context, filter RunFilter) ([]*RunState, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	var results []*RunState
 	for _, run := range m.runs {
 		if filter.WorkflowID != "" && run.WorkflowID != filter.WorkflowID {

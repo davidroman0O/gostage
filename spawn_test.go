@@ -2,782 +2,391 @@ package gostage
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
-	"sync"
 	"testing"
 	"time"
-
-	"github.com/davidroman0O/gostage/store"
-	"github.com/stretchr/testify/assert"
 )
 
-// BrokerLogger is a gostage.Logger implementation that sends log messages
-// over the communication broker instead of writing to the console.
-type BrokerLogger struct {
-	broker *RunnerBroker
-}
-
-// NewBrokerLogger creates a logger that sends messages via the given broker.
-func NewBrokerLogger(broker *RunnerBroker) *BrokerLogger {
-	return &BrokerLogger{broker: broker}
-}
-
-func (l *BrokerLogger) send(level, format string, args ...interface{}) {
-	payload := map[string]string{
-		"level":   level,
-		"message": fmt.Sprintf(format, args...),
-	}
-	// We ignore the error here for simplicity in a test logger.
-	// A production implementation should handle this more robustly.
-	_ = l.broker.Send(MessageTypeLog, payload)
-}
-
-func (l *BrokerLogger) Debug(format string, args ...interface{}) { l.send("debug", format, args...) }
-func (l *BrokerLogger) Info(format string, args ...interface{})  { l.send("info", format, args...) }
-func (l *BrokerLogger) Warn(format string, args ...interface{})  { l.send("warn", format, args...) }
-func (l *BrokerLogger) Error(format string, args ...interface{}) { l.send("error", format, args...) }
-
-// This TestMain function is the key to testing the spawn functionality.
-// It allows the test binary to be re-executed in a "child" mode.
-// FIXED: Now handles both --gostage-child flag (production) and environment variable (legacy test support)
+// TestMain handles dual-mode execution: normal test runner OR child process.
+// When the test binary is spawned by gostage as a child, it enters HandleChild.
 func TestMain(m *testing.M) {
-	// Check for child process mode using command line arguments (production approach)
-	if len(os.Args) > 1 && os.Args[1] == "--gostage-child" {
-		childMain()
+	if IsChild() {
+		ResetTaskRegistry()
+		registerSpawnTestTasks()
+		HandleChild()
+		// HandleChild calls os.Exit — unreachable
 		return
 	}
-
-	// Legacy support: If this env var is set, we run the special child process main func.
-	// This ensures backward compatibility with existing tests
-	if os.Getenv("GOSTAGE_EXEC_CHILD") == "1" {
-		childMain()
-		return
-	}
-
-	// Otherwise, run the tests as normal.
 	os.Exit(m.Run())
 }
 
-// childMain is the entrypoint for the spawned child process.
-// It sets up a runner, reads a workflow definition from stdin, executes it,
-// and communicates results back to the parent via stdout.
-func childMain() {
-	// Register the action that the child process will need to create.
-	registerSpawnTestActions()
+// registerSpawnTestTasks registers the tasks that child processes need.
+func registerSpawnTestTasks() {
+	Task("spawn.echo", func(ctx *Ctx) error {
+		// Read the ForEach item, write it to a result key
+		item := Item[string](ctx)
+		idx := ItemIndex(ctx)
+		Set(ctx, fmt.Sprintf("result_%d", idx), item)
+		Set(ctx, "child_ran", true)
+		return nil
+	})
 
-	// ✨ NEW SEAMLESS API - automatic gRPC setup and logger creation
-	childRunner, logger, err := NewChildRunner()
+	Task("spawn.add", func(ctx *Ctx) error {
+		item := Item[float64](ctx)
+		idx := ItemIndex(ctx)
+		Set(ctx, fmt.Sprintf("sum_%d", idx), item*2)
+		return nil
+	})
+
+	Task("spawn.crash", func(ctx *Ctx) error {
+		return fmt.Errorf("intentional child crash")
+	})
+
+	Task("spawn.send", func(ctx *Ctx) error {
+		item := Item[string](ctx)
+		Send(ctx, "progress", P{"track": item, "pct": 100})
+		Set(ctx, "sent", true)
+		return nil
+	})
+
+	Task("spawn.slow", func(ctx *Ctx) error {
+		time.Sleep(100 * time.Millisecond)
+		Set(ctx, "slow_done", true)
+		return nil
+	})
+}
+
+func TestIsChild(t *testing.T) {
+	// Current process should NOT be a child (running as test)
+	// IsChild checks os.Args for --gostage-child
+	if IsChild() {
+		t.Fatal("test process should not be detected as child")
+	}
+}
+
+func TestStoreSerializationRoundTrip(t *testing.T) {
+	s := newRunState("test", nil)
+	s.Set("name", "Alice")
+	s.Set("age", 30)
+	s.Set("scores", []int{90, 85, 92})
+
+	// Serialize
+	data, err := serializeStateForChild(s, "item-value", 7)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "child process failed to initialize: %v\n", err)
-		os.Exit(1)
+		t.Fatal(err)
 	}
 
-	// ✨ Direct method call - no GetTransport() needed!
-	workflowDef, err := childRunner.RequestWorkflowDefinitionFromParent(context.Background())
+	// Check item and index are included
+	if _, ok := data["__foreach_item"]; !ok {
+		t.Fatal("expected __foreach_item in serialized data")
+	}
+	if _, ok := data["__foreach_index"]; !ok {
+		t.Fatal("expected __foreach_index in serialized data")
+	}
+
+	// Deserialize
+	vals, err := deserializeStoreData(data)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to request workflow definition: %v\n", err)
-		os.Exit(1)
+		t.Fatal(err)
 	}
 
-	// Reconstruct the workflow from the definition.
-	wf, err := NewWorkflowFromDef(workflowDef)
+	if vals["name"] != "Alice" {
+		t.Fatalf("expected Alice, got %v", vals["name"])
+	}
+	// JSON round-trip: int becomes float64
+	if vals["age"] != float64(30) {
+		t.Fatalf("expected 30, got %v", vals["age"])
+	}
+	if vals["__foreach_item"] != "item-value" {
+		t.Fatalf("expected item-value, got %v", vals["__foreach_item"])
+	}
+	if vals["__foreach_index"] != float64(7) {
+		t.Fatalf("expected 7, got %v", vals["__foreach_index"])
+	}
+}
+
+func TestSpawnServer_StartStop(t *testing.T) {
+	ss, err := newSpawnServer(nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "child process failed to create workflow from def: %v\n", err)
-		os.Exit(1)
+		t.Fatal(err)
 	}
+	defer ss.stop()
 
-	// Execute the reconstructed workflow.
-	// Using the returned logger ensures all logs are sent to parent via gRPC.
-	if err := childRunner.Execute(context.Background(), wf, logger); err != nil {
-		// Errors here will be caught by the parent's cmd.Wait().
-		// We could also send an explicit error message.
-		fmt.Fprintf(os.Stderr, "child workflow execution failed: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Send the final store state back to the parent
-	if wf.Store != nil {
-		finalStore := wf.Store.ExportAll()
-		if err := childRunner.Broker.Send(MessageTypeFinalStore, finalStore); err != nil {
-			fmt.Fprintf(os.Stderr, "child process failed to send final store: %v\n", err)
-			// Don't exit on this error as the workflow execution was successful
-		}
-	}
-
-	// Close the broker to clean up connections
-	childRunner.Close()
-
-	// Exit successfully.
-	os.Exit(0)
-}
-
-// --- Action Definitions for Testing ---
-
-const (
-	spawnTestActionID     = "spawn-test-action"
-	errorTestActionID     = "error-test-action"
-	storeModifierActionID = "store-modifier-action"
-	panicTestActionID     = "panic-test-action"
-	slowTestActionID      = "slow-test-action"
-)
-
-// SpawnTestAction is a simple action that sends messages back to the parent.
-type SpawnTestAction struct{ BaseAction }
-
-func (a *SpawnTestAction) Execute(ctx *ActionContext) error {
-	ctx.Logger.Info("SpawnTestAction is executing.")
-	// Send multiple store updates to prove the channel stays open.
-	ctx.Send(MessageTypeStorePut, map[string]interface{}{"key": "item1", "value": "value1"})
-	ctx.Send(MessageTypeStorePut, map[string]interface{}{"key": "item2", "value": 42})
-	ctx.Logger.Info("SpawnTestAction has finished.")
-	return nil
-}
-
-// StoreModifierAction modifies the workflow store directly and also sends IPC messages
-type StoreModifierAction struct{ BaseAction }
-
-func (a *StoreModifierAction) Execute(ctx *ActionContext) error {
-	ctx.Logger.Info("StoreModifierAction is executing.")
-
-	// Put data directly into the workflow store (this will be in the final store)
-	ctx.Workflow.Store.Put("item1", "value1")
-	ctx.Workflow.Store.Put("item2", 42)
-
-	// Also send IPC messages like the original action
-	ctx.Send(MessageTypeStorePut, map[string]interface{}{"key": "item1", "value": "value1"})
-	ctx.Send(MessageTypeStorePut, map[string]interface{}{"key": "item2", "value": 42})
-
-	ctx.Logger.Info("StoreModifierAction has finished.")
-	return nil
-}
-
-// ErrorTestAction is an action that always returns an error to test failure propagation.
-type ErrorTestAction struct{ BaseAction }
-
-func (a *ErrorTestAction) Execute(ctx *ActionContext) error {
-	ctx.Logger.Error("This action is designed to fail.")
-	return fmt.Errorf("intentional action failure")
-}
-
-// PanicTestAction is an action that panics to test panic recovery.
-type PanicTestAction struct{ BaseAction }
-
-func (a *PanicTestAction) Execute(ctx *ActionContext) error {
-	ctx.Logger.Info("PanicTestAction is about to panic.")
-	panic("intentional panic for testing")
-}
-
-// SlowTestAction is an action that takes a long time to test timeout scenarios.
-type SlowTestAction struct{ BaseAction }
-
-func (a *SlowTestAction) Execute(ctx *ActionContext) error {
-	ctx.Logger.Info("SlowTestAction is starting long operation.")
-	// Sleep for a long time to test timeout handling
-	select {
-	case <-ctx.GoContext.Done():
-		ctx.Logger.Info("SlowTestAction was cancelled.")
-		return ctx.GoContext.Err()
-	case <-time.After(10 * time.Second):
-		ctx.Logger.Info("SlowTestAction completed.")
-		return nil
+	if ss.port == 0 {
+		t.Fatal("expected non-zero port")
 	}
 }
 
-var registerOnce sync.Once
-
-// registerSpawnTestActions registers the actions used in the test.
-func registerSpawnTestActions() {
-	registerOnce.Do(func() {
-		RegisterAction(spawnTestActionID, func() Action {
-			return &SpawnTestAction{BaseAction: NewBaseAction(spawnTestActionID, "A test action for spawning.")}
-		})
-		RegisterAction(errorTestActionID, func() Action {
-			return &ErrorTestAction{BaseAction: NewBaseAction(errorTestActionID, "An action that fails.")}
-		})
-		RegisterAction(storeModifierActionID, func() Action {
-			return &StoreModifierAction{BaseAction: NewBaseAction(storeModifierActionID, "An action that modifies the store.")}
-		})
-		RegisterAction(panicTestActionID, func() Action {
-			return &PanicTestAction{BaseAction: NewBaseAction(panicTestActionID, "An action that panics.")}
-		})
-		RegisterAction(slowTestActionID, func() Action {
-			return &SlowTestAction{BaseAction: NewBaseAction(slowTestActionID, "An action that takes a long time.")}
-		})
-	})
-}
-
-// --- Parent Process Tests ---
-
-// TestSpawnWorkflow_Success tests the end-to-end process of spawning a child,
-// executing a workflow, and receiving multiple messages back.
-func TestSpawnWorkflow_Success(t *testing.T) {
-	// Register the action that the child process will need to create.
-	registerSpawnTestActions()
-
-	// 1. Set up the parent's runner, a store for results, and slices for messages.
-	parentRunner := NewRunner()
-	parentStore := store.NewKVStore()
-	var actionLogs []string // Only logs from our test action
-	var allLogs []string    // All log messages for verification
-
-	// 2. Register handlers on the parent's broker to process messages.
-	parentRunner.Broker.RegisterHandler(MessageTypeStorePut, func(msgType MessageType, payload json.RawMessage) error {
-		var data struct {
-			Key   string      `json:"key"`
-			Value interface{} `json:"value"`
-		}
-		if err := json.Unmarshal(payload, &data); err != nil {
-			return err
-		}
-		return parentStore.Put(data.Key, data.Value)
-	})
-	parentRunner.Broker.RegisterHandler(MessageTypeLog, func(msgType MessageType, payload json.RawMessage) error {
-		var logData struct{ Message string }
-		json.Unmarshal(payload, &logData)
-		allLogs = append(allLogs, logData.Message)
-
-		// Filter for logs from our specific action
-		if strings.Contains(logData.Message, "SpawnTestAction") {
-			actionLogs = append(actionLogs, logData.Message)
-		}
+func TestSpawn_SingleItem(t *testing.T) {
+	ResetTaskRegistry()
+	Task("spawn.echo", func(ctx *Ctx) error {
+		item := Item[string](ctx)
+		idx := ItemIndex(ctx)
+		Set(ctx, fmt.Sprintf("result_%d", idx), item)
+		Set(ctx, "child_ran", true)
 		return nil
 	})
 
-	// 3. Define the sub-workflow for the child to execute.
-	subWorkflowDef := SubWorkflowDef{
-		ID: "child-workflow",
-		Stages: []StageDef{{
-			ID: "child-stage-1",
-			Actions: []ActionDef{{
-				ID: spawnTestActionID, // This ID must be registered.
-			}},
-		}},
+	wf := NewWorkflow("spawn-single").
+		ForEach("items", Step("spawn.echo"), WithSpawn()).
+		Commit()
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer engine.Close()
 
-	// 4. Spawn the child process using the FIXED spawn method.
-	err := spawnTestProcess(context.Background(), parentRunner, subWorkflowDef)
-	assert.NoError(t, err, "Spawning child process should succeed")
-
-	// 5. Verify the parent's store was updated by all messages from the child.
-	val1, _ := store.Get[string](parentStore, "item1")
-	assert.Equal(t, "value1", val1, "Should receive first store update")
-
-	val2, _ := store.Get[float64](parentStore, "item2") // JSON unmarshals numbers as float64
-	assert.Equal(t, 42.0, val2, "Should receive second store update")
-
-	// 6. Verify we received the expected number of total logs (runner generates many internal logs)
-	assert.GreaterOrEqual(t, len(allLogs), 10, "Should have received multiple log messages from runner execution")
-
-	// 7. Verify we received the specific logs from our action
-	assert.Len(t, actionLogs, 2, "Should have received exactly 2 log messages from SpawnTestAction")
-	assert.Contains(t, actionLogs[0], "SpawnTestAction is executing.")
-	assert.Contains(t, actionLogs[1], "SpawnTestAction has finished.")
-}
-
-// TestSpawnWorkflow_WithError tests that errors in the child process are propagated to the parent.
-func TestSpawnWorkflow_WithError(t *testing.T) {
-	registerSpawnTestActions()
-
-	parentRunner := NewRunner()
-	var errorActionLogs []string
-
-	// We still want to see logs from the failing child.
-	parentRunner.Broker.RegisterHandler(MessageTypeLog, func(msgType MessageType, payload json.RawMessage) error {
-		var logData struct{ Message string }
-		json.Unmarshal(payload, &logData)
-
-		// Filter for logs from our specific error action
-		if strings.Contains(logData.Message, "This action is designed to fail") {
-			errorActionLogs = append(errorActionLogs, logData.Message)
-		}
-		return nil
-	})
-
-	subWorkflowDef := SubWorkflowDef{
-		ID: "failing-child-workflow",
-		Stages: []StageDef{{
-			ID: "failing-stage",
-			Actions: []ActionDef{{
-				ID: errorTestActionID, // This action is designed to fail.
-			}},
-		}},
-	}
-
-	// Spawn the child process and expect an error.
-	err := spawnTestProcess(context.Background(), parentRunner, subWorkflowDef)
-	assert.Error(t, err, "Spawning a failing workflow should return an error")
-	assert.Contains(t, err.Error(), "child process exited with error", "Error message should indicate child process failure")
-
-	// Verify we still received the log message that occurred before the error.
-	assert.Len(t, errorActionLogs, 1, "Should have received one log message from the failing action")
-	assert.Contains(t, errorActionLogs[0], "This action is designed to fail.")
-}
-
-// TestSpawnWorkflow_WithStoreHandling tests passing initial store and receiving final store
-func TestSpawnWorkflow_WithStoreHandling(t *testing.T) {
-	registerSpawnTestActions()
-
-	parentRunner := NewRunner()
-	var finalStoreFromChild map[string]interface{}
-
-	// Handler to capture the final store from child
-	parentRunner.Broker.RegisterHandler(MessageTypeFinalStore, func(msgType MessageType, payload json.RawMessage) error {
-		var storeData map[string]interface{}
-		if err := json.Unmarshal(payload, &storeData); err != nil {
-			return fmt.Errorf("failed to unmarshal final store: %w", err)
-		}
-		finalStoreFromChild = storeData
-		return nil
-	})
-
-	// Define initial store data to pass to child
-	initialStore := map[string]interface{}{
-		"parent_message": "Hello from parent",
-		"initial_count":  100,
-		"shared_data":    map[string]interface{}{"x": 1, "y": 2},
-	}
-
-	// Define sub-workflow that will use and modify the store
-	subWorkflowDef := SubWorkflowDef{
-		ID:           "store-test-workflow",
-		InitialStore: initialStore, // Pass the initial store directly in the definition
-		Stages: []StageDef{{
-			ID: "store-stage",
-			Actions: []ActionDef{{
-				ID: storeModifierActionID, // Use the action that actually modifies the store
-			}},
-		}},
-	}
-
-	// Use the same spawnTestProcess function as other tests
-	err := spawnTestProcess(context.Background(), parentRunner, subWorkflowDef)
-
-	// Verify spawn was successful
-	assert.NoError(t, err, "Spawn should succeed")
-
-	// Verify we received the final store via the handler
-	assert.NotNil(t, finalStoreFromChild, "Should capture final store via handler")
-
-	// Verify initial data was passed through
-	assert.Equal(t, "Hello from parent", finalStoreFromChild["parent_message"])
-	assert.Equal(t, 100.0, finalStoreFromChild["initial_count"]) // JSON unmarshals numbers as float64
-
-	// Verify the action added new data to the store
-	assert.Equal(t, "value1", finalStoreFromChild["item1"])
-	assert.Equal(t, 42.0, finalStoreFromChild["item2"])
-
-	// The shared_data should still be there
-	sharedData, ok := finalStoreFromChild["shared_data"].(map[string]interface{})
-	assert.True(t, ok, "shared_data should be preserved")
-	assert.Equal(t, 1.0, sharedData["x"])
-	assert.Equal(t, 2.0, sharedData["y"])
-}
-
-// spawnTestProcess is a helper that NOW uses the --gostage-child flag approach
-// instead of environment variables, making it consistent with production code
-func spawnTestProcess(ctx context.Context, r *Runner, def SubWorkflowDef) error {
-	return spawnWorkflowWithTransport(ctx, r, def, nil) // Use JSON transport by default
-}
-
-// spawnWorkflowWithTransport spawns a child process with the specified transport
-// Now uses pure gRPC approach without stdin/stdout pipes
-func spawnWorkflowWithTransport(ctx context.Context, r *Runner, def SubWorkflowDef, grpcTransport *GRPCTransport) error {
-	// Use the runner's existing executeSpawn method for consistency
-	return r.executeSpawn(ctx, def)
-}
-
-// TestSpawnWorkflow_WithPanic tests that panics in child processes are handled gracefully
-func TestSpawnWorkflow_WithPanic(t *testing.T) {
-	registerSpawnTestActions()
-
-	parentRunner := NewRunner()
-	var panicLogs []string
-
-	// Capture logs to verify the panic was logged
-	parentRunner.Broker.RegisterHandler(MessageTypeLog, func(msgType MessageType, payload json.RawMessage) error {
-		var logData struct{ Message string }
-		json.Unmarshal(payload, &logData)
-
-		if strings.Contains(logData.Message, "PanicTestAction") {
-			panicLogs = append(panicLogs, logData.Message)
-		}
-		return nil
-	})
-
-	subWorkflowDef := SubWorkflowDef{
-		ID: "panicking-child-workflow",
-		Stages: []StageDef{{
-			ID: "panic-stage",
-			Actions: []ActionDef{{
-				ID: panicTestActionID,
-			}},
-		}},
-	}
-
-	// Spawn the child process and expect an error due to panic
-	err := spawnTestProcess(context.Background(), parentRunner, subWorkflowDef)
-	assert.Error(t, err, "Spawning a panicking workflow should return an error")
-	assert.Contains(t, err.Error(), "child process exited with error", "Error message should indicate child process failure")
-
-	// Verify we received the log message before the panic
-	assert.GreaterOrEqual(t, len(panicLogs), 1, "Should have received at least one log message from the panicking action")
-	assert.Contains(t, panicLogs[0], "PanicTestAction is about to panic.")
-}
-
-// TestSpawnWorkflow_WithTimeout tests timeout handling for slow child processes
-func TestSpawnWorkflow_WithTimeout(t *testing.T) {
-	registerSpawnTestActions()
-
-	parentRunner := NewRunner()
-	var slowLogs []string
-
-	// Capture logs to verify the action started
-	parentRunner.Broker.RegisterHandler(MessageTypeLog, func(msgType MessageType, payload json.RawMessage) error {
-		var logData struct{ Message string }
-		json.Unmarshal(payload, &logData)
-
-		if strings.Contains(logData.Message, "SlowTestAction") {
-			slowLogs = append(slowLogs, logData.Message)
-		}
-		return nil
-	})
-
-	subWorkflowDef := SubWorkflowDef{
-		ID: "slow-child-workflow",
-		Stages: []StageDef{{
-			ID: "slow-stage",
-			Actions: []ActionDef{{
-				ID: slowTestActionID,
-			}},
-		}},
-	}
-
-	// Create a context with a short timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Spawn the child process with timeout
-	err := spawnTestProcess(ctx, parentRunner, subWorkflowDef)
-	assert.Error(t, err, "Spawning a slow workflow with timeout should return an error")
-
-	// The error could be either a timeout or the child process being killed
-	// Both are acceptable outcomes for this test
-	assert.True(t,
-		strings.Contains(err.Error(), "context deadline exceeded") ||
-			strings.Contains(err.Error(), "child process exited with error") ||
-			strings.Contains(err.Error(), "signal: killed"),
-		"Error should indicate timeout or process termination")
-
-	// Verify the action at least started
-	assert.GreaterOrEqual(t, len(slowLogs), 1, "Should have received at least one log message from the slow action")
-	assert.Contains(t, slowLogs[0], "SlowTestAction is starting long operation.")
-}
-
-// TestSpawnWorkflow_WithMalformedDefinition tests handling of invalid workflow definitions
-func TestSpawnWorkflow_WithMalformedDefinition(t *testing.T) {
-	registerSpawnTestActions()
-
-	parentRunner := NewRunner()
-
-	// Create a workflow definition with a non-existent action
-	subWorkflowDef := SubWorkflowDef{
-		ID: "malformed-workflow",
-		Stages: []StageDef{{
-			ID: "malformed-stage",
-			Actions: []ActionDef{{
-				ID: "non-existent-action-id", // This action doesn't exist
-			}},
-		}},
-	}
-
-	// Spawn the child process and expect an error
-	err := spawnTestProcess(context.Background(), parentRunner, subWorkflowDef)
-	assert.Error(t, err, "Spawning with malformed definition should return an error")
-	assert.Contains(t, err.Error(), "child process exited with error", "Error should indicate child process failure")
-}
-
-// TestSpawnWorkflow_WithEmptyWorkflow tests handling of empty workflow definitions
-func TestSpawnWorkflow_WithEmptyWorkflow(t *testing.T) {
-	registerSpawnTestActions()
-
-	parentRunner := NewRunner()
-
-	// Create an empty workflow definition
-	subWorkflowDef := SubWorkflowDef{
-		ID:     "empty-workflow",
-		Stages: []StageDef{}, // No stages
-	}
-
-	// Spawn the child process - this should fail since workflows need at least one stage
-	err := spawnTestProcess(context.Background(), parentRunner, subWorkflowDef)
-	assert.Error(t, err, "Spawning an empty workflow should return an error")
-	assert.Contains(t, err.Error(), "child process exited with error", "Error should indicate child process failure")
-}
-
-// TestSpawnWorkflow_WithMultipleFailures tests a workflow with multiple failing actions
-func TestSpawnWorkflow_WithMultipleFailures(t *testing.T) {
-	registerSpawnTestActions()
-
-	parentRunner := NewRunner()
-	var errorLogs []string
-
-	// Capture error logs
-	parentRunner.Broker.RegisterHandler(MessageTypeLog, func(msgType MessageType, payload json.RawMessage) error {
-		var logData struct{ Message string }
-		json.Unmarshal(payload, &logData)
-
-		if strings.Contains(logData.Message, "designed to fail") || strings.Contains(logData.Message, "about to panic") {
-			errorLogs = append(errorLogs, logData.Message)
-		}
-		return nil
-	})
-
-	subWorkflowDef := SubWorkflowDef{
-		ID: "multi-failure-workflow",
-		Stages: []StageDef{{
-			ID: "failure-stage",
-			Actions: []ActionDef{
-				{ID: errorTestActionID}, // This will fail first
-				{ID: panicTestActionID}, // This won't be reached due to first failure
-			},
-		}},
-	}
-
-	// Spawn the child process and expect an error from the first failing action
-	err := spawnTestProcess(context.Background(), parentRunner, subWorkflowDef)
-	assert.Error(t, err, "Spawning a workflow with multiple failures should return an error")
-	assert.Contains(t, err.Error(), "child process exited with error", "Error should indicate child process failure")
-
-	// Should only see the first error, not the panic (since execution stops at first failure)
-	assert.GreaterOrEqual(t, len(errorLogs), 1, "Should have received at least one error log")
-	assert.Contains(t, errorLogs[0], "designed to fail")
-
-	// Should NOT see the panic message since execution should stop at first failure
-	panicFound := false
-	for _, log := range errorLogs {
-		if strings.Contains(log, "about to panic") {
-			panicFound = true
-			break
-		}
-	}
-	assert.False(t, panicFound, "Should not reach the panic action due to earlier failure")
-}
-
-// --- Clean gRPC Transport Tests ---
-
-// TestSpawnWorkflow_Success_GRPC tests the same workflow but with gRPC transport
-func TestSpawnWorkflow_Success_GRPC(t *testing.T) {
-	registerSpawnTestActions()
-
-	// Create a gRPC transport for the parent
-	grpcTransport, err := NewGRPCTransport("localhost", 50070)
+	result, err := engine.RunSync(ctx, wf, P{"items": []string{"hello"}})
 	if err != nil {
-		t.Fatalf("Failed to create gRPC transport: %v", err)
+		t.Fatal(err)
 	}
-	defer grpcTransport.Close()
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s (error: %v)", result.Status, result.Error)
+	}
+}
 
-	// Create parent runner with gRPC transport
-	parentRunner := NewRunnerWithBroker(NewRunnerBrokerWithTransport(grpcTransport))
-	parentStore := store.NewKVStore()
-	var actionLogs []string
-	var allLogs []string
-
-	// Register the same handlers as the JSON test
-	parentRunner.Broker.RegisterHandler(MessageTypeStorePut, func(msgType MessageType, payload json.RawMessage) error {
-		var data struct {
-			Key   string      `json:"key"`
-			Value interface{} `json:"value"`
-		}
-		if err := json.Unmarshal(payload, &data); err != nil {
-			return err
-		}
-		return parentStore.Put(data.Key, data.Value)
-	})
-	parentRunner.Broker.RegisterHandler(MessageTypeLog, func(msgType MessageType, payload json.RawMessage) error {
-		var logData struct{ Message string }
-		json.Unmarshal(payload, &logData)
-		allLogs = append(allLogs, logData.Message)
-
-		if strings.Contains(logData.Message, "SpawnTestAction") {
-			actionLogs = append(actionLogs, logData.Message)
-		}
+func TestSpawn_ConcurrentItems(t *testing.T) {
+	ResetTaskRegistry()
+	Task("spawn.add", func(ctx *Ctx) error {
+		item := Item[float64](ctx)
+		idx := ItemIndex(ctx)
+		Set(ctx, fmt.Sprintf("sum_%d", idx), item*2)
 		return nil
 	})
 
-	// Use the same workflow definition as the JSON test
-	subWorkflowDef := SubWorkflowDef{
-		ID: "grpc-child-workflow",
-		Stages: []StageDef{{
-			ID: "grpc-child-stage-1",
-			Actions: []ActionDef{{
-				ID: spawnTestActionID,
-			}},
-		}},
-	}
+	wf := NewWorkflow("spawn-concurrent").
+		ForEach("numbers", Step("spawn.add"), WithConcurrency(3), WithSpawn()).
+		Commit()
 
-	// Spawn child process with gRPC transport (clean, no env vars!)
-	err = spawnWorkflowWithTransport(context.Background(), parentRunner, subWorkflowDef, grpcTransport)
-	assert.NoError(t, err, "Spawning child process with gRPC should succeed")
-
-	// Verify the parent's store was updated exactly like JSON transport
-	val1, _ := store.Get[string](parentStore, "item1")
-	assert.Equal(t, "value1", val1, "Should receive first store update via gRPC")
-
-	val2, _ := store.Get[float64](parentStore, "item2")
-	assert.Equal(t, 42.0, val2, "Should receive second store update via gRPC")
-
-	// Verify logs work the same as JSON transport
-	assert.GreaterOrEqual(t, len(allLogs), 10, "Should have received multiple log messages via gRPC")
-	assert.Len(t, actionLogs, 2, "Should have received exactly 2 log messages from SpawnTestAction via gRPC")
-	assert.Contains(t, actionLogs[0], "SpawnTestAction is executing.")
-	assert.Contains(t, actionLogs[1], "SpawnTestAction has finished.")
-
-	t.Logf("✅ gRPC spawn test completed successfully")
-	t.Logf("📤 Total logs received: %d", len(allLogs))
-	t.Logf("📤 Action logs received: %d", len(actionLogs))
-}
-
-// TestSpawnWorkflow_WithStoreHandling_GRPC tests store handling with gRPC
-func TestSpawnWorkflow_WithStoreHandling_GRPC(t *testing.T) {
-	registerSpawnTestActions()
-
-	grpcTransport, err := NewGRPCTransport("localhost", 50071)
+	engine, err := New()
 	if err != nil {
-		t.Fatalf("Failed to create gRPC transport: %v", err)
+		t.Fatal(err)
 	}
-	defer grpcTransport.Close()
+	defer engine.Close()
 
-	parentRunner := NewRunnerWithBroker(NewRunnerBrokerWithTransport(grpcTransport))
-	var finalStoreFromChild map[string]interface{}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	// Handler to capture the final store from child
-	parentRunner.Broker.RegisterHandler(MessageTypeFinalStore, func(msgType MessageType, payload json.RawMessage) error {
-		var storeData map[string]interface{}
-		if err := json.Unmarshal(payload, &storeData); err != nil {
-			return fmt.Errorf("failed to unmarshal final store: %w", err)
-		}
-		finalStoreFromChild = storeData
+	result, err := engine.RunSync(ctx, wf, P{"numbers": []float64{1, 2, 3, 4}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s (error: %v)", result.Status, result.Error)
+	}
+}
+
+func TestSpawn_ChildError(t *testing.T) {
+	ResetTaskRegistry()
+	Task("spawn.crash", func(ctx *Ctx) error {
+		return fmt.Errorf("intentional child crash")
+	})
+
+	wf := NewWorkflow("spawn-crash").
+		ForEach("items", Step("spawn.crash"), WithSpawn()).
+		Commit()
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := engine.RunSync(ctx, wf, P{"items": []string{"fail"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Failed {
+		t.Fatalf("expected Failed, got %s", result.Status)
+	}
+}
+
+func TestSpawn_ContextCancellation(t *testing.T) {
+	ResetTaskRegistry()
+	Task("spawn.slow", func(ctx *Ctx) error {
+		time.Sleep(100 * time.Millisecond)
+		Set(ctx, "slow_done", true)
 		return nil
 	})
 
-	// Define initial store data - same as JSON test
-	initialStore := map[string]interface{}{
-		"parent_message": "Hello from parent via gRPC",
-		"initial_count":  200,
-		"grpc_data":      map[string]interface{}{"x": 10, "y": 20},
+	wf := NewWorkflow("spawn-cancel").
+		ForEach("items", Step("spawn.slow"), WithSpawn()).
+		Commit()
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer engine.Close()
 
-	subWorkflowDef := SubWorkflowDef{
-		ID:           "grpc-store-test-workflow",
-		InitialStore: initialStore,
-		Stages: []StageDef{{
-			ID: "grpc-store-stage",
-			Actions: []ActionDef{{
-				ID: storeModifierActionID,
-			}},
-		}},
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	// Cancel almost immediately
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	result, err := engine.RunSync(ctx, wf, P{"items": []string{"a", "b", "c", "d", "e", "f", "g", "h"}})
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	// Spawn with gRPC transport - clean and idiomatic
-	err = spawnWorkflowWithTransport(context.Background(), parentRunner, subWorkflowDef, grpcTransport)
-	assert.NoError(t, err, "gRPC spawn should succeed")
-
-	// Verify exact same behavior as JSON transport
-	assert.NotNil(t, finalStoreFromChild, "Should capture final store via gRPC handler")
-	assert.Equal(t, "Hello from parent via gRPC", finalStoreFromChild["parent_message"])
-	assert.Equal(t, 200.0, finalStoreFromChild["initial_count"])
-	assert.Equal(t, "value1", finalStoreFromChild["item1"])
-	assert.Equal(t, 42.0, finalStoreFromChild["item2"])
-
-	grpcData, ok := finalStoreFromChild["grpc_data"].(map[string]interface{})
-	assert.True(t, ok, "grpc_data should be preserved")
-	assert.Equal(t, 10.0, grpcData["x"])
-	assert.Equal(t, 20.0, grpcData["y"])
-
-	t.Logf("✅ gRPC store handling test completed successfully")
+	// Should be Cancelled or Failed due to context cancellation
+	if result.Status != Cancelled && result.Status != Failed {
+		t.Fatalf("expected Cancelled or Failed, got %s", result.Status)
+	}
 }
 
-// TestSpawnWorkflow_BothTransports_SideBySide verifies both transports work identically
-func TestSpawnWorkflow_BothTransports_SideBySide(t *testing.T) {
-	registerSpawnTestActions()
+func TestSpawn_SendIPC(t *testing.T) {
+	ResetTaskRegistry()
+	Task("spawn.send", func(ctx *Ctx) error {
+		item := Item[string](ctx)
+		Send(ctx, "progress", P{"track": item, "pct": 100})
+		Set(ctx, "sent", true)
+		return nil
+	})
 
-	// Test both transports with the same workflow
-	subWorkflowDef := SubWorkflowDef{
-		ID: "comparison-workflow",
-		Stages: []StageDef{{
-			ID:      "comparison-stage",
-			Actions: []ActionDef{{ID: spawnTestActionID}},
-		}},
+	wf := NewWorkflow("spawn-ipc").
+		ForEach("items", Step("spawn.send"), WithSpawn()).
+		Commit()
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := engine.RunSync(ctx, wf, P{"items": []string{"track1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s (error: %v)", result.Status, result.Error)
+	}
+}
+
+func TestSpawn_ForEachItemAccess(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("spawn.echo", func(ctx *Ctx) error {
+		item := Item[string](ctx)
+		idx := ItemIndex(ctx)
+		Set(ctx, fmt.Sprintf("result_%d", idx), item)
+		Set(ctx, "child_ran", true)
+		return nil
+	})
+
+	wf := NewWorkflow("spawn-foreach-item").
+		ForEach("items", Step("spawn.echo"), WithConcurrency(2), WithSpawn()).
+		Commit()
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := engine.RunSync(ctx, wf, P{"items": []string{"alpha", "beta", "gamma"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s (error: %v)", result.Status, result.Error)
+	}
+}
+
+func TestSpawn_EndToEnd(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("spawn.prepare", func(ctx *Ctx) error {
+		Set(ctx, "items", []string{"one", "two", "three"})
+		Set(ctx, "prepared", true)
+		return nil
+	})
+
+	Task("spawn.echo", func(ctx *Ctx) error {
+		item := Item[string](ctx)
+		idx := ItemIndex(ctx)
+		Set(ctx, fmt.Sprintf("result_%d", idx), item)
+		Set(ctx, "child_ran", true)
+		return nil
+	})
+
+	Task("spawn.finalize", func(ctx *Ctx) error {
+		Set(ctx, "finalized", true)
+		return nil
+	})
+
+	wf := NewWorkflow("spawn-e2e").
+		Step("spawn.prepare").
+		ForEach("items", Step("spawn.echo"), WithConcurrency(2), WithSpawn()).
+		Step("spawn.finalize").
+		Commit()
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := engine.RunSync(ctx, wf, P{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s (error: %v)", result.Status, result.Error)
 	}
 
-	// JSON Test
-	t.Run("JSON_Transport", func(t *testing.T) {
-		parentRunner := NewRunner()
-		parentStore := store.NewKVStore()
-		var logs []string
+	// Verify the prepare and finalize steps ran
+	if result.Store["prepared"] != true {
+		t.Fatal("expected prepared to be true")
+	}
+	if result.Store["finalized"] != true {
+		t.Fatal("expected finalized to be true")
+	}
+}
 
-		parentRunner.Broker.RegisterHandler(MessageTypeStorePut, func(msgType MessageType, payload json.RawMessage) error {
-			var data struct {
-				Key   string      `json:"key"`
-				Value interface{} `json:"value"`
-			}
-			json.Unmarshal(payload, &data)
-			return parentStore.Put(data.Key, data.Value)
-		})
-		parentRunner.Broker.RegisterHandler(MessageTypeLog, func(msgType MessageType, payload json.RawMessage) error {
-			var logData struct{ Message string }
-			json.Unmarshal(payload, &logData)
-			if strings.Contains(logData.Message, "SpawnTestAction") {
-				logs = append(logs, logData.Message)
-			}
-			return nil
-		})
-
-		err := spawnTestProcess(context.Background(), parentRunner, subWorkflowDef)
-		assert.NoError(t, err, "JSON transport should work")
-
-		val1, _ := store.Get[string](parentStore, "item1")
-		assert.Equal(t, "value1", val1)
-		assert.Len(t, logs, 2)
+func TestSpawn_EmptyCollection(t *testing.T) {
+	ResetTaskRegistry()
+	Task("spawn.echo", func(ctx *Ctx) error {
+		Set(ctx, "child_ran", true)
+		return nil
 	})
 
-	// gRPC Test - should behave identically
-	t.Run("GRPC_Transport", func(t *testing.T) {
-		grpcTransport, err := NewGRPCTransport("localhost", 50072)
-		assert.NoError(t, err)
-		defer grpcTransport.Close()
+	wf := NewWorkflow("spawn-empty").
+		ForEach("items", Step("spawn.echo"), WithSpawn()).
+		Commit()
 
-		parentRunner := NewRunnerWithBroker(NewRunnerBrokerWithTransport(grpcTransport))
-		parentStore := store.NewKVStore()
-		var logs []string
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
 
-		parentRunner.Broker.RegisterHandler(MessageTypeStorePut, func(msgType MessageType, payload json.RawMessage) error {
-			var data struct {
-				Key   string      `json:"key"`
-				Value interface{} `json:"value"`
-			}
-			json.Unmarshal(payload, &data)
-			return parentStore.Put(data.Key, data.Value)
-		})
-		parentRunner.Broker.RegisterHandler(MessageTypeLog, func(msgType MessageType, payload json.RawMessage) error {
-			var logData struct{ Message string }
-			json.Unmarshal(payload, &logData)
-			if strings.Contains(logData.Message, "SpawnTestAction") {
-				logs = append(logs, logData.Message)
-			}
-			return nil
-		})
-
-		err = spawnWorkflowWithTransport(context.Background(), parentRunner, subWorkflowDef, grpcTransport)
-		assert.NoError(t, err, "gRPC transport should work")
-
-		val1, _ := store.Get[string](parentStore, "item1")
-		assert.Equal(t, "value1", val1)
-		assert.Len(t, logs, 2)
-	})
-
-	t.Logf("✅ Both transport modes work identically!")
+	ctx := context.Background()
+	result, err := engine.RunSync(ctx, wf, P{"items": []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
 }

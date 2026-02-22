@@ -2,68 +2,96 @@ package gostage
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func TestEngine_RunSync_Basic(t *testing.T) {
+func TestEngine_RunSync_Simple(t *testing.T) {
 	ResetTaskRegistry()
 
-	Task("greet", func(ctx *Ctx) error {
-		name := GetOr[string](ctx, "user.name", "World")
+	Task("e.greet", func(ctx *Ctx) error {
+		name := GetOr[string](ctx, "name", "World")
 		Set(ctx, "greeting", "Hello, "+name+"!")
 		return nil
 	})
 
-	wf := NewWorkflowBuilder("hello").
-		Step("greet").
-		Commit()
-
+	wf := NewWorkflow("greet").Step("e.greet").Commit()
 	engine, err := New()
 	if err != nil {
-		t.Fatalf("failed to create engine: %v", err)
+		t.Fatal(err)
 	}
 	defer engine.Close()
 
-	result, err := engine.RunSync(context.Background(), wf, P{"user.name": "David"})
+	result, err := engine.RunSync(context.Background(), wf, P{"name": "Alice"})
 	if err != nil {
-		t.Fatalf("RunSync failed: %v", err)
+		t.Fatal(err)
 	}
 
-	if result.Status != StatusCompletedRun {
+	if result.Status != Completed {
 		t.Fatalf("expected Completed, got %s", result.Status)
 	}
-	if result.Error != nil {
-		t.Fatalf("expected no error, got: %v", result.Error)
+	if result.Store["greeting"] != "Hello, Alice!" {
+		t.Fatalf("expected 'Hello, Alice!', got %v", result.Store["greeting"])
+	}
+}
+
+func TestEngine_RunSync_MultiStep(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("e.step1", func(ctx *Ctx) error {
+		Set(ctx, "step1", true)
+		return nil
+	})
+	Task("e.step2", func(ctx *Ctx) error {
+		Set(ctx, "step2", true)
+		return nil
+	})
+	Task("e.step3", func(ctx *Ctx) error {
+		s1 := Get[bool](ctx, "step1")
+		s2 := Get[bool](ctx, "step2")
+		Set(ctx, "all_done", s1 && s2)
+		return nil
+	})
+
+	wf := NewWorkflow("multi").
+		Step("e.step1").
+		Step("e.step2").
+		Step("e.step3").
+		Commit()
+
+	engine, _ := New()
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, nil)
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+	if result.Store["all_done"] != true {
+		t.Fatal("expected all_done to be true")
 	}
 }
 
 func TestEngine_RunSync_Bail(t *testing.T) {
 	ResetTaskRegistry()
 
-	Task("check.age", func(ctx *Ctx) error {
-		if Get[int](ctx, "age") < 18 {
+	Task("e.check_age", func(ctx *Ctx) error {
+		age := Get[int](ctx, "age")
+		if age < 18 {
 			return Bail(ctx, "Must be 18+")
 		}
 		return nil
 	})
 
-	wf := NewWorkflowBuilder("age-check").
-		Step("check.age").
-		Commit()
-
-	engine, err := New()
-	if err != nil {
-		t.Fatalf("failed to create engine: %v", err)
-	}
+	wf := NewWorkflow("bail").Step("e.check_age").Commit()
+	engine, _ := New()
 	defer engine.Close()
 
-	result, err := engine.RunSync(context.Background(), wf, P{"age": 16})
-	if err != nil {
-		t.Fatalf("RunSync failed: %v", err)
-	}
-
-	if result.Status != StatusBailed {
+	result, _ := engine.RunSync(context.Background(), wf, P{"age": 16})
+	if result.Status != Bailed {
 		t.Fatalf("expected Bailed, got %s", result.Status)
 	}
 	if result.BailReason != "Must be 18+" {
@@ -71,177 +99,778 @@ func TestEngine_RunSync_Bail(t *testing.T) {
 	}
 }
 
-func TestEngine_RunSync_Failed(t *testing.T) {
+func TestEngine_RunSync_Suspend(t *testing.T) {
 	ResetTaskRegistry()
 
-	Task("fail", func(ctx *Ctx) error {
-		return context.DeadlineExceeded
-	})
-
-	wf := NewWorkflowBuilder("fail-test").
-		Step("fail").
-		Commit()
-
-	engine, err := New()
-	if err != nil {
-		t.Fatalf("failed to create engine: %v", err)
-	}
-	defer engine.Close()
-
-	result, err := engine.RunSync(context.Background(), wf, nil)
-	if err != nil {
-		t.Fatalf("RunSync failed: %v", err)
-	}
-
-	if result.Status != StatusFailedRun {
-		t.Fatalf("expected Failed, got %s", result.Status)
-	}
-}
-
-func TestEngine_RunAsync_Wait(t *testing.T) {
-	ResetTaskRegistry()
-
-	Task("slow.task", func(ctx *Ctx) error {
-		time.Sleep(100 * time.Millisecond)
-		Set(ctx, "done", true)
-		return nil
-	})
-
-	wf := NewWorkflowBuilder("async-test").
-		Step("slow.task").
-		Commit()
-
-	engine, err := New()
-	if err != nil {
-		t.Fatalf("failed to create engine: %v", err)
-	}
-	defer engine.Close()
-
-	ctx := context.Background()
-	runID, err := engine.Run(ctx, wf, nil)
-	if err != nil {
-		t.Fatalf("Run failed: %v", err)
-	}
-
-	if runID == "" {
-		t.Fatal("expected non-empty RunID")
-	}
-
-	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	result, err := engine.Wait(waitCtx, runID)
-	if err != nil {
-		t.Fatalf("Wait failed: %v", err)
-	}
-
-	if result.Status != StatusCompletedRun {
-		t.Fatalf("expected Completed, got %s", result.Status)
-	}
-}
-
-func TestEngine_RunSync_MultiStep(t *testing.T) {
-	ResetTaskRegistry()
-
-	Task("step.a", func(ctx *Ctx) error {
-		Set(ctx, "a", true)
-		return nil
-	})
-
-	Task("step.b", func(ctx *Ctx) error {
-		Set(ctx, "b", true)
-		return nil
-	})
-
-	Task("step.c", func(ctx *Ctx) error {
-		a := Get[bool](ctx, "a")
-		b := Get[bool](ctx, "b")
-		Set(ctx, "all_done", a && b)
-		return nil
-	})
-
-	wf := NewWorkflowBuilder("multi-step").
-		Step("step.a").
-		Step("step.b").
-		Step("step.c").
-		Commit()
-
-	engine, err := New()
-	if err != nil {
-		t.Fatalf("failed to create engine: %v", err)
-	}
-	defer engine.Close()
-
-	result, err := engine.RunSync(context.Background(), wf, nil)
-	if err != nil {
-		t.Fatalf("RunSync failed: %v", err)
-	}
-
-	if result.Status != StatusCompletedRun {
-		t.Fatalf("expected Completed, got %s (error: %v)", result.Status, result.Error)
-	}
-}
-
-func TestEngine_Persistence_Memory(t *testing.T) {
-	ResetTaskRegistry()
-
-	Task("noop", func(ctx *Ctx) error {
-		return nil
-	})
-
-	wf := NewWorkflowBuilder("persist-test").
-		Step("noop").
-		Commit()
-
-	engine, err := New()
-	if err != nil {
-		t.Fatalf("failed to create engine: %v", err)
-	}
-	defer engine.Close()
-
-	ctx := context.Background()
-	result, err := engine.RunSync(ctx, wf, nil)
-	if err != nil {
-		t.Fatalf("RunSync failed: %v", err)
-	}
-
-	// Verify the run is in persistence
-	run, err := engine.persistence.LoadRun(ctx, result.RunID)
-	if err != nil {
-		t.Fatalf("LoadRun failed: %v", err)
-	}
-
-	if run.Status != StatusCompletedRun {
-		t.Fatalf("expected Completed in persistence, got %s", run.Status)
-	}
-}
-
-func TestEngine_Suspend(t *testing.T) {
-	ResetTaskRegistry()
-
-	Task("approve", func(ctx *Ctx) error {
+	Task("e.approve", func(ctx *Ctx) error {
 		if IsResuming(ctx) {
 			return nil
 		}
 		return Suspend(ctx, P{"reason": "needs approval"})
 	})
 
-	wf := NewWorkflowBuilder("suspend-test").
-		Step("approve").
+	wf := NewWorkflow("suspend").Step("e.approve").Commit()
+	engine, _ := New()
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, nil)
+	if result.Status != Suspended {
+		t.Fatalf("expected Suspended, got %s", result.Status)
+	}
+}
+
+func TestEngine_RunSync_Failed(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("e.fail", func(ctx *Ctx) error {
+		return errors.New("something broke")
+	})
+
+	wf := NewWorkflow("fail").Step("e.fail").Commit()
+	engine, _ := New()
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, nil)
+	if result.Status != Failed {
+		t.Fatalf("expected Failed, got %s", result.Status)
+	}
+	if result.Error == nil {
+		t.Fatal("expected error to be set")
+	}
+}
+
+func TestEngine_RunAndWait(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("e.async", func(ctx *Ctx) error {
+		Set(ctx, "done", true)
+		return nil
+	})
+
+	wf := NewWorkflow("async").Step("e.async").Commit()
+	engine, _ := New()
+	defer engine.Close()
+
+	runID, err := engine.Run(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := engine.Wait(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+}
+
+func TestEngine_Cancel(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("e.slow", func(ctx *Ctx) error {
+		select {
+		case <-time.After(10 * time.Second):
+			return nil
+		case <-ctx.Context().Done():
+			return ctx.Context().Err()
+		}
+	})
+
+	wf := NewWorkflow("cancel").Step("e.slow").Commit()
+	engine, _ := New()
+	defer engine.Close()
+
+	runID, _ := engine.Run(context.Background(), wf, nil)
+
+	// Give it time to start
+	time.Sleep(50 * time.Millisecond)
+
+	if err := engine.Cancel(context.Background(), runID); err != nil {
+		t.Fatal(err)
+	}
+
+	result, _ := engine.Wait(context.Background(), runID)
+	if result.Status != Cancelled {
+		t.Fatalf("expected Cancelled, got %s", result.Status)
+	}
+}
+
+func TestEngine_WithTimeout(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("e.timeout", func(ctx *Ctx) error {
+		select {
+		case <-time.After(5 * time.Second):
+			return nil
+		case <-ctx.Context().Done():
+			return ctx.Context().Err()
+		}
+	})
+
+	wf := NewWorkflow("timeout").Step("e.timeout").Commit()
+	engine, _ := New(WithTimeout(100 * time.Millisecond))
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, nil)
+	if result.Status != Cancelled {
+		t.Fatalf("expected Cancelled (from timeout), got %s", result.Status)
+	}
+}
+
+func TestEngine_Parallel_RealConcurrency(t *testing.T) {
+	ResetTaskRegistry()
+
+	var running int64
+
+	Task("e.par_task", func(ctx *Ctx) error {
+		current := atomic.AddInt64(&running, 1)
+		if current > 1 {
+			Set(ctx, "was_concurrent", true)
+		}
+		time.Sleep(50 * time.Millisecond)
+		atomic.AddInt64(&running, -1)
+		return nil
+	})
+
+	wf := NewWorkflow("par").
+		Parallel(Step("e.par_task"), Step("e.par_task"), Step("e.par_task")).
 		Commit()
 
-	engine, err := New()
+	engine, _ := New()
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, nil)
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+	if result.Store["was_concurrent"] != true {
+		t.Fatal("expected tasks to run concurrently")
+	}
+}
+
+func TestEngine_Parallel_FirstError(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("e.par_ok", func(ctx *Ctx) error {
+		time.Sleep(100 * time.Millisecond)
+		return nil
+	})
+	Task("e.par_fail", func(ctx *Ctx) error {
+		return errors.New("parallel failure")
+	})
+
+	wf := NewWorkflow("par-fail").
+		Parallel(Step("e.par_ok"), Step("e.par_fail")).
+		Commit()
+
+	engine, _ := New()
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, nil)
+	if result.Status != Failed {
+		t.Fatalf("expected Failed, got %s", result.Status)
+	}
+}
+
+func TestEngine_ForEach_Sequential(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("e.fe_task", func(ctx *Ctx) error {
+		item := Item[string](ctx)
+		idx := ItemIndex(ctx)
+		Set(ctx, fmt.Sprintf("result_%d", idx), "processed:"+item)
+		return nil
+	})
+
+	wf := NewWorkflow("foreach").
+		ForEach("items", Step("e.fe_task")).
+		Commit()
+
+	engine, _ := New()
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, P{
+		"items": []string{"a", "b", "c"},
+	})
+
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+	if result.Store["result_0"] != "processed:a" {
+		t.Fatalf("expected 'processed:a', got %v", result.Store["result_0"])
+	}
+	if result.Store["result_2"] != "processed:c" {
+		t.Fatalf("expected 'processed:c', got %v", result.Store["result_2"])
+	}
+}
+
+func TestEngine_ForEach_Concurrent(t *testing.T) {
+	ResetTaskRegistry()
+
+	var maxConcurrent int64
+	var current int64
+
+	Task("e.fe_conc", func(ctx *Ctx) error {
+		c := atomic.AddInt64(&current, 1)
+		for {
+			old := atomic.LoadInt64(&maxConcurrent)
+			if c <= old || atomic.CompareAndSwapInt64(&maxConcurrent, old, c) {
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+		atomic.AddInt64(&current, -1)
+		return nil
+	})
+
+	wf := NewWorkflow("foreach-conc").
+		ForEach("items", Step("e.fe_conc"), WithConcurrency(3)).
+		Commit()
+
+	engine, _ := New()
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, P{
+		"items": []string{"a", "b", "c", "d", "e", "f"},
+	})
+
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+
+	mc := atomic.LoadInt64(&maxConcurrent)
+	if mc < 2 {
+		t.Fatalf("expected at least 2 concurrent, got %d", mc)
+	}
+	if mc > 3 {
+		t.Fatalf("expected max 3 concurrent, got %d", mc)
+	}
+}
+
+func TestEngine_Branch_MatchFirst(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("e.urgent", func(ctx *Ctx) error {
+		Set(ctx, "path", "urgent")
+		return nil
+	})
+	Task("e.normal", func(ctx *Ctx) error {
+		Set(ctx, "path", "normal")
+		return nil
+	})
+
+	wf := NewWorkflow("branch").
+		Branch(
+			When(func(ctx *Ctx) bool {
+				return Get[string](ctx, "priority") == "high"
+			}).Step("e.urgent"),
+			Default().Step("e.normal"),
+		).
+		Commit()
+
+	engine, _ := New()
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, P{"priority": "high"})
+	if result.Store["path"] != "urgent" {
+		t.Fatalf("expected 'urgent', got %v", result.Store["path"])
+	}
+}
+
+func TestEngine_Branch_Default(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("e.urgent2", func(ctx *Ctx) error {
+		Set(ctx, "path", "urgent")
+		return nil
+	})
+	Task("e.normal2", func(ctx *Ctx) error {
+		Set(ctx, "path", "normal")
+		return nil
+	})
+
+	wf := NewWorkflow("branch-default").
+		Branch(
+			When(func(ctx *Ctx) bool {
+				return Get[string](ctx, "priority") == "high"
+			}).Step("e.urgent2"),
+			Default().Step("e.normal2"),
+		).
+		Commit()
+
+	engine, _ := New()
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, P{"priority": "low"})
+	if result.Store["path"] != "normal" {
+		t.Fatalf("expected 'normal', got %v", result.Store["path"])
+	}
+}
+
+func TestEngine_DoUntil(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("e.increment", func(ctx *Ctx) error {
+		count := GetOr[int](ctx, "count", 0)
+		Set(ctx, "count", count+1)
+		return nil
+	})
+
+	wf := NewWorkflow("until").
+		DoUntil(Step("e.increment"), func(ctx *Ctx) bool {
+			return Get[int](ctx, "count") >= 5
+		}).
+		Commit()
+
+	engine, _ := New()
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, nil)
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+	if result.Store["count"] != 5 {
+		t.Fatalf("expected count 5, got %v", result.Store["count"])
+	}
+}
+
+func TestEngine_DoWhile(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("e.fetch", func(ctx *Ctx) error {
+		page := GetOr[int](ctx, "page", 0)
+		page++
+		Set(ctx, "page", page)
+		Set(ctx, "has_more", page < 3)
+		return nil
+	})
+
+	wf := NewWorkflow("while").
+		Map(func(ctx *Ctx) {
+			Set(ctx, "has_more", true) // seed the condition
+		}).
+		DoWhile(Step("e.fetch"), func(ctx *Ctx) bool {
+			return Get[bool](ctx, "has_more")
+		}).
+		Commit()
+
+	engine, _ := New()
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, nil)
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+	if result.Store["page"] != 3 {
+		t.Fatalf("expected page 3, got %v", result.Store["page"])
+	}
+}
+
+func TestEngine_Map(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("e.use_data", func(ctx *Ctx) error {
+		items := Get[[]string](ctx, "records")
+		Set(ctx, "count", len(items))
+		return nil
+	})
+
+	wf := NewWorkflow("map").
+		Map(func(ctx *Ctx) {
+			Set(ctx, "records", []string{"a", "b", "c"})
+		}).
+		Step("e.use_data").
+		Commit()
+
+	engine, _ := New()
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, nil)
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+	if result.Store["count"] != 3 {
+		t.Fatalf("expected count 3, got %v", result.Store["count"])
+	}
+}
+
+func TestEngine_SubWorkflow(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("e.sub_inner", func(ctx *Ctx) error {
+		Set(ctx, "inner_ran", true)
+		return nil
+	})
+	Task("e.sub_outer", func(ctx *Ctx) error {
+		Set(ctx, "outer_ran", true)
+		return nil
+	})
+
+	inner := NewWorkflow("inner").Step("e.sub_inner").Commit()
+	outer := NewWorkflow("outer").
+		Step("e.sub_outer").
+		SubWorkflow(inner).
+		Commit()
+
+	engine, _ := New()
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), outer, nil)
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+	if result.Store["outer_ran"] != true {
+		t.Fatal("expected outer_ran")
+	}
+	if result.Store["inner_ran"] != true {
+		t.Fatal("expected inner_ran")
+	}
+}
+
+func TestEngine_Stage(t *testing.T) {
+	ResetTaskRegistry()
+
+	order := make([]string, 0)
+	Task("e.s1", func(ctx *Ctx) error {
+		order = append(order, "s1")
+		return nil
+	})
+	Task("e.s2", func(ctx *Ctx) error {
+		order = append(order, "s2")
+		return nil
+	})
+
+	wf := NewWorkflow("staged").
+		Stage("validation", Step("e.s1"), Step("e.s2")).
+		Commit()
+
+	engine, _ := New()
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, nil)
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+	if len(order) != 2 || order[0] != "s1" || order[1] != "s2" {
+		t.Fatalf("expected sequential execution [s1 s2], got %v", order)
+	}
+}
+
+func TestEngine_Retry_TaskLevel(t *testing.T) {
+	ResetTaskRegistry()
+
+	attempts := 0
+	Task("e.flaky", func(ctx *Ctx) error {
+		attempts++
+		if attempts < 3 {
+			return errors.New("flaky error")
+		}
+		Set(ctx, "success", true)
+		return nil
+	}, WithRetry(3))
+
+	wf := NewWorkflow("retry").Step("e.flaky").Commit()
+	engine, _ := New()
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, nil)
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s (attempts: %d)", result.Status, attempts)
+	}
+	if attempts != 3 {
+		t.Fatalf("expected 3 attempts, got %d", attempts)
+	}
+}
+
+func TestEngine_Retry_WorkflowDefault(t *testing.T) {
+	ResetTaskRegistry()
+
+	attempts := 0
+	Task("e.flaky2", func(ctx *Ctx) error {
+		attempts++
+		if attempts < 3 {
+			return errors.New("flaky")
+		}
+		return nil
+	})
+
+	wf := NewWorkflow("retry-default", WithDefaultRetry(5, 10*time.Millisecond)).
+		Step("e.flaky2").
+		Commit()
+
+	engine, _ := New()
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, nil)
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+}
+
+func TestEngine_Retry_ExhaustedFails(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("e.always_fail", func(ctx *Ctx) error {
+		return errors.New("always fails")
+	}, WithRetry(2))
+
+	wf := NewWorkflow("exhaust").Step("e.always_fail").Commit()
+	engine, _ := New()
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, nil)
+	if result.Status != Failed {
+		t.Fatalf("expected Failed, got %s", result.Status)
+	}
+}
+
+func TestEngine_LifecycleCallbacks(t *testing.T) {
+	ResetTaskRegistry()
+
+	var completedSteps []string
+	var errorSeen error
+
+	Task("e.cb_ok", func(ctx *Ctx) error { return nil })
+	Task("e.cb_fail", func(ctx *Ctx) error { return errors.New("oops") })
+
+	wf := NewWorkflow("callbacks",
+		OnStepComplete(func(step string, ctx *Ctx) {
+			completedSteps = append(completedSteps, step)
+		}),
+		OnError(func(err error) {
+			errorSeen = err
+		}),
+	).
+		Step("e.cb_ok").
+		Step("e.cb_fail").
+		Commit()
+
+	engine, _ := New()
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, nil)
+	if result.Status != Failed {
+		t.Fatalf("expected Failed, got %s", result.Status)
+	}
+
+	if len(completedSteps) != 1 || completedSteps[0] != "e.cb_ok" {
+		t.Fatalf("expected [e.cb_ok] completed, got %v", completedSteps)
+	}
+	if errorSeen == nil {
+		t.Fatal("expected error callback to be called")
+	}
+}
+
+func TestEngine_Sleep_Memory(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("e.after_sleep", func(ctx *Ctx) error {
+		Set(ctx, "awake", true)
+		return nil
+	})
+
+	wf := NewWorkflow("sleep").
+		Sleep(10 * time.Millisecond).
+		Step("e.after_sleep").
+		Commit()
+
+	engine, _ := New() // memory persistence → blocking sleep
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, nil)
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+	if result.Store["awake"] != true {
+		t.Fatal("expected awake to be true")
+	}
+}
+
+func TestEngine_Sleep_Persistent(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("e.post_sleep", func(ctx *Ctx) error {
+		return nil
+	})
+
+	wf := NewWorkflow("sleep-persist").
+		Sleep(time.Hour).
+		Step("e.post_sleep").
+		Commit()
+
+	dir := t.TempDir()
+	engine, _ := New(WithSQLite(filepath.Join(dir, "test.db")))
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, nil)
+	if result.Status != Sleeping {
+		t.Fatalf("expected Sleeping, got %s", result.Status)
+	}
+}
+
+func TestEngine_Resume(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("e.approve_order", func(ctx *Ctx) error {
+		if IsResuming(ctx) {
+			approved := ResumeData[bool](ctx, "approved")
+			if !approved {
+				return Bail(ctx, "Order rejected")
+			}
+			Set(ctx, "approved", true)
+			return nil
+		}
+		return Suspend(ctx, P{"reason": "needs approval"})
+	})
+
+	wf := NewWorkflow("resume").Step("e.approve_order").Commit()
+	engine, _ := New()
+	defer engine.Close()
+
+	// First run → Suspended
+	result, _ := engine.RunSync(context.Background(), wf, P{"order_id": "ORD-1"})
+	if result.Status != Suspended {
+		t.Fatalf("expected Suspended, got %s", result.Status)
+	}
+
+	// Resume with approval
+	wf2 := NewWorkflow("resume").Step("e.approve_order").Commit()
+	resumed, err := engine.Resume(context.Background(), wf2, result.RunID, P{"approved": true})
 	if err != nil {
-		t.Fatalf("failed to create engine: %v", err)
+		t.Fatal(err)
+	}
+	if resumed.Status != Completed {
+		t.Fatalf("expected Completed after resume, got %s", resumed.Status)
+	}
+}
+
+func TestEngine_WithSQLite_Integration(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("e.sqlite_task", func(ctx *Ctx) error {
+		Set(ctx, "result", "persisted")
+		return nil
+	})
+
+	wf := NewWorkflow("sqlite-test").Step("e.sqlite_task").Commit()
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "engine.db")
+
+	engine, err := New(WithSQLite(dbPath))
+	if err != nil {
+		t.Fatalf("failed to create engine with SQLite: %v", err)
 	}
 	defer engine.Close()
 
-	result, err := engine.RunSync(context.Background(), wf, nil)
+	result, err := engine.RunSync(context.Background(), wf, P{"input": "test"})
 	if err != nil {
 		t.Fatalf("RunSync failed: %v", err)
 	}
 
-	if result.Status != StatusSuspended {
-		t.Fatalf("expected Suspended, got %s", result.Status)
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+
+	// Verify run persisted
+	run, err := engine.persistence.LoadRun(context.Background(), result.RunID)
+	if err != nil {
+		t.Fatalf("LoadRun from SQLite failed: %v", err)
+	}
+	if run.Status != Completed {
+		t.Fatalf("expected Completed in SQLite, got %s", run.Status)
+	}
+
+	// Verify state was persisted
+	state, err := engine.persistence.LoadState(context.Background(), result.RunID)
+	if err != nil {
+		t.Fatalf("LoadState from SQLite failed: %v", err)
+	}
+	if len(state) == 0 {
+		t.Fatal("expected non-empty state data")
+	}
+}
+
+func TestEngine_ForEach_Empty(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("e.noop", func(ctx *Ctx) error {
+		Set(ctx, "should_not_run", true)
+		return nil
+	})
+
+	wf := NewWorkflow("empty").
+		ForEach("items", Step("e.noop")).
+		Commit()
+
+	engine, _ := New()
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, P{"items": []string{}})
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+	if result.Store["should_not_run"] == true {
+		t.Fatal("task should not have run for empty collection")
+	}
+}
+
+func TestEngine_Retry_BailNotRetried(t *testing.T) {
+	ResetTaskRegistry()
+
+	attempts := 0
+	Task("e.bail_retry", func(ctx *Ctx) error {
+		attempts++
+		return Bail(ctx, "done")
+	}, WithRetry(3))
+
+	wf := NewWorkflow("bail-no-retry").Step("e.bail_retry").Commit()
+	engine, _ := New()
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, nil)
+	if result.Status != Bailed {
+		t.Fatalf("expected Bailed, got %s", result.Status)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected 1 attempt (bail not retried), got %d", attempts)
+	}
+}
+
+func TestEngine_StepFailStopsExecution(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("e.ok_step", func(ctx *Ctx) error {
+		Set(ctx, "step1", true)
+		return nil
+	})
+	Task("e.fail_step", func(ctx *Ctx) error {
+		return errors.New("boom")
+	})
+	Task("e.after_fail", func(ctx *Ctx) error {
+		Set(ctx, "step3", true)
+		return nil
+	})
+
+	wf := NewWorkflow("stop").
+		Step("e.ok_step").
+		Step("e.fail_step").
+		Step("e.after_fail").
+		Commit()
+
+	engine, _ := New()
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), wf, nil)
+	if result.Status != Failed {
+		t.Fatalf("expected Failed, got %s", result.Status)
+	}
+	if result.Store["step1"] != true {
+		t.Fatal("expected step1 to have run")
+	}
+	if result.Store["step3"] == true {
+		t.Fatal("expected step3 NOT to have run after failure")
 	}
 }

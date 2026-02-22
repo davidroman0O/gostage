@@ -1,5 +1,7 @@
 package gostage
 
+import "time"
+
 // P is a convenience alias for map[string]any.
 // It's used for passing parameters, initial store data, and results.
 //
@@ -13,22 +15,22 @@ type RunID string
 type Status string
 
 const (
-	// StatusPendingRun means the run is queued but not yet started.
-	StatusPendingRun Status = "pending"
-	// StatusRunningRun means the run is currently executing.
-	StatusRunningRun Status = "running"
-	// StatusCompletedRun means all steps finished successfully.
-	StatusCompletedRun Status = "completed"
-	// StatusFailedRun means a step failed after retries.
-	StatusFailedRun Status = "failed"
-	// StatusSuspended means the run is waiting for external input.
-	StatusSuspended Status = "suspended"
-	// StatusSleeping means the run is waiting for a time condition.
-	StatusSleeping Status = "sleeping"
-	// StatusBailed means the run exited early (not an error).
-	StatusBailed Status = "bailed"
-	// StatusCancelled means engine.Cancel() was called.
-	StatusCancelled Status = "cancelled"
+	// Pending means the run is queued but not yet started.
+	Pending Status = "pending"
+	// Running means the run is currently executing.
+	Running Status = "running"
+	// Completed means all steps finished successfully.
+	Completed Status = "completed"
+	// Failed means a step failed after retries.
+	Failed Status = "failed"
+	// Suspended means the run is waiting for external input.
+	Suspended Status = "suspended"
+	// Sleeping means the run is waiting for a time condition.
+	Sleeping Status = "sleeping"
+	// Bailed means the run exited early (not an error).
+	Bailed Status = "bailed"
+	// Cancelled means engine.Cancel() was called.
+	Cancelled Status = "cancelled"
 )
 
 // Result holds the outcome of a workflow run.
@@ -43,6 +45,8 @@ type Result struct {
 	BailReason string
 	// Store contains the final store state after execution.
 	Store map[string]any
+	// SuspendData holds data when Status == Suspended.
+	SuspendData map[string]any
 }
 
 // BailError is returned when a task calls Bail().
@@ -61,4 +65,13 @@ type SuspendError struct {
 
 func (e *SuspendError) Error() string {
 	return "suspended"
+}
+
+// SleepError is returned internally when a persistent sleep step executes.
+type SleepError struct {
+	WakeAt time.Time
+}
+
+func (e *SleepError) Error() string {
+	return "sleeping until " + e.WakeAt.Format(time.RFC3339)
 }

@@ -4,25 +4,14 @@ package gostage;
 
 option go_package = "github.com/davidroman0O/gostage/proto";
 
-// WorkflowIPC service defines the communication between parent and child processes
+// WorkflowIPC service defines the communication between parent and child processes.
+// Pull model: child connects to parent's gRPC server, requests work, returns results.
 service WorkflowIPC {
-  // Initialize workflow - sends the workflow definition via gRPC
-  rpc InitializeWorkflow(WorkflowDefinition) returns (WorkflowAck);
-  
-  // Child requests workflow definition from parent (new pull model)
+  // Child requests workflow definition from parent
   rpc RequestWorkflowDefinition(ReadySignal) returns (WorkflowDefinition);
-  
-  // Child signals it's ready to receive workflow definitions
-  rpc ChildReady(ReadySignal) returns (MessageAck);
-  
-  // Send a single message from child to parent
+
+  // Send a single message from child to parent (IPC, final store, results)
   rpc SendMessage(IPCMessage) returns (MessageAck);
-  
-  // Stream messages for high-frequency communication
-  rpc StreamMessages(stream IPCMessage) returns (stream MessageAck);
-  
-  // Bidirectional streaming for real-time communication
-  rpc BidirectionalStream(stream IPCMessage) returns (stream IPCMessage);
 }
 
 // Message metadata for comprehensive tracing
@@ -109,26 +98,12 @@ message MessageAck {
   string message_id = 3;  // Echo back the message ID
 }
 
-// Connection info for establishing gRPC connection
-message ConnectionInfo {
-  string address = 1;  // "localhost:50051"
-  int32 port = 2;
-  string transport = 3;  // "grpc" or "json"
-}
-
-// Workflow definition message for gRPC-based initialization
+// Workflow definition message for pull-model initialization
 message WorkflowDefinition {
   string id = 1;
   string name = 2;
   bytes definition_json = 3;  // Serialized SubWorkflowDef as JSON
   map<string, bytes> initial_store = 4;  // Initial store data
-}
-
-// Acknowledgment for workflow initialization
-message WorkflowAck {
-  bool success = 1;
-  string error_message = 2;
-  string workflow_id = 3;
 }
 
 // ReadySignal message for child process synchronization

@@ -28,8 +28,8 @@ func TestSQLite_SaveAndLoadRun(t *testing.T) {
 	run := &RunState{
 		RunID:      "run-001",
 		WorkflowID: "wf-hello",
-		Status:     StatusRunningRun,
-		StepStates: map[string]Status{"step1": StatusCompletedRun},
+		Status:     Running,
+		StepStates: map[string]Status{"step1": Completed},
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
@@ -49,10 +49,10 @@ func TestSQLite_SaveAndLoadRun(t *testing.T) {
 	if loaded.WorkflowID != "wf-hello" {
 		t.Fatalf("expected wf-hello, got %s", loaded.WorkflowID)
 	}
-	if loaded.Status != StatusRunningRun {
+	if loaded.Status != Running {
 		t.Fatalf("expected running, got %s", loaded.Status)
 	}
-	if loaded.StepStates["step1"] != StatusCompletedRun {
+	if loaded.StepStates["step1"] != Completed {
 		t.Fatalf("expected step1 completed, got %s", loaded.StepStates["step1"])
 	}
 }
@@ -65,7 +65,7 @@ func TestSQLite_SaveRunUpdate(t *testing.T) {
 	run := &RunState{
 		RunID:      "run-002",
 		WorkflowID: "wf-test",
-		Status:     StatusRunningRun,
+		Status:     Running,
 		StepStates: make(map[string]Status),
 		CreatedAt:  now,
 		UpdatedAt:  now,
@@ -76,7 +76,7 @@ func TestSQLite_SaveRunUpdate(t *testing.T) {
 	}
 
 	// Update status
-	run.Status = StatusCompletedRun
+	run.Status = Completed
 	run.UpdatedAt = time.Now().Truncate(time.Microsecond)
 	if err := p.SaveRun(ctx, run); err != nil {
 		t.Fatalf("SaveRun update failed: %v", err)
@@ -86,7 +86,7 @@ func TestSQLite_SaveRunUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadRun failed: %v", err)
 	}
-	if loaded.Status != StatusCompletedRun {
+	if loaded.Status != Completed {
 		t.Fatalf("expected completed, got %s", loaded.Status)
 	}
 }
@@ -112,7 +112,7 @@ func TestSQLite_UpdateStepStatus(t *testing.T) {
 	run := &RunState{
 		RunID:      "run-003",
 		WorkflowID: "wf-steps",
-		Status:     StatusRunningRun,
+		Status:     Running,
 		StepStates: make(map[string]Status),
 		CreatedAt:  now,
 		UpdatedAt:  now,
@@ -122,7 +122,7 @@ func TestSQLite_UpdateStepStatus(t *testing.T) {
 		t.Fatalf("SaveRun failed: %v", err)
 	}
 
-	if err := p.UpdateStepStatus(ctx, "run-003", "step-a", StatusCompletedRun); err != nil {
+	if err := p.UpdateStepStatus(ctx, "run-003", "step-a", Completed); err != nil {
 		t.Fatalf("UpdateStepStatus failed: %v", err)
 	}
 
@@ -130,54 +130,87 @@ func TestSQLite_UpdateStepStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadRun failed: %v", err)
 	}
-	if loaded.StepStates["step-a"] != StatusCompletedRun {
+	if loaded.StepStates["step-a"] != Completed {
 		t.Fatalf("expected step-a completed, got %s", loaded.StepStates["step-a"])
 	}
 }
 
-func TestSQLite_Checkpoint(t *testing.T) {
+func TestSQLite_SaveLoadState(t *testing.T) {
 	p := newTestSQLite(t)
 	ctx := context.Background()
 
-	now := time.Now().Truncate(time.Microsecond)
-	run := &RunState{
-		RunID:      "run-004",
-		WorkflowID: "wf-ckpt",
-		Status:     StatusRunningRun,
-		StepStates: make(map[string]Status),
-		CreatedAt:  now,
-		UpdatedAt:  now,
+	entries := map[string]StateEntry{
+		"greeting": {Value: []byte(`"hello"`), TypeName: "string"},
+		"count":    {Value: []byte(`42`), TypeName: "int"},
 	}
 
-	if err := p.SaveRun(ctx, run); err != nil {
-		t.Fatalf("SaveRun failed: %v", err)
+	if err := p.SaveState(ctx, "run-004", entries); err != nil {
+		t.Fatalf("SaveState failed: %v", err)
 	}
 
-	storeData := []byte(`{"greeting":"hello","count":42}`)
-	if err := p.SaveCheckpoint(ctx, "run-004", storeData); err != nil {
-		t.Fatalf("SaveCheckpoint failed: %v", err)
-	}
-
-	loaded, err := p.LoadCheckpoint(ctx, "run-004")
+	loaded, err := p.LoadState(ctx, "run-004")
 	if err != nil {
-		t.Fatalf("LoadCheckpoint failed: %v", err)
+		t.Fatalf("LoadState failed: %v", err)
 	}
-	if string(loaded) != string(storeData) {
-		t.Fatalf("expected %s, got %s", storeData, loaded)
+	if len(loaded) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(loaded))
+	}
+	if string(loaded["greeting"].Value) != `"hello"` {
+		t.Fatalf("expected greeting='hello', got %s", loaded["greeting"].Value)
+	}
+	if loaded["greeting"].TypeName != "string" {
+		t.Fatalf("expected typeName 'string', got %s", loaded["greeting"].TypeName)
+	}
+	if string(loaded["count"].Value) != `42` {
+		t.Fatalf("expected count=42, got %s", loaded["count"].Value)
+	}
+	if loaded["count"].TypeName != "int" {
+		t.Fatalf("expected typeName 'int', got %s", loaded["count"].TypeName)
 	}
 
-	// Overwrite checkpoint
-	storeData2 := []byte(`{"greeting":"updated"}`)
-	if err := p.SaveCheckpoint(ctx, "run-004", storeData2); err != nil {
-		t.Fatalf("SaveCheckpoint overwrite failed: %v", err)
+	// Overwrite one key, add a new one
+	entries2 := map[string]StateEntry{
+		"greeting": {Value: []byte(`"updated"`), TypeName: "string"},
+		"active":   {Value: []byte(`true`), TypeName: "bool"},
+	}
+	if err := p.SaveState(ctx, "run-004", entries2); err != nil {
+		t.Fatalf("SaveState overwrite failed: %v", err)
 	}
 
-	loaded2, err := p.LoadCheckpoint(ctx, "run-004")
+	loaded2, err := p.LoadState(ctx, "run-004")
 	if err != nil {
-		t.Fatalf("LoadCheckpoint after overwrite failed: %v", err)
+		t.Fatalf("LoadState after overwrite failed: %v", err)
 	}
-	if string(loaded2) != string(storeData2) {
-		t.Fatalf("expected %s, got %s", storeData2, loaded2)
+	if len(loaded2) != 3 {
+		t.Fatalf("expected 3 entries after upsert, got %d", len(loaded2))
+	}
+	if string(loaded2["greeting"].Value) != `"updated"` {
+		t.Fatalf("expected greeting='updated', got %s", loaded2["greeting"].Value)
+	}
+}
+
+func TestSQLite_DeleteState(t *testing.T) {
+	p := newTestSQLite(t)
+	ctx := context.Background()
+
+	entries := map[string]StateEntry{
+		"key1": {Value: []byte(`"value1"`), TypeName: "string"},
+		"key2": {Value: []byte(`"value2"`), TypeName: "string"},
+	}
+	if err := p.SaveState(ctx, "run-del", entries); err != nil {
+		t.Fatalf("SaveState failed: %v", err)
+	}
+
+	if err := p.DeleteState(ctx, "run-del"); err != nil {
+		t.Fatalf("DeleteState failed: %v", err)
+	}
+
+	loaded, err := p.LoadState(ctx, "run-del")
+	if err != nil {
+		t.Fatalf("LoadState after delete failed: %v", err)
+	}
+	if len(loaded) != 0 {
+		t.Fatalf("expected 0 entries after delete, got %d", len(loaded))
 	}
 }
 
@@ -188,9 +221,9 @@ func TestSQLite_ListRuns(t *testing.T) {
 	now := time.Now().Truncate(time.Microsecond)
 
 	runs := []*RunState{
-		{RunID: "run-a", WorkflowID: "wf-1", Status: StatusCompletedRun, StepStates: make(map[string]Status), CreatedAt: now, UpdatedAt: now},
-		{RunID: "run-b", WorkflowID: "wf-1", Status: StatusFailedRun, StepStates: make(map[string]Status), CreatedAt: now.Add(time.Second), UpdatedAt: now.Add(time.Second)},
-		{RunID: "run-c", WorkflowID: "wf-2", Status: StatusCompletedRun, StepStates: make(map[string]Status), CreatedAt: now.Add(2 * time.Second), UpdatedAt: now.Add(2 * time.Second)},
+		{RunID: "run-a", WorkflowID: "wf-1", Status: Completed, StepStates: make(map[string]Status), CreatedAt: now, UpdatedAt: now},
+		{RunID: "run-b", WorkflowID: "wf-1", Status: Failed, StepStates: make(map[string]Status), CreatedAt: now.Add(time.Second), UpdatedAt: now.Add(time.Second)},
+		{RunID: "run-c", WorkflowID: "wf-2", Status: Completed, StepStates: make(map[string]Status), CreatedAt: now.Add(2 * time.Second), UpdatedAt: now.Add(2 * time.Second)},
 	}
 
 	for _, r := range runs {
@@ -218,7 +251,7 @@ func TestSQLite_ListRuns(t *testing.T) {
 	}
 
 	// Filter by status
-	completed, err := p.ListRuns(ctx, RunFilter{Status: StatusCompletedRun})
+	completed, err := p.ListRuns(ctx, RunFilter{Status: Completed})
 	if err != nil {
 		t.Fatalf("ListRuns completed failed: %v", err)
 	}
@@ -246,7 +279,7 @@ func TestSQLite_BailAndSuspendData(t *testing.T) {
 	bail := &RunState{
 		RunID:      "run-bail",
 		WorkflowID: "wf-bail",
-		Status:     StatusBailed,
+		Status:     Bailed,
 		BailReason: "Must be 18+",
 		StepStates: make(map[string]Status),
 		CreatedAt:  now,
@@ -268,7 +301,7 @@ func TestSQLite_BailAndSuspendData(t *testing.T) {
 	suspend := &RunState{
 		RunID:       "run-suspend",
 		WorkflowID:  "wf-suspend",
-		Status:      StatusSuspended,
+		Status:      Suspended,
 		SuspendData: map[string]any{"reason": "needs approval", "approver": "admin"},
 		StepStates:  make(map[string]Status),
 		CreatedAt:   now,
@@ -306,51 +339,3 @@ func TestSQLite_Persistence_FileExists(t *testing.T) {
 	}
 }
 
-func TestEngine_WithSQLite(t *testing.T) {
-	ResetTaskRegistry()
-
-	Task("sqlite.task", func(ctx *Ctx) error {
-		Set(ctx, "result", "persisted")
-		return nil
-	})
-
-	wf := NewWorkflowBuilder("sqlite-test").
-		Step("sqlite.task").
-		Commit()
-
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "engine.db")
-
-	engine, err := New(WithSQLite(dbPath))
-	if err != nil {
-		t.Fatalf("failed to create engine with SQLite: %v", err)
-	}
-	defer engine.Close()
-
-	result, err := engine.RunSync(context.Background(), wf, P{"input": "test"})
-	if err != nil {
-		t.Fatalf("RunSync failed: %v", err)
-	}
-
-	if result.Status != StatusCompletedRun {
-		t.Fatalf("expected Completed, got %s", result.Status)
-	}
-
-	// Verify the run persisted to SQLite
-	run, err := engine.persistence.LoadRun(context.Background(), result.RunID)
-	if err != nil {
-		t.Fatalf("LoadRun from SQLite failed: %v", err)
-	}
-	if run.Status != StatusCompletedRun {
-		t.Fatalf("expected Completed in SQLite, got %s", run.Status)
-	}
-
-	// Verify checkpoint was saved
-	checkpoint, err := engine.persistence.LoadCheckpoint(context.Background(), result.RunID)
-	if err != nil {
-		t.Fatalf("LoadCheckpoint from SQLite failed: %v", err)
-	}
-	if len(checkpoint) == 0 {
-		t.Fatal("expected non-empty checkpoint data")
-	}
-}

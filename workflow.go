@@ -1,395 +1,563 @@
 package gostage
 
 import (
-	"context"
 	"fmt"
 	"time"
-
-	"github.com/davidroman0O/gostage/store"
 )
 
-// WorkflowStageRunnerFunc is the core function type for executing a stage within a workflow.
-type WorkflowStageRunnerFunc func(ctx context.Context, stage *Stage, workflow *Workflow, logger Logger) error
-
-// WorkflowMiddleware represents a function that wraps stage execution within a workflow.
-// It allows performing operations before and after each stage executes.
-type WorkflowMiddleware func(next WorkflowStageRunnerFunc) WorkflowStageRunnerFunc
-
-// Workflow is a sequence of stages forming a complete process.
-// It provides the top-level coordination for executing a series of stages
-// and maintaining their shared state and context.
-// Workflows can be dynamically modified during execution, allowing for
-// flexible and adaptable processes.
-type Workflow struct {
-	// ID is the unique identifier for the workflow
-	ID string
-	// Name is a human-readable name for the workflow
-	Name string
-	// Description provides details about the workflow's purpose
-	Description string
-	// Tags for organization and filtering
-	Tags []string
-
-	// Store is the central key-value store for workflow data
-	// It stores workflow metadata, stage information, and execution data
-	Store *store.KVStore
-
-	// Stages contains all the workflow's stages in execution order
-	// This provides direct access during execution
-	Stages []*Stage
-
-	// Context stores arbitrary data for use during workflow execution
-	// Implementation-specific tools and state can be stored here
-	Context map[string]interface{}
-
-	// middleware contains workflow-level middleware that wraps stage execution
-	middleware []WorkflowMiddleware
-}
-
-// WorkflowInfo holds serializable workflow information.
-// This is used when storing workflow data in persistent storage
-// or transmitting it over the network.
-type WorkflowInfo struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Tags        []string `json:"tags"`
-	StageIDs    []string `json:"stageIds"`
-	CreatedAt   string   `json:"createdAt"`
-	UpdatedAt   string   `json:"updatedAt"`
-}
-
-// NewWorkflow creates a new workflow with the given properties.
-// It initializes empty collections for stages, tags, and context,
-// and creates a new key-value store.
-func NewWorkflow(id, name, description string) *Workflow {
-	w := &Workflow{
-		ID:          id,
-		Name:        name,
-		Description: description,
-		Tags:        []string{},
-		Store:       store.NewKVStore(),
-		Stages:      []*Stage{},
-		Context:     make(map[string]interface{}),
-		middleware:  []WorkflowMiddleware{},
-	}
-
-	// Store workflow info in the KV store with metadata
-	w.saveToStore()
-
-	return w
-}
-
-// Use adds middleware to the workflow's middleware chain
-// This middleware will be applied to each stage execution
-func (w *Workflow) Use(middleware ...WorkflowMiddleware) {
-	w.middleware = append(w.middleware, middleware...)
-}
-
-// GetMiddleware returns the workflow's middleware chain
-func (w *Workflow) GetMiddleware() []WorkflowMiddleware {
-	return w.middleware
-}
-
-// saveToStore saves or updates the workflow metadata in the store.
-// This ensures that workflow information is persistently stored
-// and can be retrieved later.
-func (w *Workflow) saveToStore() {
-	info := WorkflowInfo{
-		ID:          w.ID,
-		Name:        w.Name,
-		Description: w.Description,
-		Tags:        w.Tags,
-		StageIDs:    w.getStageIDs(),
-		CreatedAt:   time.Now().Format(time.RFC3339),
-		UpdatedAt:   time.Now().Format(time.RFC3339),
-	}
-
-	meta := store.NewMetadata()
-	meta.Tags = append(meta.Tags, w.Tags...)
-	meta.Tags = append(meta.Tags, TagSystem)
-	meta.Description = w.Description
-
-	key := PrefixWorkflow + w.ID
-	w.Store.PutWithMetadata(key, info, meta)
-}
-
-// getStageIDs returns the IDs of all stages in the workflow.
-// This is used when saving workflow metadata to the store.
-func (w *Workflow) getStageIDs() []string {
-	ids := make([]string, len(w.Stages))
-	for i, stage := range w.Stages {
-		ids[i] = stage.ID
-	}
-	return ids
-}
-
-// NewWorkflowWithTags creates a new workflow with the given properties and tags.
-// This is useful when the workflow needs to be categorized or filtered by tags.
-func NewWorkflowWithTags(id, name, description string, tags []string) *Workflow {
-	w := NewWorkflow(id, name, description)
-	w.Tags = tags
-	w.saveToStore()
-	return w
-}
-
-// AddTag adds a tag to the workflow if it doesn't already exist.
-// Tags are useful for categorization, filtering, and conditional execution.
-func (w *Workflow) AddTag(tag string) {
-	// Check if tag already exists
-	for _, t := range w.Tags {
-		if t == tag {
-			return
-		}
-	}
-	w.Tags = append(w.Tags, tag)
-	w.saveToStore()
-}
-
-// HasTag checks if the workflow has a specific tag.
-// Returns true if the tag is found, false otherwise.
-func (w *Workflow) HasTag(tag string) bool {
-	for _, t := range w.Tags {
-		if t == tag {
-			return true
-		}
-	}
-	return false
-}
-
-// HasAllTags checks if the workflow has all the specified tags.
-// Returns true only if every tag in the tags parameter is present in the workflow's tags.
-func (w *Workflow) HasAllTags(tags []string) bool {
-	for _, requiredTag := range tags {
-		found := false
-		for _, workflowTag := range w.Tags {
-			if workflowTag == requiredTag {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-	return true
-}
-
-// HasAnyTag checks if the workflow has any of the specified tags.
-// Returns true if at least one tag from the tags parameter is present in the workflow's tags.
-func (w *Workflow) HasAnyTag(tags []string) bool {
-	for _, workflowTag := range w.Tags {
-		for _, searchTag := range tags {
-			if workflowTag == searchTag {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// AddStage adds a new stage to the workflow and stores it in the KV store.
-// Stages are executed in the order they are added to the workflow.
-func (w *Workflow) AddStage(stage *Stage) {
-	// Add to traditional Stages slice
-	w.Stages = append(w.Stages, stage)
-
-	// Store the stage in the KV store
-	stageKey := PrefixStage + stage.ID
-	stageInfo := stage.toStageInfo()
-
-	meta := store.NewMetadata()
-	meta.Tags = append(meta.Tags, stage.Tags...)
-	meta.Description = stage.Description
-	meta.SetProperty(PropOrder, len(w.Stages)-1)
-	meta.SetProperty(PropStatus, StatusPending)
-	meta.SetProperty(PropCreatedBy, "workflow:"+w.ID)
-
-	w.Store.PutWithMetadata(stageKey, stageInfo, meta)
-
-	// Update workflow info in the store
-	w.saveToStore()
-}
-
-// GetStage retrieves a stage by ID from the KV store
-func (w *Workflow) GetStage(stageID string) (*Stage, error) {
-	// First try to find in the Stages slice for efficiency
-	for _, stage := range w.Stages {
-		if stage.ID == stageID {
-			return stage, nil
-		}
-	}
-
-	// If not found, try to get from the store
-	stageKey := PrefixStage + stageID
-	stageInfo, err := store.Get[StageInfo](w.Store, stageKey)
-	if err != nil {
-		return nil, fmt.Errorf("stage not found: %w", err)
-	}
-
-	// Convert StageInfo back to Stage
-	stage := &Stage{
-		ID:           stageInfo.ID,
-		Name:         stageInfo.Name,
-		Description:  stageInfo.Description,
-		Tags:         stageInfo.Tags,
-		Actions:      []Action{},
-		initialStore: store.NewKVStore(),
-	}
-
-	// Load actions for this stage
-	for _, actionID := range stageInfo.ActionIDs {
-		action, err := w.GetAction(stageID, actionID)
-		if err != nil {
-			continue // Skip actions that can't be loaded
-		}
-		stage.Actions = append(stage.Actions, action)
-	}
-
-	return stage, nil
-}
-
-// GetAction retrieves an action from the KV store
-func (w *Workflow) GetAction(stageID, actionID string) (Action, error) {
-	actionKey := PrefixAction + stageID + ":" + actionID
-
-	// Attempt to get action information from the store
-	// Note: Since Action is an interface, we need a more complex deserialization approach
-	// which would depend on how actions are serialized and their concrete types
-	// This is a simplified placeholder implementation
-
-	// Check if action key exists in the store
-	_, err := w.Store.GetMetadata(actionKey)
-	if err != nil {
-		return nil, fmt.Errorf("action not found: %w", err)
-	}
-
-	// In a real implementation, we would deserialize based on the action type
-	// For now, we'll just search the in-memory structure
-	stage, err := w.GetStage(stageID)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, action := range stage.Actions {
-		if action.Name() == actionID {
-			return action, nil
-		}
-	}
-
-	return nil, fmt.Errorf("action %s not found in stage %s", actionID, stageID)
-}
-
-// GetContext returns a value from the workflow context
-func (w *Workflow) GetContext(key string) (interface{}, bool) {
-	val, exists := w.Context[key]
-	return val, exists
-}
-
-// SetContext stores a value in the workflow context
-func (w *Workflow) SetContext(key string, value interface{}) {
-	w.Context[key] = value
-}
-
-// EnableAllStages enables all stages in the workflow
-func (w *Workflow) EnableAllStages() {
-	w.Context["disabledStages"] = make(map[string]bool)
-
-	// Update tags in the store
-	for _, stage := range w.Stages {
-		stageKey := PrefixStage + stage.ID
-		w.Store.RemoveTag(stageKey, TagDisabled)
-	}
-}
-
-// DisableStage disables a stage by ID
-func (w *Workflow) DisableStage(stageID string) {
-	disabledStages, ok := w.Context["disabledStages"].(map[string]bool)
-	if !ok {
-		disabledStages = make(map[string]bool)
-		w.Context["disabledStages"] = disabledStages
-	}
-	disabledStages[stageID] = true
-
-	// Add disabled tag in the store
-	stageKey := PrefixStage + stageID
-	w.Store.AddTag(stageKey, TagDisabled)
-}
-
-// EnableStage enables a stage by ID
-func (w *Workflow) EnableStage(stageID string) {
-	disabledStages, ok := w.Context["disabledStages"].(map[string]bool)
-	if !ok {
-		return
-	}
-	delete(disabledStages, stageID)
-
-	// Remove disabled tag from the store
-	stageKey := PrefixStage + stageID
-	w.Store.RemoveTag(stageKey, TagDisabled)
-}
-
-// IsStageEnabled checks if a stage is enabled
-func (w *Workflow) IsStageEnabled(stageID string) bool {
-	disabledStages, ok := w.Context["disabledStages"].(map[string]bool)
-	if !ok {
-		return true
-	}
-	return !disabledStages[stageID]
-}
-
-// ListStagesByTag returns all stages with a specific tag
-func (w *Workflow) ListStagesByTag(tag string) []*Stage {
-	var result []*Stage
-
-	// Use the store to find stages with this tag
-	keys := w.Store.FindKeysByTag(tag)
-	for _, key := range keys {
-		// Only process keys with the stage prefix
-		if len(key) <= len(PrefixStage) || key[:len(PrefixStage)] != PrefixStage {
-			continue
-		}
-
-		stageID := key[len(PrefixStage):]
-		stage, err := w.GetStage(stageID)
-		if err == nil {
-			result = append(result, stage)
-		}
-	}
-
-	return result
-}
-
-// ListStagesByStatus returns all stages with a specific status
-func (w *Workflow) ListStagesByStatus(status string) []*Stage {
-	var result []*Stage
-
-	// Use the store to find stages with this status property
-	keys := w.Store.FindKeysByProperty(PropStatus, status)
-	for _, key := range keys {
-		// Only process keys with the stage prefix
-		if len(key) <= len(PrefixStage) || key[:len(PrefixStage)] != PrefixStage {
-			continue
-		}
-
-		stageID := key[len(PrefixStage):]
-		stage, err := w.GetStage(stageID)
-		if err == nil {
-			result = append(result, stage)
-		}
-	}
-
-	return result
-}
-
-// MergeStrategy defines how key conflicts are handled when merging KV stores
-type MergeStrategy int
+// stepKind identifies the type of step in a workflow.
+type stepKind int
 
 const (
-	// Error returns an error if there are key collisions
-	Error MergeStrategy = iota
-	// Skip keeps the existing keys and ignores the new ones
-	Skip
-	// Overwrite replaces existing keys with new ones
-	Overwrite
+	stepSingle   stepKind = iota // single task execution
+	stepParallel                 // parallel fan-out of multiple tasks
+	stepBranch                   // conditional branching
+	stepForEach                  // iteration over a collection
+	stepMap                      // inline data transformation
+	stepDoUntil                  // repeat-until loop
+	stepDoWhile                  // while-do loop
+	stepSub                      // nested sub-workflow
+	stepSleep                    // timed delay
+	stepStage                    // named group of sequential steps
 )
+
+// step is one unit of execution in a workflow.
+type step struct {
+	id       string
+	kind     stepKind
+	name     string
+	disabled bool     // dynamically disabled via mutations
+	tags     []string // tags for querying and conditional execution
+
+	// stepSingle
+	taskName string
+
+	// stepParallel / stepStage
+	refs []StepRef
+
+	// stepBranch
+	cases []BranchCase
+
+	// stepForEach
+	collectionKey string
+	forEachRef    StepRef
+	concurrency   int
+	useSpawn      bool
+
+	// stepMap
+	mapFn func(*Ctx)
+
+	// stepDoUntil / stepDoWhile
+	loopRef  StepRef
+	loopCond func(*Ctx) bool
+
+	// stepSub
+	subWorkflow *Workflow
+
+	// stepSleep
+	sleepDuration time.Duration
+}
+
+// Workflow is the compiled result of a builder chain.
+type Workflow struct {
+	ID         string
+	Name       string
+	Tags       []string
+	steps      []step
+	state      *runState
+	cfg        workflowConfig
+	mutations  *mutationQueue // runtime mutation queue (initialized on first execution)
+	dynCounter int            // counter for generating dynamic step IDs
+}
+
+type workflowConfig struct {
+	onStepComplete    StepCallback
+	onError           ErrorCallback
+	defaultRetries    int
+	defaultRetryDelay time.Duration
+	stepMiddleware    []StepMiddleware
+	tags              []string
+}
+
+// StepCallback is called after each step completes successfully.
+type StepCallback func(stepName string, ctx *Ctx)
+
+// ErrorCallback is called when a step fails.
+type ErrorCallback func(err error)
+
+// --- StepRef: composable step descriptor ---
+
+// StepRef is a step descriptor used in Parallel, ForEach, Branch, etc.
+type StepRef struct {
+	taskName    string
+	subWorkflow *Workflow
+}
+
+// Step creates a StepRef pointing to a registered task.
+//
+//	gostage.Parallel(gostage.Step("task1"), gostage.Step("task2"))
+func Step(taskName string) StepRef {
+	return StepRef{taskName: taskName}
+}
+
+// Sub creates a StepRef pointing to a sub-workflow.
+//
+//	gostage.ForEach("items", gostage.Sub(otherWf))
+func Sub(wf *Workflow) StepRef {
+	return StepRef{subWorkflow: wf}
+}
+
+// --- Branch helpers ---
+
+// BranchCase represents one arm of a Branch.
+type BranchCase struct {
+	condition func(*Ctx) bool
+	ref       StepRef
+	isDefault bool
+}
+
+// WhenClause builds a conditional branch arm.
+type WhenClause struct {
+	condition func(*Ctx) bool
+}
+
+// When starts a conditional branch arm.
+//
+//	gostage.When(func(ctx *gostage.Ctx) bool {
+//	    return gostage.Get[string](ctx, "priority") == "high"
+//	}).Step("urgent.process")
+func When(cond func(*Ctx) bool) *WhenClause {
+	return &WhenClause{condition: cond}
+}
+
+// Step completes the WhenClause with a task to execute.
+func (w *WhenClause) Step(taskName string) BranchCase {
+	return BranchCase{condition: w.condition, ref: StepRef{taskName: taskName}}
+}
+
+// Sub completes the WhenClause with a sub-workflow to execute.
+func (w *WhenClause) Sub(wf *Workflow) BranchCase {
+	return BranchCase{condition: w.condition, ref: StepRef{subWorkflow: wf}}
+}
+
+// DefaultClause builds the default branch arm.
+type DefaultClause struct{}
+
+// Default starts the default branch arm (executed when no When matches).
+func Default() *DefaultClause { return &DefaultClause{} }
+
+// Step completes the DefaultClause with a task to execute.
+func (d *DefaultClause) Step(taskName string) BranchCase {
+	return BranchCase{ref: StepRef{taskName: taskName}, isDefault: true}
+}
+
+// Sub completes the DefaultClause with a sub-workflow to execute.
+func (d *DefaultClause) Sub(wf *Workflow) BranchCase {
+	return BranchCase{ref: StepRef{subWorkflow: wf}, isDefault: true}
+}
+
+// --- ForEach options ---
+
+// ForEachOption configures a ForEach step.
+type ForEachOption func(*step)
+
+// WithConcurrency sets the max concurrent iterations for ForEach.
+//
+//	gostage.ForEach("tracks", gostage.Step("download"), gostage.WithConcurrency(4))
+func WithConcurrency(n int) ForEachOption {
+	return func(s *step) {
+		s.concurrency = n
+	}
+}
+
+// WithSpawn makes each ForEach iteration run in an isolated child process.
+//
+//	gostage.ForEach("tracks", gostage.Step("download"), gostage.WithSpawn())
+func WithSpawn() ForEachOption {
+	return func(s *step) {
+		s.useSpawn = true
+	}
+}
+
+// --- Workflow options ---
+
+// WorkflowOption configures a workflow.
+type WorkflowOption func(*workflowConfig)
+
+// WithName sets the display name for the workflow.
+func WithName(name string) WorkflowOption {
+	return func(cfg *workflowConfig) {
+		// Name is set directly on Workflow in NewWorkflow
+		// This is handled specially in the builder
+	}
+}
+
+// OnStepComplete registers a callback invoked after each step completes.
+//
+//	gostage.NewWorkflow("monitored", gostage.OnStepComplete(func(step string, ctx *gostage.Ctx) {
+//	    log.Printf("Step %s done", step)
+//	}))
+func OnStepComplete(fn StepCallback) WorkflowOption {
+	return func(cfg *workflowConfig) {
+		cfg.onStepComplete = fn
+	}
+}
+
+// OnError registers a callback invoked when a step fails.
+//
+//	gostage.NewWorkflow("monitored", gostage.OnError(func(err error) {
+//	    alerting.Send(err.Error())
+//	}))
+func OnError(fn ErrorCallback) WorkflowOption {
+	return func(cfg *workflowConfig) {
+		cfg.onError = fn
+	}
+}
+
+// WithDefaultRetry sets workflow-wide retry defaults.
+// Individual task retries (via WithRetry) take precedence.
+//
+//	gostage.NewWorkflow("resilient", gostage.WithDefaultRetry(5, time.Second))
+func WithDefaultRetry(n int, delay time.Duration) WorkflowOption {
+	return func(cfg *workflowConfig) {
+		cfg.defaultRetries = n
+		cfg.defaultRetryDelay = delay
+	}
+}
+
+// WithWorkflowTags attaches tags to the workflow for querying.
+//
+//	gostage.NewWorkflow("order", gostage.WithWorkflowTags("billing", "critical"))
+func WithWorkflowTags(tags ...string) WorkflowOption {
+	return func(cfg *workflowConfig) {
+		cfg.tags = tags
+	}
+}
+
+// WithWorkflowMiddleware adds step-level middleware scoped to this workflow.
+//
+//	gostage.NewWorkflow("monitored", gostage.WithWorkflowMiddleware(timingMW))
+func WithWorkflowMiddleware(m StepMiddleware) WorkflowOption {
+	return func(cfg *workflowConfig) {
+		cfg.stepMiddleware = append(cfg.stepMiddleware, m)
+	}
+}
+
+// --- WorkflowBuilder ---
+
+// StepOption configures an individual step in the builder.
+type StepOption func(*builderStep)
+
+// WithStepTags attaches tags to a step for querying and conditional execution.
+//
+//	wf.Step("charge", gostage.WithStepTags("billing", "critical"))
+func WithStepTags(tags ...string) StepOption {
+	return func(bs *builderStep) {
+		bs.tags = tags
+	}
+}
+
+// builderStep is a deferred step captured by the builder before Commit.
+type builderStep struct {
+	kind stepKind
+	name string
+	tags []string
+
+	// stepSingle
+	taskName string
+
+	// stepParallel / stepStage
+	refs []StepRef
+
+	// stepBranch
+	cases []BranchCase
+
+	// stepForEach
+	collectionKey string
+	forEachRef    StepRef
+	forEachOpts   []ForEachOption
+
+	// stepMap
+	mapFn func(*Ctx)
+
+	// stepDoUntil / stepDoWhile
+	loopRef  StepRef
+	loopCond func(*Ctx) bool
+
+	// stepSub
+	subWorkflow *Workflow
+
+	// stepSleep
+	sleepDuration time.Duration
+}
+
+// WorkflowBuilder constructs a Workflow using a fluent API.
+type WorkflowBuilder struct {
+	id    string
+	name  string
+	cfg   workflowConfig
+	steps []builderStep
+}
+
+// NewWorkflow starts building a new workflow with the given ID and options.
+//
+//	wf := gostage.NewWorkflow("process-order").
+//	    Step("validate").
+//	    Step("charge").
+//	    Commit()
+func NewWorkflow(id string, opts ...WorkflowOption) *WorkflowBuilder {
+	b := &WorkflowBuilder{id: id, name: id}
+	for _, opt := range opts {
+		opt(&b.cfg)
+	}
+	return b
+}
+
+// Step adds a single task step to the workflow.
+//
+//	wf.Step("charge", gostage.WithStepTags("billing"))
+func (b *WorkflowBuilder) Step(taskName string, opts ...StepOption) *WorkflowBuilder {
+	bs := builderStep{
+		kind:     stepSingle,
+		taskName: taskName,
+		name:     taskName,
+	}
+	for _, opt := range opts {
+		opt(&bs)
+	}
+	b.steps = append(b.steps, bs)
+	return b
+}
+
+// Stage adds a named group of sequential steps.
+//
+//	wf.Stage("validation", gostage.Step("validate.input"), gostage.Step("validate.rules"))
+func (b *WorkflowBuilder) Stage(name string, refs ...StepRef) *WorkflowBuilder {
+	b.steps = append(b.steps, builderStep{
+		kind: stepStage,
+		name: name,
+		refs: refs,
+	})
+	return b
+}
+
+// Parallel adds steps that execute concurrently.
+//
+//	wf.Parallel(gostage.Step("charge"), gostage.Step("reserve"), gostage.Step("check"))
+func (b *WorkflowBuilder) Parallel(refs ...StepRef) *WorkflowBuilder {
+	b.steps = append(b.steps, builderStep{
+		kind: stepParallel,
+		name: "parallel",
+		refs: refs,
+	})
+	return b
+}
+
+// Branch adds conditional execution.
+//
+//	wf.Branch(
+//	    gostage.When(isHighPriority).Step("urgent"),
+//	    gostage.Default().Step("normal"),
+//	)
+func (b *WorkflowBuilder) Branch(cases ...BranchCase) *WorkflowBuilder {
+	b.steps = append(b.steps, builderStep{
+		kind:  stepBranch,
+		name:  "branch",
+		cases: cases,
+	})
+	return b
+}
+
+// ForEach iterates over a collection stored in the KV store.
+//
+//	wf.ForEach("tracks", gostage.Step("download"), gostage.WithConcurrency(4))
+func (b *WorkflowBuilder) ForEach(key string, ref StepRef, opts ...ForEachOption) *WorkflowBuilder {
+	b.steps = append(b.steps, builderStep{
+		kind:          stepForEach,
+		name:          "forEach:" + key,
+		collectionKey: key,
+		forEachRef:    ref,
+		forEachOpts:   opts,
+	})
+	return b
+}
+
+// DoUntil repeats a step until the condition returns true.
+// The step executes first, then the condition is checked (do-until).
+//
+//	wf.DoUntil(gostage.Step("poll"), func(ctx *gostage.Ctx) bool {
+//	    return gostage.Get[string](ctx, "status") == "ready"
+//	})
+func (b *WorkflowBuilder) DoUntil(ref StepRef, cond func(*Ctx) bool) *WorkflowBuilder {
+	b.steps = append(b.steps, builderStep{
+		kind:     stepDoUntil,
+		name:     "doUntil",
+		loopRef:  ref,
+		loopCond: cond,
+	})
+	return b
+}
+
+// DoWhile repeats a step while the condition returns true.
+// The condition is checked before each iteration (while-do).
+//
+//	wf.DoWhile(gostage.Step("fetch.page"), func(ctx *gostage.Ctx) bool {
+//	    return gostage.Get[bool](ctx, "has_more")
+//	})
+func (b *WorkflowBuilder) DoWhile(ref StepRef, cond func(*Ctx) bool) *WorkflowBuilder {
+	b.steps = append(b.steps, builderStep{
+		kind:     stepDoWhile,
+		name:     "doWhile",
+		loopRef:  ref,
+		loopCond: cond,
+	})
+	return b
+}
+
+// Map adds an inline data transformation step.
+//
+//	wf.Map(func(ctx *gostage.Ctx) {
+//	    raw := gostage.Get[[]byte](ctx, "raw")
+//	    gostage.Set(ctx, "records", parseCSV(raw))
+//	})
+func (b *WorkflowBuilder) Map(fn func(*Ctx)) *WorkflowBuilder {
+	b.steps = append(b.steps, builderStep{
+		kind:  stepMap,
+		name:  "map",
+		mapFn: fn,
+	})
+	return b
+}
+
+// SubWorkflow inlines another workflow's steps into this workflow.
+//
+//	wf.SubWorkflow(otherWf)
+func (b *WorkflowBuilder) SubWorkflow(wf *Workflow) *WorkflowBuilder {
+	b.steps = append(b.steps, builderStep{
+		kind:        stepSub,
+		name:        "sub:" + wf.ID,
+		subWorkflow: wf,
+	})
+	return b
+}
+
+// Sleep adds a timed delay step.
+// With persistence, the run is saved as Sleeping and no goroutine blocks.
+// Without persistence, time.Sleep is used.
+//
+//	wf.Sleep(time.Hour)
+func (b *WorkflowBuilder) Sleep(d time.Duration) *WorkflowBuilder {
+	b.steps = append(b.steps, builderStep{
+		kind:          stepSleep,
+		name:          "sleep",
+		sleepDuration: d,
+	})
+	return b
+}
+
+// Commit finalizes the builder and returns the compiled Workflow.
+// Panics if any referenced task is not registered.
+func (b *WorkflowBuilder) Commit() *Workflow {
+	wf := &Workflow{
+		ID:    b.id,
+		Name:  b.name,
+		Tags:  b.cfg.tags,
+		state: newRunState("", nil),
+		cfg:   b.cfg,
+		steps: make([]step, 0, len(b.steps)),
+	}
+
+	for i, bs := range b.steps {
+		s := step{
+			id:   fmt.Sprintf("%s:%d", b.id, i),
+			kind: bs.kind,
+			name: bs.name,
+			tags: bs.tags,
+		}
+
+		switch bs.kind {
+		case stepSingle:
+			s.taskName = bs.taskName
+			validateTaskRef(bs.taskName)
+
+		case stepParallel:
+			s.refs = bs.refs
+			for _, ref := range bs.refs {
+				validateStepRef(ref)
+			}
+
+		case stepStage:
+			s.refs = bs.refs
+			for _, ref := range bs.refs {
+				validateStepRef(ref)
+			}
+
+		case stepBranch:
+			s.cases = bs.cases
+			for _, c := range bs.cases {
+				validateStepRef(c.ref)
+			}
+
+		case stepForEach:
+			s.collectionKey = bs.collectionKey
+			s.forEachRef = bs.forEachRef
+			s.concurrency = 1 // default sequential
+			validateStepRef(bs.forEachRef)
+			for _, opt := range bs.forEachOpts {
+				opt(&s)
+			}
+
+		case stepMap:
+			s.mapFn = bs.mapFn
+
+		case stepDoUntil, stepDoWhile:
+			s.loopRef = bs.loopRef
+			s.loopCond = bs.loopCond
+			validateStepRef(bs.loopRef)
+
+		case stepSub:
+			s.subWorkflow = bs.subWorkflow
+
+		case stepSleep:
+			s.sleepDuration = bs.sleepDuration
+		}
+
+		wf.steps = append(wf.steps, s)
+	}
+
+	return wf
+}
+
+// clone creates an independent copy of the workflow for concurrent execution.
+// Immutable fields (ID, Name, Tags, cfg) are shared. Mutable fields (store, steps, mutations)
+// are deep-copied so concurrent runs don't interfere with each other.
+func (wf *Workflow) clone() *Workflow {
+	cloned := &Workflow{
+		ID:         wf.ID,
+		Name:       wf.Name,
+		Tags:       wf.Tags,
+		state:      wf.state.Clone(),
+		cfg:        wf.cfg,
+		mutations:  newMutationQueue(),
+		dynCounter: 0,
+	}
+	// Deep copy steps so mutations (disable/enable) don't leak between runs
+	cloned.steps = make([]step, len(wf.steps))
+	copy(cloned.steps, wf.steps)
+	return cloned
+}
+
+// validateTaskRef panics if a task name is not registered.
+func validateTaskRef(name string) {
+	if lookupTask(name) == nil {
+		panic(fmt.Sprintf("gostage: task %q not registered", name))
+	}
+}
+
+// validateStepRef panics if a StepRef references an unregistered task.
+func validateStepRef(ref StepRef) {
+	if ref.subWorkflow != nil {
+		return // sub-workflows are already validated
+	}
+	validateTaskRef(ref.taskName)
+}

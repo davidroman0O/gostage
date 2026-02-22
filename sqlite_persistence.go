@@ -15,21 +15,6 @@ type sqlitePersistence struct {
 	db *sql.DB
 }
 
-// WithSQLite configures the engine to use SQLite for persistence.
-//
-//	engine, _ := gostage.New(gostage.WithSQLite("app.db"))
-//	engine, _ := gostage.New(gostage.WithSQLite(":memory:"))
-func WithSQLite(path string) EngineOption {
-	return func(e *Engine) error {
-		p, err := newSQLitePersistence(path)
-		if err != nil {
-			return fmt.Errorf("sqlite persistence: %w", err)
-		}
-		e.persistence = p
-		return nil
-	}
-}
-
 func newSQLitePersistence(path string) (*sqlitePersistence, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -61,6 +46,8 @@ func (p *sqlitePersistence) migrate() error {
 		step_states  TEXT NOT NULL DEFAULT '{}',
 		bail_reason  TEXT NOT NULL DEFAULT '',
 		suspend_data TEXT NOT NULL DEFAULT '{}',
+		wake_at      TEXT NOT NULL DEFAULT '',
+		mutations    TEXT NOT NULL DEFAULT '[]',
 		created_at   TEXT NOT NULL,
 		updated_at   TEXT NOT NULL
 	);
@@ -72,6 +59,14 @@ func (p *sqlitePersistence) migrate() error {
 		run_id     TEXT PRIMARY KEY,
 		store_data BLOB NOT NULL,
 		FOREIGN KEY (run_id) REFERENCES runs(run_id)
+	);
+
+	CREATE TABLE IF NOT EXISTS run_state (
+		run_id    TEXT NOT NULL,
+		key       TEXT NOT NULL,
+		value     BLOB NOT NULL,
+		type_name TEXT NOT NULL DEFAULT '',
+		PRIMARY KEY (run_id, key)
 	);
 	`
 	_, err := p.db.Exec(schema)
@@ -89,15 +84,27 @@ func (p *sqlitePersistence) SaveRun(ctx context.Context, run *RunState) error {
 		return fmt.Errorf("marshal suspend data: %w", err)
 	}
 
+	mutationsJSON, err := json.Marshal(run.Mutations)
+	if err != nil {
+		return fmt.Errorf("marshal mutations: %w", err)
+	}
+
+	wakeAtStr := ""
+	if !run.WakeAt.IsZero() {
+		wakeAtStr = run.WakeAt.Format(time.RFC3339Nano)
+	}
+
 	const query = `
-	INSERT INTO runs (run_id, workflow_id, status, current_step, step_states, bail_reason, suspend_data, created_at, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO runs (run_id, workflow_id, status, current_step, step_states, bail_reason, suspend_data, wake_at, mutations, created_at, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(run_id) DO UPDATE SET
 		status       = excluded.status,
 		current_step = excluded.current_step,
 		step_states  = excluded.step_states,
 		bail_reason  = excluded.bail_reason,
 		suspend_data = excluded.suspend_data,
+		wake_at      = excluded.wake_at,
+		mutations    = excluded.mutations,
 		updated_at   = excluded.updated_at
 	`
 
@@ -109,6 +116,8 @@ func (p *sqlitePersistence) SaveRun(ctx context.Context, run *RunState) error {
 		string(stepStatesJSON),
 		run.BailReason,
 		string(suspendDataJSON),
+		wakeAtStr,
+		string(mutationsJSON),
 		run.CreatedAt.Format(time.RFC3339Nano),
 		run.UpdatedAt.Format(time.RFC3339Nano),
 	)
@@ -117,7 +126,7 @@ func (p *sqlitePersistence) SaveRun(ctx context.Context, run *RunState) error {
 
 func (p *sqlitePersistence) LoadRun(ctx context.Context, runID RunID) (*RunState, error) {
 	const query = `
-	SELECT run_id, workflow_id, status, current_step, step_states, bail_reason, suspend_data, created_at, updated_at
+	SELECT run_id, workflow_id, status, current_step, step_states, bail_reason, suspend_data, wake_at, mutations, created_at, updated_at
 	FROM runs WHERE run_id = ?
 	`
 
@@ -126,6 +135,8 @@ func (p *sqlitePersistence) LoadRun(ctx context.Context, runID RunID) (*RunState
 		rid, st         string
 		stepStatesJSON  string
 		suspendDataJSON string
+		wakeAtStr       string
+		mutationsJSON   string
 		createdAtStr    string
 		updatedAtStr    string
 	)
@@ -138,6 +149,8 @@ func (p *sqlitePersistence) LoadRun(ctx context.Context, runID RunID) (*RunState
 		&stepStatesJSON,
 		&run.BailReason,
 		&suspendDataJSON,
+		&wakeAtStr,
+		&mutationsJSON,
 		&createdAtStr,
 		&updatedAtStr,
 	)
@@ -158,6 +171,18 @@ func (p *sqlitePersistence) LoadRun(ctx context.Context, runID RunID) (*RunState
 	if suspendDataJSON != "{}" && suspendDataJSON != "" {
 		if err := json.Unmarshal([]byte(suspendDataJSON), &run.SuspendData); err != nil {
 			return nil, fmt.Errorf("unmarshal suspend data: %w", err)
+		}
+	}
+
+	if wakeAtStr != "" {
+		if run.WakeAt, err = time.Parse(time.RFC3339Nano, wakeAtStr); err != nil {
+			return nil, fmt.Errorf("parse wake_at: %w", err)
+		}
+	}
+
+	if mutationsJSON != "[]" && mutationsJSON != "" {
+		if err := json.Unmarshal([]byte(mutationsJSON), &run.Mutations); err != nil {
+			return nil, fmt.Errorf("unmarshal mutations: %w", err)
 		}
 	}
 
@@ -186,33 +211,63 @@ func (p *sqlitePersistence) UpdateStepStatus(ctx context.Context, runID RunID, s
 	return p.SaveRun(ctx, run)
 }
 
-func (p *sqlitePersistence) SaveCheckpoint(ctx context.Context, runID RunID, storeData []byte) error {
-	const query = `
-	INSERT INTO checkpoints (run_id, store_data)
-	VALUES (?, ?)
-	ON CONFLICT(run_id) DO UPDATE SET
-		store_data = excluded.store_data
-	`
-	_, err := p.db.ExecContext(ctx, query, string(runID), storeData)
+func (p *sqlitePersistence) SaveState(ctx context.Context, runID RunID, entries map[string]StateEntry) error {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO run_state (run_id, key, value, type_name)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(run_id, key) DO UPDATE SET
+			value     = excluded.value,
+			type_name = excluded.type_name
+	`)
+	if err != nil {
+		return fmt.Errorf("prepare: %w", err)
+	}
+	defer stmt.Close()
+
+	for k, e := range entries {
+		if _, err := stmt.ExecContext(ctx, string(runID), k, e.Value, e.TypeName); err != nil {
+			return fmt.Errorf("upsert key %q: %w", k, err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (p *sqlitePersistence) LoadState(ctx context.Context, runID RunID) (map[string]StateEntry, error) {
+	const query = `SELECT key, value, type_name FROM run_state WHERE run_id = ?`
+
+	rows, err := p.db.QueryContext(ctx, query, string(runID))
+	if err != nil {
+		return nil, fmt.Errorf("query state: %w", err)
+	}
+	defer rows.Close()
+
+	entries := make(map[string]StateEntry)
+	for rows.Next() {
+		var key, typeName string
+		var value []byte
+		if err := rows.Scan(&key, &value, &typeName); err != nil {
+			return nil, fmt.Errorf("scan state row: %w", err)
+		}
+		entries[key] = StateEntry{Value: value, TypeName: typeName}
+	}
+
+	return entries, rows.Err()
+}
+
+func (p *sqlitePersistence) DeleteState(ctx context.Context, runID RunID) error {
+	_, err := p.db.ExecContext(ctx, `DELETE FROM run_state WHERE run_id = ?`, string(runID))
 	return err
 }
 
-func (p *sqlitePersistence) LoadCheckpoint(ctx context.Context, runID RunID) ([]byte, error) {
-	const query = `SELECT store_data FROM checkpoints WHERE run_id = ?`
-
-	var data []byte
-	err := p.db.QueryRowContext(ctx, query, string(runID)).Scan(&data)
-	if err == sql.ErrNoRows {
-		return nil, &RunNotFoundError{RunID: runID}
-	}
-	if err != nil {
-		return nil, fmt.Errorf("query checkpoint: %w", err)
-	}
-	return data, nil
-}
-
 func (p *sqlitePersistence) ListRuns(ctx context.Context, filter RunFilter) ([]*RunState, error) {
-	query := "SELECT run_id, workflow_id, status, current_step, step_states, bail_reason, suspend_data, created_at, updated_at FROM runs WHERE 1=1"
+	query := "SELECT run_id, workflow_id, status, current_step, step_states, bail_reason, suspend_data, wake_at, mutations, created_at, updated_at FROM runs WHERE 1=1"
 	var args []any
 
 	if filter.WorkflowID != "" {
@@ -244,6 +299,8 @@ func (p *sqlitePersistence) ListRuns(ctx context.Context, filter RunFilter) ([]*
 			rid, st         string
 			stepStatesJSON  string
 			suspendDataJSON string
+			wakeAtStr       string
+			mutationsJSON   string
 			createdAtStr    string
 			updatedAtStr    string
 		)
@@ -251,6 +308,7 @@ func (p *sqlitePersistence) ListRuns(ctx context.Context, filter RunFilter) ([]*
 		if err := rows.Scan(
 			&rid, &run.WorkflowID, &st, &run.CurrentStep,
 			&stepStatesJSON, &run.BailReason, &suspendDataJSON,
+			&wakeAtStr, &mutationsJSON,
 			&createdAtStr, &updatedAtStr,
 		); err != nil {
 			return nil, fmt.Errorf("scan run: %w", err)
@@ -266,6 +324,18 @@ func (p *sqlitePersistence) ListRuns(ctx context.Context, filter RunFilter) ([]*
 		if suspendDataJSON != "{}" && suspendDataJSON != "" {
 			if err := json.Unmarshal([]byte(suspendDataJSON), &run.SuspendData); err != nil {
 				return nil, fmt.Errorf("unmarshal suspend data: %w", err)
+			}
+		}
+
+		if wakeAtStr != "" {
+			if run.WakeAt, err = time.Parse(time.RFC3339Nano, wakeAtStr); err != nil {
+				return nil, fmt.Errorf("parse wake_at: %w", err)
+			}
+		}
+
+		if mutationsJSON != "[]" && mutationsJSON != "" {
+			if err := json.Unmarshal([]byte(mutationsJSON), &run.Mutations); err != nil {
+				return nil, fmt.Errorf("unmarshal mutations: %w", err)
 			}
 		}
 
