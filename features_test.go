@@ -1714,3 +1714,92 @@ func TestWithCacheSize(t *testing.T) {
 		t.Fatal("expected cache-wf-2 and cache-wf-3 to be cached")
 	}
 }
+
+// === Spawn Type Preservation ===
+
+func TestSpawnTypePreservation(t *testing.T) {
+	// Verify that the serialize→deserialize round-trip preserves type info
+	s := newRunState("test-spawn-types", nil)
+	s.Set("count", 42)
+	s.Set("name", "hello")
+	s.Set("ratio", 3.14)
+	s.Set("flag", true)
+	s.Set("big", int64(9999999999))
+
+	// Simulate parent→child serialization (with a ForEach item)
+	data, err := serializeStateForChild(s, "item-val", 5)
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+
+	// Simulate child→parent deserialization
+	result, err := deserializeStoreData(data)
+	if err != nil {
+		t.Fatalf("deserialize: %v", err)
+	}
+
+	// int must survive round-trip (not become float64)
+	if v, ok := result["count"].(int); !ok || v != 42 {
+		t.Fatalf("count: expected int(42), got %T(%v)", result["count"], result["count"])
+	}
+
+	// string must survive
+	if v, ok := result["name"].(string); !ok || v != "hello" {
+		t.Fatalf("name: expected string(hello), got %T(%v)", result["name"], result["name"])
+	}
+
+	// float64 must survive
+	if v, ok := result["ratio"].(float64); !ok || v != 3.14 {
+		t.Fatalf("ratio: expected float64(3.14), got %T(%v)", result["ratio"], result["ratio"])
+	}
+
+	// bool must survive
+	if v, ok := result["flag"].(bool); !ok || v != true {
+		t.Fatalf("flag: expected bool(true), got %T(%v)", result["flag"], result["flag"])
+	}
+
+	// int64 must survive
+	if v, ok := result["big"].(int64); !ok || v != 9999999999 {
+		t.Fatalf("big: expected int64(9999999999), got %T(%v)", result["big"], result["big"])
+	}
+
+	// ForEach item must survive
+	if v, ok := result["__foreach_item"].(string); !ok || v != "item-val" {
+		t.Fatalf("__foreach_item: expected string(item-val), got %T(%v)", result["__foreach_item"], result["__foreach_item"])
+	}
+
+	// ForEach index must be int (not float64)
+	if v, ok := result["__foreach_index"].(int); !ok || v != 5 {
+		t.Fatalf("__foreach_index: expected int(5), got %T(%v)", result["__foreach_index"], result["__foreach_index"])
+	}
+}
+
+func TestSpawnDirtyTypePreservation(t *testing.T) {
+	// Verify that SerializeDirty→deserialize round-trip preserves types
+	s := newRunState("test-dirty", nil)
+	s.SetClean("existing", "parent-data")   // not dirty
+	s.Set("child_wrote", 99)                 // dirty
+	s.Set("child_flag", true)                // dirty
+
+	data, err := s.SerializeDirty()
+	if err != nil {
+		t.Fatalf("SerializeDirty: %v", err)
+	}
+
+	// Should only contain dirty entries
+	if _, has := data["existing"]; has {
+		t.Fatal("expected 'existing' to be excluded (not dirty)")
+	}
+
+	result, err := deserializeStoreData(data)
+	if err != nil {
+		t.Fatalf("deserialize: %v", err)
+	}
+
+	if v, ok := result["child_wrote"].(int); !ok || v != 99 {
+		t.Fatalf("child_wrote: expected int(99), got %T(%v)", result["child_wrote"], result["child_wrote"])
+	}
+	if v, ok := result["child_flag"].(bool); !ok || v != true {
+		t.Fatalf("child_flag: expected bool(true), got %T(%v)", result["child_flag"], result["child_flag"])
+	}
+}

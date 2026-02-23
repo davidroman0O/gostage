@@ -5,3 +5,10 @@
 
 # OS files
 .DS_Store
+.s*
+A*.md
+F*.md
+I*.md
+C*.md
+cl*s
+T*.md

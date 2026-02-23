@@ -94,15 +94,15 @@ func TestStoreSerializationRoundTrip(t *testing.T) {
 	if vals["name"] != "Alice" {
 		t.Fatalf("expected Alice, got %v", vals["name"])
 	}
-	// JSON round-trip: int becomes float64
-	if vals["age"] != float64(30) {
-		t.Fatalf("expected 30, got %v", vals["age"])
+	// Type-preserved round-trip: int stays int (not float64)
+	if vals["age"] != int(30) {
+		t.Fatalf("expected int(30), got %T(%v)", vals["age"], vals["age"])
 	}
 	if vals["__foreach_item"] != "item-value" {
 		t.Fatalf("expected item-value, got %v", vals["__foreach_item"])
 	}
-	if vals["__foreach_index"] != float64(7) {
-		t.Fatalf("expected 7, got %v", vals["__foreach_index"])
+	if vals["__foreach_index"] != int(7) {
+		t.Fatalf("expected int(7), got %T(%v)", vals["__foreach_index"], vals["__foreach_index"])
 	}
 }
 

@@ -142,6 +142,71 @@ func TestCtx_Send_WithHandler(t *testing.T) {
 	}
 }
 
+func TestCtx_NumericCoercion(t *testing.T) {
+	s := newRunState("test", nil)
+	ctx := newCtx(context.Background(), s, NewDefaultLogger())
+
+	// int → int: direct assertion (no coercion needed)
+	Set(ctx, "count", 42)
+	if v := Get[int](ctx, "count"); v != 42 {
+		t.Fatalf("Get[int] expected 42, got %d", v)
+	}
+
+	// float64 → float64: direct assertion
+	Set(ctx, "ratio", 3.14)
+	if v := Get[float64](ctx, "ratio"); v != 3.14 {
+		t.Fatalf("Get[float64] expected 3.14, got %f", v)
+	}
+
+	// int → float64: coercion (int stored, read as float64)
+	if v := Get[float64](ctx, "count"); v != 42.0 {
+		t.Fatalf("Get[float64] from int expected 42.0, got %f", v)
+	}
+
+	// float64 → int: coercion with no fractional loss
+	Set(ctx, "whole", 3.0)
+	if v := Get[int](ctx, "whole"); v != 3 {
+		t.Fatalf("Get[int] from 3.0 expected 3, got %d", v)
+	}
+
+	// float64 → int: coercion blocked by fractional part
+	if v := Get[int](ctx, "ratio"); v != 0 {
+		t.Fatalf("Get[int] from 3.14 expected 0 (blocked), got %d", v)
+	}
+
+	// GetOr with coercion
+	if v := GetOr[float64](ctx, "count", 0.0); v != 42.0 {
+		t.Fatalf("GetOr[float64] from int expected 42.0, got %f", v)
+	}
+
+	// GetOr fallback when key missing
+	if v := GetOr[int](ctx, "missing", 99); v != 99 {
+		t.Fatalf("GetOr[int] missing expected 99, got %d", v)
+	}
+
+	// Simulate JSON round-trip: float64 stored (as JSON would), read as int
+	s.Set("json_num", float64(100))
+	if v := Get[int](ctx, "json_num"); v != 100 {
+		t.Fatalf("Get[int] from float64(100) expected 100, got %d", v)
+	}
+}
+
+func TestCtx_ItemCoercion(t *testing.T) {
+	s := newRunState("test", nil)
+	ctx := newCtx(context.Background(), s, NewDefaultLogger())
+
+	// Simulate JSON-decoded ForEach item (float64 instead of int)
+	ctx.forEachItem = float64(7)
+	ctx.forEachIndex = 0
+
+	if v := Item[int](ctx); v != 7 {
+		t.Fatalf("Item[int] from float64(7) expected 7, got %d", v)
+	}
+	if v := Item[float64](ctx); v != 7.0 {
+		t.Fatalf("Item[float64] expected 7.0, got %f", v)
+	}
+}
+
 func TestCtx_Context(t *testing.T) {
 	s := newRunState("test", nil)
 	goCtx, cancel := context.WithCancel(context.Background())

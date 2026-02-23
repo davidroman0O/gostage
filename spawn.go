@@ -393,29 +393,50 @@ func spawnChild(ctx context.Context, port int, job *spawnJob) (*spawnResult, err
 // --- Store serialization helpers ---
 
 // serializeStateForChild exports the workflow state plus ForEach item/index
-// as a map of JSON-encoded byte slices for gRPC transfer.
+// as a map of JSON-encoded typedEntry values for gRPC transfer.
+// Each entry carries the Go type name so the child can restore original types.
 func serializeStateForChild(s *runState, item any, index int) (map[string][]byte, error) {
-	export := s.ExportAll()
-	export["__foreach_item"] = item
-	export["__foreach_index"] = index
+	result, err := s.SerializeAll()
+	if err != nil {
+		return nil, err
+	}
 
-	result := make(map[string][]byte, len(export))
-	for k, v := range export {
-		data, err := json.Marshal(v)
+	// Add ForEach item/index with type metadata
+	for k, v := range map[string]any{"__foreach_item": item, "__foreach_index": index} {
+		jsonVal, err := json.Marshal(v)
 		if err != nil {
 			return nil, fmt.Errorf("marshal key %q: %w", k, err)
 		}
+		te := typedEntry{V: jsonVal, T: goTypeName(v)}
+		data, err := json.Marshal(te)
+		if err != nil {
+			return nil, fmt.Errorf("marshal entry %q: %w", k, err)
+		}
 		result[k] = data
 	}
+
 	return result, nil
 }
 
-// deserializeStoreData converts a map of JSON-encoded byte slices back to Go values.
+// deserializeStoreData converts a map of JSON-encoded typedEntry values back
+// to Go values with type restoration. Each entry is expected to be a
+// typedEntry{V, T} where T is the original Go type name.
 func deserializeStoreData(data map[string][]byte) (map[string]any, error) {
 	result := make(map[string]any, len(data))
-	for k, v := range data {
+	for k, raw := range data {
+		var te typedEntry
+		if err := json.Unmarshal(raw, &te); err == nil && len(te.V) > 0 {
+			// Typed format: decode value and restore original type
+			var val any
+			if err := json.Unmarshal(te.V, &val); err != nil {
+				return nil, fmt.Errorf("unmarshal value for key %q: %w", k, err)
+			}
+			result[k] = convertType(val, te.T)
+			continue
+		}
+		// Fallback: untyped format (backwards compatibility)
 		var val any
-		if err := json.Unmarshal(v, &val); err != nil {
+		if err := json.Unmarshal(raw, &val); err != nil {
 			return nil, fmt.Errorf("unmarshal key %q: %w", k, err)
 		}
 		result[k] = val

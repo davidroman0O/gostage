@@ -11,6 +11,15 @@ import (
 
 const maxLoopIterations = 10000
 
+// forEachCtxKey is a context key for propagating ForEach item/index
+// through sub-workflow execution without shared state races.
+type forEachCtxKey struct{}
+
+type forEachCtxData struct {
+	item  any
+	index int
+}
+
 // executeWorkflow walks through all steps in a workflow.
 // When resuming is true, completed steps are skipped based on persisted StepStates.
 func (e *Engine) executeWorkflow(ctx context.Context, wf *Workflow, runID RunID, resuming bool) error {
@@ -432,10 +441,13 @@ func (e *Engine) executeForEach(ctx context.Context, wf *Workflow, s *step, runI
 // executeForEachItem runs a single ForEach iteration with item context.
 func (e *Engine) executeForEachItem(ctx context.Context, wf *Workflow, ref StepRef, item any, index int, runID RunID, resuming bool) error {
 	if ref.subWorkflow != nil {
-		// For sub-workflows, set the item/index in the parent state before executing
+		// Propagate item/index through context.Value — safe for concurrent ForEach
+		// because each goroutine gets its own context chain.
+		iterCtx := context.WithValue(ctx, forEachCtxKey{}, &forEachCtxData{item: item, index: index})
+		// Also set in state for spawn serialization (serializeStateForChild reads from state)
 		wf.state.Set("__foreach_item", item)
 		wf.state.Set("__foreach_index", index)
-		return e.executeSub(ctx, wf, ref.subWorkflow, runID, resuming)
+		return e.executeSub(iterCtx, wf, ref.subWorkflow, runID, resuming)
 	}
 
 	td := lookupTask(ref.taskName)

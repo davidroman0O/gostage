@@ -14,6 +14,14 @@ type stateEntry struct {
 	dirty    bool   // true if written during this step (needs flushing)
 }
 
+// typedEntry is the wire format for spawn state transfer.
+// Each value carries its Go type name so the receiver can restore
+// the original type after JSON decoding (which turns all numbers to float64).
+type typedEntry struct {
+	V json.RawMessage `json:"v"`
+	T string          `json:"t"`
+}
+
 // StateEntry is the persistence-facing representation of a state key.
 type StateEntry struct {
 	Value    []byte // JSON-encoded value
@@ -116,6 +124,52 @@ func (s *runState) ExportDirty() map[string]any {
 		}
 	}
 	return out
+}
+
+// SerializeAll returns all entries as JSON-encoded typedEntry values
+// (each carrying the Go type name for round-trip fidelity).
+// Used by spawn to send the full state snapshot to child processes.
+func (s *runState) SerializeAll() (map[string][]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make(map[string][]byte, len(s.data))
+	for k, e := range s.data {
+		jsonVal, err := json.Marshal(e.value)
+		if err != nil {
+			return nil, fmt.Errorf("marshal key %q: %w", k, err)
+		}
+		te := typedEntry{V: jsonVal, T: e.typeName}
+		data, err := json.Marshal(te)
+		if err != nil {
+			return nil, fmt.Errorf("marshal entry %q: %w", k, err)
+		}
+		result[k] = data
+	}
+	return result, nil
+}
+
+// SerializeDirty returns only dirty entries as JSON-encoded typedEntry values.
+// Used by child processes to return only their writes back to the parent.
+func (s *runState) SerializeDirty() (map[string][]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make(map[string][]byte)
+	for k, e := range s.data {
+		if !e.dirty {
+			continue
+		}
+		jsonVal, err := json.Marshal(e.value)
+		if err != nil {
+			return nil, fmt.Errorf("marshal key %q: %w", k, err)
+		}
+		te := typedEntry{V: jsonVal, T: e.typeName}
+		data, err := json.Marshal(te)
+		if err != nil {
+			return nil, fmt.Errorf("marshal entry %q: %w", k, err)
+		}
+		result[k] = data
+	}
+	return result, nil
 }
 
 // Clone creates an independent copy of the run state.

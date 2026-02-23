@@ -176,14 +176,11 @@ func HandleChild() {
 	}
 
 	// Send final store back to parent — only dirty keys (what the child wrote)
-	finalStore := childState.ExportDirty()
-	finalData := make(map[string][]byte, len(finalStore))
-	for k, v := range finalStore {
-		data, marshalErr := json.Marshal(v)
-		if marshalErr != nil {
-			continue
-		}
-		finalData[k] = data
+	// Uses SerializeDirty to include type metadata for round-trip fidelity.
+	finalData, serErr := childState.SerializeDirty()
+	if serErr != nil {
+		sendError(ctx, client, jobID, fmt.Sprintf("serialize results: %v", serErr))
+		os.Exit(1)
 	}
 
 	client.SendMessage(ctx, &pb.IPCMessage{
