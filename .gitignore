@@ -12,3 +12,7 @@ I*.md
 C*.md
 cl*s
 T*.md
+M*.md
+
+.c*
+dec*

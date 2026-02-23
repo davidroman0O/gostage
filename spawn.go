@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -25,7 +26,7 @@ type spawnServer struct {
 	pb.UnimplementedWorkflowIPCServer
 
 	mu   sync.Mutex
-	jobs map[string]*spawnJob // job ID → job
+	jobs map[string]*SpawnJob // job ID → job
 
 	listener net.Listener
 	srv      *grpc.Server
@@ -35,12 +36,13 @@ type spawnServer struct {
 	engine *Engine
 }
 
-// spawnJob represents one ForEach item to execute in a child process.
-type spawnJob struct {
-	id             string
-	taskName       string
-	storeData      map[string][]byte // serialized store snapshot including item/index
-	definitionJSON []byte            // serialized SubWorkflowDef for multi-stage children
+// SpawnJob represents one ForEach item to execute in a child process.
+// The exported fields are accessible to ChildMiddleware implementations.
+type SpawnJob struct {
+	ID             string
+	TaskName       string
+	StoreData      map[string][]byte // serialized store snapshot including item/index
+	DefinitionJSON []byte            // serialized SubWorkflowDef for multi-stage children
 	resultCh       chan *spawnResult  // child sends result here (buffered, size 1)
 }
 
@@ -58,7 +60,7 @@ func newSpawnServer(engine *Engine) (*spawnServer, error) {
 	}
 
 	ss := &spawnServer{
-		jobs:     make(map[string]*spawnJob),
+		jobs:     make(map[string]*SpawnJob),
 		listener: lis,
 		srv: grpc.NewServer(
 			grpc.KeepaliveParams(keepalive.ServerParameters{
@@ -87,10 +89,10 @@ func (ss *spawnServer) stop() {
 }
 
 // addJob registers a job for a child process to pick up.
-func (ss *spawnServer) addJob(job *spawnJob) {
+func (ss *spawnServer) addJob(job *SpawnJob) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
-	ss.jobs[job.id] = job
+	ss.jobs[job.ID] = job
 }
 
 // RequestWorkflowDefinition is called by child processes to get their work assignment.
@@ -104,10 +106,10 @@ func (ss *spawnServer) RequestWorkflowDefinition(_ context.Context, req *pb.Read
 	}
 
 	return &pb.WorkflowDefinition{
-		Id:             job.id,
-		Name:           job.taskName,
-		InitialStore:   job.storeData,
-		DefinitionJson: job.definitionJSON,
+		Id:             job.ID,
+		Name:           job.TaskName,
+		InitialStore:   job.StoreData,
+		DefinitionJson: job.DefinitionJSON,
 	}, nil
 }
 
@@ -218,10 +220,10 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 		}
 
 		jobID := uuid.New().String()
-		job := &spawnJob{
-			id:        jobID,
-			taskName:  s.forEachRef.taskName,
-			storeData: storeData,
+		job := &SpawnJob{
+			ID:        jobID,
+			TaskName:  s.forEachRef.taskName,
+			StoreData: storeData,
 			resultCh:  make(chan *spawnResult, 1),
 		}
 
@@ -235,15 +237,15 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 			if marshalErr != nil {
 				return fmt.Errorf("marshal workflow definition: %w", marshalErr)
 			}
-			job.definitionJSON = defJSON
-			job.taskName = s.forEachRef.subWorkflow.ID
+			job.DefinitionJSON = defJSON
+			job.TaskName = s.forEachRef.subWorkflow.ID
 		}
 		ss.addJob(job)
 
 		sem <- struct{}{} // acquire semaphore
 		wg.Add(1)
 
-		go func(job *spawnJob, itemIndex int, itemStepKey string) {
+		go func(job *SpawnJob, itemIndex int, itemStepKey string) {
 			defer wg.Done()
 			defer func() { <-sem }() // release semaphore
 
@@ -316,7 +318,7 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 }
 
 // spawnChild spawns a child process, waits for it to complete, and returns its result.
-func spawnChild(ctx context.Context, port int, job *spawnJob) (*spawnResult, error) {
+func spawnChild(ctx context.Context, port int, job *SpawnJob) (*spawnResult, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("get executable: %w", err)
@@ -325,7 +327,7 @@ func spawnChild(ctx context.Context, port int, job *spawnJob) (*spawnResult, err
 	cmd := exec.CommandContext(ctx, executable,
 		"--gostage-child",
 		fmt.Sprintf("--grpc-addr=localhost:%d", port),
-		fmt.Sprintf("--job-id=%s", job.id),
+		fmt.Sprintf("--job-id=%s", job.ID),
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -344,8 +346,10 @@ func spawnChild(ctx context.Context, port int, job *spawnJob) (*spawnResult, err
 	}
 	setPdeathsig(cmd.SysProcAttr)
 
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start child: %w", err)
+	startErr := cmd.Start()
+	runtime.UnlockOSThread() // release thread lock set by setPdeathsig on Linux; no-op on other platforms
+	if startErr != nil {
+		return nil, fmt.Errorf("start child: %w", startErr)
 	}
 
 	// Wait for result from gRPC handler OR process exit

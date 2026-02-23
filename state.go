@@ -36,7 +36,8 @@ type runState struct {
 	mu      sync.RWMutex
 	runID   RunID
 	data    map[string]stateEntry
-	persist Persistence // nil = memory-only (children, tests)
+	deleted map[string]struct{} // keys pending deletion in persistence
+	persist Persistence         // nil = memory-only (children, tests)
 }
 
 // newRunState creates a new run state buffer.
@@ -45,6 +46,7 @@ func newRunState(runID RunID, persist Persistence) *runState {
 	return &runState{
 		runID:   runID,
 		data:    make(map[string]stateEntry),
+		deleted: make(map[string]struct{}),
 		persist: persist,
 	}
 }
@@ -86,11 +88,15 @@ func (s *runState) Get(key string) (any, bool) {
 	return e.value, true
 }
 
-// Delete removes a key from the buffer.
+// Delete removes a key from the buffer and records it as a tombstone
+// so Flush can remove it from persistence on the next flush cycle.
 func (s *runState) Delete(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.data, key)
+	if s.persist != nil {
+		s.deleted[key] = struct{}{}
+	}
 }
 
 // Keys returns all keys in the buffer.
@@ -184,6 +190,7 @@ func (s *runState) Clone() *runState {
 	c := &runState{
 		runID:   s.runID,
 		data:    make(map[string]stateEntry, len(s.data)),
+		deleted: make(map[string]struct{}),
 		persist: s.persist,
 	}
 	for k, e := range s.data {
@@ -221,21 +228,27 @@ func (s *runState) Flush(ctx context.Context) error {
 		}
 	}
 
-	if len(entries) == 0 {
-		return nil
-	}
-
-	if err := s.persist.SaveState(ctx, s.runID, entries); err != nil {
-		return fmt.Errorf("save state: %w", err)
-	}
-
-	// Clear dirty flags
-	for k, e := range s.data {
-		if e.dirty {
-			e.dirty = false
-			s.data[k] = e
+	if len(entries) > 0 {
+		if err := s.persist.SaveState(ctx, s.runID, entries); err != nil {
+			return fmt.Errorf("save state: %w", err)
+		}
+		// Clear dirty flags
+		for k, e := range s.data {
+			if e.dirty {
+				e.dirty = false
+				s.data[k] = e
+			}
 		}
 	}
+
+	// Flush tombstones: remove keys that were deleted since last flush
+	for key := range s.deleted {
+		if err := s.persist.DeleteStateKey(ctx, s.runID, key); err != nil {
+			return fmt.Errorf("delete state key %q: %w", key, err)
+		}
+	}
+	s.deleted = make(map[string]struct{})
+
 	return nil
 }
 

@@ -12,7 +12,8 @@ type StepMiddleware func(ctx context.Context, s *step, runID RunID, next func() 
 type TaskMiddleware func(tctx *Ctx, taskName string, next func() error) error
 
 // ChildMiddleware wraps child process execution.
-type ChildMiddleware func(ctx context.Context, job *spawnJob, next func() error) error
+// The SpawnJob fields expose job information to external Plugin implementations.
+type ChildMiddleware func(ctx context.Context, job *SpawnJob, next func() error) error
 
 // Plugin registers middleware at multiple levels.
 type Plugin interface {

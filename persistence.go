@@ -29,6 +29,9 @@ type Persistence interface {
 	// DeleteState removes all state entries for a run.
 	DeleteState(ctx context.Context, runID RunID) error
 
+	// DeleteStateKey removes a single state entry for a run.
+	DeleteStateKey(ctx context.Context, runID RunID, key string) error
+
 	// ListRuns returns runs matching the given filter.
 	ListRuns(ctx context.Context, filter RunFilter) ([]*RunState, error)
 
@@ -80,7 +83,7 @@ func newMemoryPersistence() *memoryPersistence {
 func (m *memoryPersistence) SaveRun(_ context.Context, run *RunState) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.runs[run.RunID] = run
+	m.runs[run.RunID] = copyRunState(run)
 	return nil
 }
 
@@ -91,7 +94,7 @@ func (m *memoryPersistence) LoadRun(_ context.Context, runID RunID) (*RunState, 
 	if !ok {
 		return nil, &RunNotFoundError{RunID: runID}
 	}
-	return run, nil
+	return copyRunState(run), nil
 }
 
 func (m *memoryPersistence) UpdateStepStatus(_ context.Context, runID RunID, stepID string, status Status) error {
@@ -145,6 +148,15 @@ func (m *memoryPersistence) DeleteState(_ context.Context, runID RunID) error {
 	return nil
 }
 
+func (m *memoryPersistence) DeleteStateKey(_ context.Context, runID RunID, key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.states[runID] != nil {
+		delete(m.states[runID], key)
+	}
+	return nil
+}
+
 func (m *memoryPersistence) ListRuns(_ context.Context, filter RunFilter) ([]*RunState, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -156,12 +168,42 @@ func (m *memoryPersistence) ListRuns(_ context.Context, filter RunFilter) ([]*Ru
 		if filter.Status != "" && run.Status != filter.Status {
 			continue
 		}
-		results = append(results, run)
+		results = append(results, copyRunState(run))
 		if filter.Limit > 0 && len(results) >= filter.Limit {
 			break
 		}
 	}
 	return results, nil
+}
+
+// copyRunState returns a shallow copy of run with its mutable fields deep-copied
+// to prevent aliasing between callers and the stored record.
+func copyRunState(run *RunState) *RunState {
+	if run == nil {
+		return nil
+	}
+	cp := *run // copy scalar fields
+
+	if run.StepStates != nil {
+		cp.StepStates = make(map[string]Status, len(run.StepStates))
+		for k, v := range run.StepStates {
+			cp.StepStates[k] = v
+		}
+	}
+
+	if run.Mutations != nil {
+		cp.Mutations = make([]Mutation, len(run.Mutations))
+		copy(cp.Mutations, run.Mutations)
+	}
+
+	if run.SuspendData != nil {
+		cp.SuspendData = make(map[string]any, len(run.SuspendData))
+		for k, v := range run.SuspendData {
+			cp.SuspendData[k] = v
+		}
+	}
+
+	return &cp
 }
 
 func (m *memoryPersistence) Close() error {

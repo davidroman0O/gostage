@@ -444,9 +444,6 @@ func (e *Engine) executeForEachItem(ctx context.Context, wf *Workflow, ref StepR
 		// Propagate item/index through context.Value — safe for concurrent ForEach
 		// because each goroutine gets its own context chain.
 		iterCtx := context.WithValue(ctx, forEachCtxKey{}, &forEachCtxData{item: item, index: index})
-		// Also set in state for spawn serialization (serializeStateForChild reads from state)
-		wf.state.Set("__foreach_item", item)
-		wf.state.Set("__foreach_index", index)
 		return e.executeSub(iterCtx, wf, ref.subWorkflow, runID, resuming)
 	}
 

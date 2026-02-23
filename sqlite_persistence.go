@@ -21,6 +21,12 @@ func newSQLitePersistence(path string) (*sqlitePersistence, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
+	// SQLite serializes writes at the file level; a single connection prevents
+	// SQLITE_BUSY errors under concurrent flush calls.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+
 	// Enable WAL mode for better concurrent read performance.
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		db.Close()
@@ -197,18 +203,45 @@ func (p *sqlitePersistence) LoadRun(ctx context.Context, runID RunID) (*RunState
 }
 
 func (p *sqlitePersistence) UpdateStepStatus(ctx context.Context, runID RunID, stepID string, status Status) error {
-	run, err := p.LoadRun(ctx, runID)
+	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	var statesJSON string
+	err = tx.QueryRowContext(ctx,
+		`SELECT step_states FROM runs WHERE run_id = ?`, string(runID)).Scan(&statesJSON)
+	if err == sql.ErrNoRows {
+		return &RunNotFoundError{RunID: runID}
+	}
+	if err != nil {
+		return fmt.Errorf("load step states: %w", err)
 	}
 
-	if run.StepStates == nil {
-		run.StepStates = make(map[string]Status)
+	var states map[string]Status
+	if statesJSON == "" || statesJSON == "{}" {
+		states = make(map[string]Status)
+	} else {
+		if err := json.Unmarshal([]byte(statesJSON), &states); err != nil {
+			return fmt.Errorf("unmarshal step states: %w", err)
+		}
 	}
-	run.StepStates[stepID] = status
-	run.UpdatedAt = time.Now()
+	states[stepID] = status
 
-	return p.SaveRun(ctx, run)
+	newJSON, err := json.Marshal(states)
+	if err != nil {
+		return fmt.Errorf("marshal step states: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx,
+		`UPDATE runs SET step_states = ?, updated_at = ? WHERE run_id = ?`,
+		string(newJSON), time.Now().Format(time.RFC3339Nano), string(runID))
+	if err != nil {
+		return fmt.Errorf("update step states: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 func (p *sqlitePersistence) SaveState(ctx context.Context, runID RunID, entries map[string]StateEntry) error {
@@ -263,6 +296,13 @@ func (p *sqlitePersistence) LoadState(ctx context.Context, runID RunID) (map[str
 
 func (p *sqlitePersistence) DeleteState(ctx context.Context, runID RunID) error {
 	_, err := p.db.ExecContext(ctx, `DELETE FROM run_state WHERE run_id = ?`, string(runID))
+	return err
+}
+
+func (p *sqlitePersistence) DeleteStateKey(ctx context.Context, runID RunID, key string) error {
+	_, err := p.db.ExecContext(ctx,
+		`DELETE FROM run_state WHERE run_id = ? AND key = ?`,
+		string(runID), key)
 	return err
 }
 

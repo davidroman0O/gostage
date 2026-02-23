@@ -132,6 +132,9 @@ func (e *Engine) Run(ctx context.Context, wf *Workflow, params P) (RunID, error)
 		case handle.done <- result:
 		default:
 		}
+		e.mu.Lock()
+		delete(e.runs, runID)
+		e.mu.Unlock()
 	})
 
 	return runID, nil
@@ -220,6 +223,8 @@ func (e *Engine) Resume(ctx context.Context, wf *Workflow, runID RunID, data P) 
 	if run.Status != Suspended {
 		return nil, fmt.Errorf("cannot resume run %s: status is %s, expected suspended", runID, run.Status)
 	}
+
+	wf = wf.clone()
 
 	// Restore state from persistence
 	wf.state = newRunState(runID, e.persistence)

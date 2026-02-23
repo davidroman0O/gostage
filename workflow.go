@@ -627,6 +627,13 @@ func (wf *Workflow) clone() *Workflow {
 	// Deep copy steps so mutations (disable/enable) don't leak between runs
 	cloned.steps = make([]step, len(wf.steps))
 	copy(cloned.steps, wf.steps)
+	// Deep copy sub-workflow pointers so concurrent runs with Sub steps
+	// do not share mutable step state when dynamic mutations are active.
+	for i := range cloned.steps {
+		if cloned.steps[i].subWorkflow != nil {
+			cloned.steps[i].subWorkflow = cloned.steps[i].subWorkflow.clone()
+		}
+	}
 	return cloned
 }
 
