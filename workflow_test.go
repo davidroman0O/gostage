@@ -151,7 +151,7 @@ func TestWorkflow_SubWorkflow(t *testing.T) {
 	Task("w.inner", func(ctx *Ctx) error { return nil })
 
 	inner := NewWorkflow("inner").Step("w.inner").Commit()
-	outer := NewWorkflow("outer").SubWorkflow(inner).Commit()
+	outer := NewWorkflow("outer").Sub(inner).Commit()
 
 	if outer.steps[0].kind != stepSub {
 		t.Fatalf("expected stepSub")

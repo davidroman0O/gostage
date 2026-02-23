@@ -25,6 +25,8 @@ type Engine struct {
 	// workflowCache stores workflows by ID for timer-based recovery.
 	workflowCacheMu sync.RWMutex
 	workflowCache   map[string]*Workflow
+	cacheOrder      []string // insertion order for eviction
+	cacheSize       int      // 0 = unlimited
 
 	// messageHandlers stores IPC message handler callbacks.
 	messageHandlersMu sync.RWMutex
@@ -37,7 +39,7 @@ type Engine struct {
 	engineMiddleware []EngineMiddleware
 	stepMiddleware   []StepMiddleware
 	taskMiddleware   []TaskMiddleware
-	spawnMiddleware  []SpawnMiddleware
+	childMiddleware  []ChildMiddleware
 
 	// autoRecover enables crash recovery on startup.
 	autoRecover bool
@@ -221,7 +223,9 @@ func (e *Engine) Resume(ctx context.Context, wf *Workflow, runID RunID, data P) 
 
 	// Restore state from persistence
 	wf.state = newRunState(runID, e.persistence)
-	wf.state.LoadFromPersistence(ctx)
+	if err := wf.state.LoadFromPersistence(ctx); err != nil {
+		return nil, fmt.Errorf("load state for resume: %w", err)
+	}
 
 	// Inject resume data
 	wf.state.Set("__resuming", true)
@@ -232,7 +236,9 @@ func (e *Engine) Resume(ctx context.Context, wf *Workflow, runID RunID, data P) 
 	// Update run status to Running
 	run.Status = Running
 	run.UpdatedAt = time.Now()
-	e.persistence.SaveRun(ctx, run)
+	if err := e.persistence.SaveRun(ctx, run); err != nil {
+		return nil, fmt.Errorf("save run status for resume: %w", err)
+	}
 
 	// Re-execute the workflow (the task with IsResuming check will take the resume path)
 	result := e.doExecute(ctx, wf, runID, true)
@@ -297,6 +303,16 @@ func (e *Engine) Close() error {
 func (e *Engine) cacheWorkflow(wf *Workflow) {
 	e.workflowCacheMu.Lock()
 	defer e.workflowCacheMu.Unlock()
+
+	if _, exists := e.workflowCache[wf.ID]; !exists {
+		// Evict oldest if at capacity
+		if e.cacheSize > 0 && len(e.workflowCache) >= e.cacheSize {
+			oldest := e.cacheOrder[0]
+			delete(e.workflowCache, oldest)
+			e.cacheOrder = e.cacheOrder[1:]
+		}
+		e.cacheOrder = append(e.cacheOrder, wf.ID)
+	}
 	e.workflowCache[wf.ID] = wf
 }
 
@@ -463,7 +479,14 @@ func (e *Engine) doExecute(ctx context.Context, wf *Workflow, runID RunID, resum
 				return mw(ctx, wf, runID, next)
 			}
 		}
-		err = chain()
+		err = func() (rerr error) {
+			defer func() {
+				if r := recover(); r != nil {
+					rerr = fmt.Errorf("middleware panic: %v", r)
+				}
+			}()
+			return chain()
+		}()
 	} else {
 		err = e.executeWorkflow(ctx, wf, runID, resuming)
 	}

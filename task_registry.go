@@ -52,9 +52,6 @@ func Task(name string, fn TaskFunc, opts ...TaskOption) {
 		opt(td)
 	}
 	taskRegistry[name] = td
-
-	// Auto-bridge: register action factory so child processes can reconstruct workflows
-	registerTaskAsAction(name, fn, td)
 }
 
 // lookupTask returns the task definition for the given name, or nil if not found.
@@ -64,14 +61,14 @@ func lookupTask(name string) *taskDef {
 	return taskRegistry[name]
 }
 
-// ResetTaskRegistry clears all registered tasks and action factories. Used in tests.
+// ResetTaskRegistry clears all registered tasks and function registries. Used in tests.
 func ResetTaskRegistry() {
 	taskRegistryMu.Lock()
 	defer taskRegistryMu.Unlock()
 	taskRegistry = make(map[string]*taskDef)
 
-	// Also clear action factories since they're auto-bridged from tasks
-	ResetActionFactories()
+	// Also clear function registries (conditions, map functions)
+	ResetFunctionRegistries()
 }
 
 // TaskOption configures a task definition.

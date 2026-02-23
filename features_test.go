@@ -409,62 +409,6 @@ func TestOnMessageWildcard(t *testing.T) {
 	}
 }
 
-// === Action Factory ===
-
-func TestActionFactory(t *testing.T) {
-	ResetTaskRegistry()
-
-	// Register a task — should auto-register an action factory
-	Task("action.process", func(ctx *Ctx) error {
-		Set(ctx, "processed", true)
-		return nil
-	}, WithTags("core"), WithDescription("Process items"))
-
-	factory := LookupActionFactory("action.process")
-	if factory == nil {
-		t.Fatal("expected auto-bridged action factory")
-	}
-
-	action := factory()
-	if action.Name() != "action.process" {
-		t.Fatalf("expected name 'action.process', got %q", action.Name())
-	}
-	if action.Description() != "Process items" {
-		t.Fatalf("expected description 'Process items', got %q", action.Description())
-	}
-	if len(action.Tags()) != 1 || action.Tags()[0] != "core" {
-		t.Fatalf("expected tags [core], got %v", action.Tags())
-	}
-}
-
-func TestRegisterAction(t *testing.T) {
-	ResetTaskRegistry()
-
-	type customAction struct {
-		BaseAction
-	}
-
-	RegisterAction("custom.action", func() Action {
-		return &customAction{
-			BaseAction: BaseAction{
-				ActionName:        "custom.action",
-				ActionDescription: "A custom action",
-				ActionTags:        []string{"custom"},
-			},
-		}
-	})
-
-	factory := LookupActionFactory("custom.action")
-	if factory == nil {
-		t.Fatal("expected registered factory")
-	}
-
-	action := factory()
-	if action.Name() != "custom.action" {
-		t.Fatalf("expected name 'custom.action', got %q", action.Name())
-	}
-}
-
 // === Timer Scheduler ===
 
 func TestTimerScheduler(t *testing.T) {
@@ -693,7 +637,7 @@ func (a pluginAdapter) TaskMiddleware() TaskMiddleware {
 		return next()
 	}
 }
-func (a pluginAdapter) SpawnMiddleware() SpawnMiddleware { return nil }
+func (a pluginAdapter) ChildMiddleware() ChildMiddleware { return nil }
 
 func TestPerWorkflowMiddleware(t *testing.T) {
 	ResetTaskRegistry()
@@ -878,15 +822,18 @@ func TestWorkflowToDefinition(t *testing.T) {
 		Step("def.charge").
 		Commit()
 
-	def := WorkflowToDefinition(wf)
+	def, err := WorkflowToDefinition(wf)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if def.ID != "order-def" {
 		t.Fatalf("expected ID 'order-def', got %q", def.ID)
 	}
-	if len(def.Stages) != 2 {
-		t.Fatalf("expected 2 stages, got %d", len(def.Stages))
+	if len(def.Steps) != 2 {
+		t.Fatalf("expected 2 steps, got %d", len(def.Steps))
 	}
-	if def.Stages[0].Actions[0].Name != "def.validate" {
-		t.Fatalf("expected first action 'def.validate', got %q", def.Stages[0].Actions[0].Name)
+	if def.Steps[0].TaskName != "def.validate" {
+		t.Fatalf("expected first task 'def.validate', got %q", def.Steps[0].TaskName)
 	}
 }
 
@@ -897,7 +844,10 @@ func TestDefinitionMarshalUnmarshal(t *testing.T) {
 	Task("def.b", func(ctx *Ctx) error { return nil })
 
 	wf := NewWorkflow("serial-def").Step("def.a").Step("def.b").Commit()
-	def := WorkflowToDefinition(wf)
+	def, defErr := WorkflowToDefinition(wf)
+	if defErr != nil {
+		t.Fatal(defErr)
+	}
 
 	data, err := MarshalWorkflowDefinition(def)
 	if err != nil {
@@ -911,8 +861,8 @@ func TestDefinitionMarshalUnmarshal(t *testing.T) {
 	if def2.ID != def.ID {
 		t.Fatalf("expected ID %q, got %q", def.ID, def2.ID)
 	}
-	if len(def2.Stages) != 2 {
-		t.Fatalf("expected 2 stages, got %d", len(def2.Stages))
+	if len(def2.Steps) != 2 {
+		t.Fatalf("expected 2 steps, got %d", len(def2.Steps))
 	}
 }
 
@@ -929,7 +879,10 @@ func TestNewWorkflowFromDef(t *testing.T) {
 	})
 
 	wf := NewWorkflow("rebuild-def").Step("def.step1").Step("def.step2").Commit()
-	def := WorkflowToDefinition(wf)
+	def, defErr := WorkflowToDefinition(wf)
+	if defErr != nil {
+		t.Fatal(defErr)
+	}
 
 	data, _ := MarshalWorkflowDefinition(def)
 	def2, _ := UnmarshalWorkflowDefinition(data)
@@ -949,6 +902,354 @@ func TestNewWorkflowFromDef(t *testing.T) {
 	}
 	if result.Store["step1"] != true || result.Store["step2"] != true {
 		t.Fatal("both steps should have executed")
+	}
+}
+
+// === Function Registry ===
+
+func TestFunctionRegistry(t *testing.T) {
+	ResetTaskRegistry()
+
+	// Register a condition
+	Condition("test-cond", func(ctx *Ctx) bool { return true })
+	if fn := lookupCondition("test-cond"); fn == nil {
+		t.Fatal("expected to find registered condition")
+	}
+	if fn := lookupCondition("nonexistent"); fn != nil {
+		t.Fatal("expected nil for unregistered condition")
+	}
+
+	// Register a map function
+	MapFn("test-map", func(ctx *Ctx) {})
+	if fn := lookupMapFn("test-map"); fn == nil {
+		t.Fatal("expected to find registered map function")
+	}
+	if fn := lookupMapFn("nonexistent"); fn != nil {
+		t.Fatal("expected nil for unregistered map function")
+	}
+
+	// Duplicate condition should panic
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic on duplicate condition")
+			}
+		}()
+		Condition("test-cond", func(ctx *Ctx) bool { return false })
+	}()
+
+	// Duplicate map function should panic
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic on duplicate map function")
+			}
+		}()
+		MapFn("test-map", func(ctx *Ctx) {})
+	}()
+
+	// Reset clears everything
+	ResetFunctionRegistries()
+	if fn := lookupCondition("test-cond"); fn != nil {
+		t.Fatal("expected nil after reset")
+	}
+	if fn := lookupMapFn("test-map"); fn != nil {
+		t.Fatal("expected nil after reset")
+	}
+}
+
+// === Named Builder Methods ===
+
+func TestNamedBuilderMethods(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("nb.task", func(ctx *Ctx) error { return nil })
+	Condition("nb.cond", func(ctx *Ctx) bool { return true })
+	MapFn("nb.transform", func(ctx *Ctx) {})
+
+	// WhenNamed
+	bc := WhenNamed("nb.cond").Step("nb.task")
+	if bc.condName != "nb.cond" {
+		t.Fatalf("expected condName 'nb.cond', got %q", bc.condName)
+	}
+	if bc.condition == nil {
+		t.Fatal("expected condition function to be set")
+	}
+
+	// MapNamed
+	wf := NewWorkflow("nb-test").
+		MapNamed("nb.transform").
+		Commit()
+	if wf.steps[0].mapFnName != "nb.transform" {
+		t.Fatalf("expected mapFnName 'nb.transform', got %q", wf.steps[0].mapFnName)
+	}
+	if wf.steps[0].mapFn == nil {
+		t.Fatal("expected mapFn to be set")
+	}
+
+	// DoUntilNamed
+	wf2 := NewWorkflow("nb-until").
+		DoUntilNamed(Step("nb.task"), "nb.cond").
+		Commit()
+	if wf2.steps[0].loopCondName != "nb.cond" {
+		t.Fatalf("expected loopCondName 'nb.cond', got %q", wf2.steps[0].loopCondName)
+	}
+
+	// DoWhileNamed
+	wf3 := NewWorkflow("nb-while").
+		DoWhileNamed(Step("nb.task"), "nb.cond").
+		Commit()
+	if wf3.steps[0].loopCondName != "nb.cond" {
+		t.Fatalf("expected loopCondName 'nb.cond', got %q", wf3.steps[0].loopCondName)
+	}
+
+	// WhenNamed panics on unregistered condition
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic on unregistered condition")
+			}
+		}()
+		WhenNamed("nonexistent")
+	}()
+}
+
+// === Full Definition Serialization (All 10 Step Kinds) ===
+
+func TestDefinitionAllStepKinds(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("all.task1", func(ctx *Ctx) error { return nil })
+	Task("all.task2", func(ctx *Ctx) error { return nil })
+	Task("all.task3", func(ctx *Ctx) error { return nil })
+	Task("all.loop", func(ctx *Ctx) error { return nil })
+	Condition("all.is-ready", func(ctx *Ctx) bool { return true })
+	Condition("all.has-more", func(ctx *Ctx) bool { return false })
+	MapFn("all.transform", func(ctx *Ctx) {})
+
+	// Build a sub-workflow for stepSub
+	subWf := NewWorkflow("all-sub").Step("all.task3").Commit()
+
+	wf := NewWorkflow("all-kinds").
+		Step("all.task1").                                           // stepSingle
+		Stage("validation", Step("all.task1"), Step("all.task2")).   // stepStage
+		Parallel(Step("all.task1"), Step("all.task2")).              // stepParallel
+		Branch(                                                     // stepBranch
+			WhenNamed("all.is-ready").Step("all.task1"),
+			Default().Step("all.task2"),
+		).
+		ForEach("items", Step("all.task1"), WithConcurrency(3)).    // stepForEach
+		MapNamed("all.transform").                                  // stepMap
+		DoUntilNamed(Step("all.loop"), "all.is-ready").             // stepDoUntil
+		DoWhileNamed(Step("all.loop"), "all.has-more").             // stepDoWhile
+		Sub(subWf).                                                 // stepSub
+		Sleep(5 * time.Second).                                     // stepSleep
+		Commit()
+
+	// Serialize
+	def, err := WorkflowToDefinition(wf)
+	if err != nil {
+		t.Fatalf("WorkflowToDefinition: %v", err)
+	}
+
+	if len(def.Steps) != 10 {
+		t.Fatalf("expected 10 steps, got %d", len(def.Steps))
+	}
+
+	// Verify kind names
+	expectedKinds := []string{"single", "stage", "parallel", "branch", "forEach", "map", "doUntil", "doWhile", "sub", "sleep"}
+	for i, expected := range expectedKinds {
+		if def.Steps[i].Kind != expected {
+			t.Fatalf("step %d: expected kind %q, got %q", i, expected, def.Steps[i].Kind)
+		}
+	}
+
+	// Verify specific fields
+	if def.Steps[0].TaskName != "all.task1" {
+		t.Fatalf("single step: expected task 'all.task1', got %q", def.Steps[0].TaskName)
+	}
+	if len(def.Steps[1].Refs) != 2 {
+		t.Fatalf("stage step: expected 2 refs, got %d", len(def.Steps[1].Refs))
+	}
+	if len(def.Steps[2].Refs) != 2 {
+		t.Fatalf("parallel step: expected 2 refs, got %d", len(def.Steps[2].Refs))
+	}
+	if len(def.Steps[3].Cases) != 2 {
+		t.Fatalf("branch step: expected 2 cases, got %d", len(def.Steps[3].Cases))
+	}
+	if def.Steps[3].Cases[0].ConditionName != "all.is-ready" {
+		t.Fatalf("branch case 0: expected condition 'all.is-ready', got %q", def.Steps[3].Cases[0].ConditionName)
+	}
+	if !def.Steps[3].Cases[1].IsDefault {
+		t.Fatal("branch case 1: expected isDefault=true")
+	}
+	if def.Steps[4].CollectionKey != "items" {
+		t.Fatalf("forEach step: expected collection key 'items', got %q", def.Steps[4].CollectionKey)
+	}
+	if def.Steps[4].Concurrency != 3 {
+		t.Fatalf("forEach step: expected concurrency 3, got %d", def.Steps[4].Concurrency)
+	}
+	if def.Steps[5].MapFnName != "all.transform" {
+		t.Fatalf("map step: expected map fn 'all.transform', got %q", def.Steps[5].MapFnName)
+	}
+	if def.Steps[6].LoopCondName != "all.is-ready" {
+		t.Fatalf("doUntil step: expected cond 'all.is-ready', got %q", def.Steps[6].LoopCondName)
+	}
+	if def.Steps[7].LoopCondName != "all.has-more" {
+		t.Fatalf("doWhile step: expected cond 'all.has-more', got %q", def.Steps[7].LoopCondName)
+	}
+	if def.Steps[8].SubWorkflow == nil {
+		t.Fatal("sub step: expected sub-workflow, got nil")
+	}
+	if def.Steps[8].SubWorkflow.ID != "all-sub" {
+		t.Fatalf("sub step: expected sub-workflow ID 'all-sub', got %q", def.Steps[8].SubWorkflow.ID)
+	}
+	if def.Steps[9].SleepDuration != (5 * time.Second).String() {
+		t.Fatalf("sleep step: expected duration '5s', got %q", def.Steps[9].SleepDuration)
+	}
+
+	// Marshal → Unmarshal round-trip
+	data, marshalErr := MarshalWorkflowDefinition(def)
+	if marshalErr != nil {
+		t.Fatalf("marshal: %v", marshalErr)
+	}
+
+	def2, unmarshalErr := UnmarshalWorkflowDefinition(data)
+	if unmarshalErr != nil {
+		t.Fatalf("unmarshal: %v", unmarshalErr)
+	}
+
+	if len(def2.Steps) != 10 {
+		t.Fatalf("after round-trip: expected 10 steps, got %d", len(def2.Steps))
+	}
+
+	// Rebuild workflow from definition
+	rebuilt, rebuildErr := NewWorkflowFromDef(def2)
+	if rebuildErr != nil {
+		t.Fatalf("NewWorkflowFromDef: %v", rebuildErr)
+	}
+
+	if len(rebuilt.steps) != 10 {
+		t.Fatalf("rebuilt: expected 10 steps, got %d", len(rebuilt.steps))
+	}
+
+	// Verify rebuilt step kinds match
+	expectedStepKinds := []stepKind{stepSingle, stepStage, stepParallel, stepBranch, stepForEach, stepMap, stepDoUntil, stepDoWhile, stepSub, stepSleep}
+	for i, expected := range expectedStepKinds {
+		if rebuilt.steps[i].kind != expected {
+			t.Fatalf("rebuilt step %d: expected kind %d, got %d", i, expected, rebuilt.steps[i].kind)
+		}
+	}
+
+	// Verify rebuilt functions are wired
+	if rebuilt.steps[3].cases[0].condition == nil {
+		t.Fatal("rebuilt branch: condition function should be wired")
+	}
+	if rebuilt.steps[5].mapFn == nil {
+		t.Fatal("rebuilt map: map function should be wired")
+	}
+	if rebuilt.steps[6].loopCond == nil {
+		t.Fatal("rebuilt doUntil: loop condition should be wired")
+	}
+	if rebuilt.steps[9].sleepDuration != 5*time.Second {
+		t.Fatalf("rebuilt sleep: expected 5s, got %v", rebuilt.steps[9].sleepDuration)
+	}
+}
+
+func TestDefinitionAnonymousError(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("anon.task", func(ctx *Ctx) error { return nil })
+
+	// Anonymous branch condition → error
+	wfBranch := NewWorkflow("anon-branch").
+		Branch(When(func(ctx *Ctx) bool { return true }).Step("anon.task")).
+		Commit()
+	_, err := WorkflowToDefinition(wfBranch)
+	if err == nil {
+		t.Fatal("expected error for anonymous branch condition")
+	}
+	if !contains(err.Error(), "unnamed condition") {
+		t.Fatalf("expected 'unnamed condition' in error, got: %v", err)
+	}
+
+	// Anonymous map function → error
+	wfMap := NewWorkflow("anon-map").
+		Map(func(ctx *Ctx) {}).
+		Commit()
+	_, err = WorkflowToDefinition(wfMap)
+	if err == nil {
+		t.Fatal("expected error for anonymous map function")
+	}
+	if !contains(err.Error(), "unnamed map function") {
+		t.Fatalf("expected 'unnamed map function' in error, got: %v", err)
+	}
+
+	// Anonymous loop condition → error
+	wfLoop := NewWorkflow("anon-loop").
+		DoUntil(Step("anon.task"), func(ctx *Ctx) bool { return true }).
+		Commit()
+	_, err = WorkflowToDefinition(wfLoop)
+	if err == nil {
+		t.Fatal("expected error for anonymous loop condition")
+	}
+	if !contains(err.Error(), "unnamed loop condition") {
+		t.Fatalf("expected 'unnamed loop condition' in error, got: %v", err)
+	}
+}
+
+func TestDefinitionSubWorkflow(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("sub.inner", func(ctx *Ctx) error {
+		Set(ctx, "inner_ran", true)
+		return nil
+	})
+	Task("sub.outer", func(ctx *Ctx) error {
+		Set(ctx, "outer_ran", true)
+		return nil
+	})
+
+	inner := NewWorkflow("inner-wf").Step("sub.inner").Commit()
+	outer := NewWorkflow("outer-wf").
+		Step("sub.outer").
+		Sub(inner).
+		Commit()
+
+	// Serialize
+	def, err := WorkflowToDefinition(outer)
+	if err != nil {
+		t.Fatalf("WorkflowToDefinition: %v", err)
+	}
+
+	if len(def.Steps) != 2 {
+		t.Fatalf("expected 2 steps, got %d", len(def.Steps))
+	}
+	if def.Steps[1].Kind != "sub" {
+		t.Fatalf("expected step 1 kind 'sub', got %q", def.Steps[1].Kind)
+	}
+	if def.Steps[1].SubWorkflow.ID != "inner-wf" {
+		t.Fatalf("expected sub-workflow ID 'inner-wf', got %q", def.Steps[1].SubWorkflow.ID)
+	}
+
+	// Round-trip
+	data, _ := MarshalWorkflowDefinition(def)
+	def2, _ := UnmarshalWorkflowDefinition(data)
+	rebuilt, err := NewWorkflowFromDef(def2)
+	if err != nil {
+		t.Fatalf("NewWorkflowFromDef: %v", err)
+	}
+
+	// Execute rebuilt workflow
+	engine, _ := New()
+	defer engine.Close()
+
+	result, _ := engine.RunSync(context.Background(), rebuilt, nil)
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s (err: %v)", result.Status, result.Error)
+	}
+	if result.Store["outer_ran"] != true || result.Store["inner_ran"] != true {
+		t.Fatalf("both inner and outer should have run: %v", result.Store)
 	}
 }
 
@@ -1186,5 +1487,230 @@ func TestIntegration_MiddlewareAndIPC(t *testing.T) {
 	}
 	if !hasIPC {
 		t.Fatal("IPC handler should have been called")
+	}
+}
+
+// === Logging Plugin ===
+
+type capturingLogger struct {
+	mu   sync.Mutex
+	logs []string
+}
+
+func (l *capturingLogger) Debug(format string, args ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.logs = append(l.logs, fmt.Sprintf(format, args...))
+}
+func (l *capturingLogger) Info(format string, args ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.logs = append(l.logs, fmt.Sprintf(format, args...))
+}
+func (l *capturingLogger) Warn(format string, args ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.logs = append(l.logs, fmt.Sprintf(format, args...))
+}
+func (l *capturingLogger) Error(format string, args ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.logs = append(l.logs, fmt.Sprintf(format, args...))
+}
+
+func TestLoggingPlugin(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("log.task1", func(ctx *Ctx) error {
+		Set(ctx, "done", true)
+		return nil
+	})
+
+	logger := &capturingLogger{}
+	wf := NewWorkflow("logging-test").Step("log.task1").Commit()
+	engine, err := New(WithPlugin(LoggingPlugin(logger)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected completed, got %s", result.Status)
+	}
+
+	logger.mu.Lock()
+	logs := append([]string{}, logger.logs...)
+	logger.mu.Unlock()
+
+	// Should have at least: workflow started, step started, task started, task completed, step completed, workflow completed
+	if len(logs) < 4 {
+		t.Fatalf("expected at least 4 log entries, got %d: %v", len(logs), logs)
+	}
+
+	hasWorkflowStart := false
+	hasWorkflowEnd := false
+	for _, l := range logs {
+		if contains(l, "logging-test") && contains(l, "started") {
+			hasWorkflowStart = true
+		}
+		if contains(l, "logging-test") && contains(l, "completed") {
+			hasWorkflowEnd = true
+		}
+	}
+	if !hasWorkflowStart {
+		t.Fatalf("expected workflow start log, got: %v", logs)
+	}
+	if !hasWorkflowEnd {
+		t.Fatalf("expected workflow completion log, got: %v", logs)
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && searchString(s, substr)
+}
+
+func searchString(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
+// === Middleware Panic Recovery ===
+
+func TestMiddlewarePanicRecovery(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("panic.task", func(ctx *Ctx) error {
+		return nil
+	})
+
+	panicMW := func(ctx context.Context, s *step, runID RunID, next func() error) error {
+		panic("test panic from middleware")
+	}
+
+	wf := NewWorkflow("panic-mw-test").Step("panic.task").Commit()
+	engine, err := New(WithStepMiddleware(panicMW))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should fail (not crash) with a middleware panic error
+	if result.Status != Failed {
+		t.Fatalf("expected failed, got %s", result.Status)
+	}
+	if result.Error == nil {
+		t.Fatal("expected error from panic recovery")
+	}
+	if !contains(result.Error.Error(), "middleware panic") {
+		t.Fatalf("expected 'middleware panic' in error, got: %v", result.Error)
+	}
+}
+
+func TestForEachTaskMiddleware(t *testing.T) {
+	ResetTaskRegistry()
+
+	var mu sync.Mutex
+	var taskNames []string
+
+	Task("fe.mw.prepare", func(ctx *Ctx) error {
+		Set(ctx, "items", []string{"a", "b", "c"})
+		return nil
+	})
+	Task("fe.mw.process", func(ctx *Ctx) error {
+		return nil
+	})
+
+	wf := NewWorkflow("foreach-task-mw").
+		Step("fe.mw.prepare").
+		ForEach("items", Step("fe.mw.process")).
+		Commit()
+
+	engine, err := New(
+		WithTaskMiddleware(func(tctx *Ctx, taskName string, next func() error) error {
+			mu.Lock()
+			taskNames = append(taskNames, taskName)
+			mu.Unlock()
+			return next()
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, runErr := engine.RunSync(context.Background(), wf, nil)
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s (err: %v)", result.Status, result.Error)
+	}
+
+	// Should have: prepare + 3 forEach items = 4 middleware calls
+	mu.Lock()
+	defer mu.Unlock()
+	processCount := 0
+	for _, name := range taskNames {
+		if name == "fe.mw.process" {
+			processCount++
+		}
+	}
+	if processCount != 3 {
+		t.Fatalf("expected 3 middleware calls for forEach items, got %d (names: %v)", processCount, taskNames)
+	}
+}
+
+// === Cache Size ===
+
+func TestWithCacheSize(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("cache.t1", func(ctx *Ctx) error { return nil })
+	Task("cache.t2", func(ctx *Ctx) error { return nil })
+	Task("cache.t3", func(ctx *Ctx) error { return nil })
+
+	wf1 := NewWorkflow("cache-wf-1").Step("cache.t1").Commit()
+	wf2 := NewWorkflow("cache-wf-2").Step("cache.t2").Commit()
+	wf3 := NewWorkflow("cache-wf-3").Step("cache.t3").Commit()
+
+	engine, err := New(WithCacheSize(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	engine.RunSync(context.Background(), wf1, nil)
+	engine.RunSync(context.Background(), wf2, nil)
+	engine.RunSync(context.Background(), wf3, nil)
+
+	// First workflow should have been evicted
+	engine.workflowCacheMu.RLock()
+	cacheLen := len(engine.workflowCache)
+	_, hasWf1 := engine.workflowCache["cache-wf-1"]
+	_, hasWf2 := engine.workflowCache["cache-wf-2"]
+	_, hasWf3 := engine.workflowCache["cache-wf-3"]
+	engine.workflowCacheMu.RUnlock()
+
+	if cacheLen != 2 {
+		t.Fatalf("expected cache size 2, got %d", cacheLen)
+	}
+	if hasWf1 {
+		t.Fatal("expected cache-wf-1 to be evicted")
+	}
+	if !hasWf2 || !hasWf3 {
+		t.Fatal("expected cache-wf-2 and cache-wf-3 to be cached")
 	}
 }

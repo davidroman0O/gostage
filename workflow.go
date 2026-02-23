@@ -45,11 +45,13 @@ type step struct {
 	useSpawn      bool
 
 	// stepMap
-	mapFn func(*Ctx)
+	mapFn     func(*Ctx)
+	mapFnName string // named variant for serializable workflows
 
 	// stepDoUntil / stepDoWhile
-	loopRef  StepRef
-	loopCond func(*Ctx) bool
+	loopRef      StepRef
+	loopCond     func(*Ctx) bool
+	loopCondName string // named variant for serializable workflows
 
 	// stepSub
 	subWorkflow *Workflow
@@ -112,6 +114,7 @@ func Sub(wf *Workflow) StepRef {
 // BranchCase represents one arm of a Branch.
 type BranchCase struct {
 	condition func(*Ctx) bool
+	condName  string // named variant for serializable workflows
 	ref       StepRef
 	isDefault bool
 }
@@ -119,6 +122,7 @@ type BranchCase struct {
 // WhenClause builds a conditional branch arm.
 type WhenClause struct {
 	condition func(*Ctx) bool
+	condName  string // named variant for serializable workflows
 }
 
 // When starts a conditional branch arm.
@@ -132,12 +136,12 @@ func When(cond func(*Ctx) bool) *WhenClause {
 
 // Step completes the WhenClause with a task to execute.
 func (w *WhenClause) Step(taskName string) BranchCase {
-	return BranchCase{condition: w.condition, ref: StepRef{taskName: taskName}}
+	return BranchCase{condition: w.condition, condName: w.condName, ref: StepRef{taskName: taskName}}
 }
 
 // Sub completes the WhenClause with a sub-workflow to execute.
 func (w *WhenClause) Sub(wf *Workflow) BranchCase {
-	return BranchCase{condition: w.condition, ref: StepRef{subWorkflow: wf}}
+	return BranchCase{condition: w.condition, condName: w.condName, ref: StepRef{subWorkflow: wf}}
 }
 
 // DefaultClause builds the default branch arm.
@@ -183,14 +187,6 @@ func WithSpawn() ForEachOption {
 
 // WorkflowOption configures a workflow.
 type WorkflowOption func(*workflowConfig)
-
-// WithName sets the display name for the workflow.
-func WithName(name string) WorkflowOption {
-	return func(cfg *workflowConfig) {
-		// Name is set directly on Workflow in NewWorkflow
-		// This is handled specially in the builder
-	}
-}
 
 // OnStepComplete registers a callback invoked after each step completes.
 //
@@ -278,11 +274,13 @@ type builderStep struct {
 	forEachOpts   []ForEachOption
 
 	// stepMap
-	mapFn func(*Ctx)
+	mapFn     func(*Ctx)
+	mapFnName string // named variant for serializable workflows
 
 	// stepDoUntil / stepDoWhile
-	loopRef  StepRef
-	loopCond func(*Ctx) bool
+	loopRef      StepRef
+	loopCond     func(*Ctx) bool
+	loopCondName string // named variant for serializable workflows
 
 	// stepSub
 	subWorkflow *Workflow
@@ -429,10 +427,10 @@ func (b *WorkflowBuilder) Map(fn func(*Ctx)) *WorkflowBuilder {
 	return b
 }
 
-// SubWorkflow inlines another workflow's steps into this workflow.
+// Sub adds a nested sub-workflow step.
 //
-//	wf.SubWorkflow(otherWf)
-func (b *WorkflowBuilder) SubWorkflow(wf *Workflow) *WorkflowBuilder {
+//	wf.Sub(otherWf)
+func (b *WorkflowBuilder) Sub(wf *Workflow) *WorkflowBuilder {
 	b.steps = append(b.steps, builderStep{
 		kind:        stepSub,
 		name:        "sub:" + wf.ID,
@@ -451,6 +449,89 @@ func (b *WorkflowBuilder) Sleep(d time.Duration) *WorkflowBuilder {
 		kind:          stepSleep,
 		name:          "sleep",
 		sleepDuration: d,
+	})
+	return b
+}
+
+// --- Named variants for serializable workflows ---
+
+// WhenNamed starts a serializable conditional branch arm using a registered condition.
+// The condition must be registered with Condition() before building the workflow.
+//
+//	gostage.Condition("is-high-priority", func(ctx *gostage.Ctx) bool {
+//	    return gostage.Get[string](ctx, "priority") == "high"
+//	})
+//	wf.Branch(gostage.WhenNamed("is-high-priority").Step("urgent"))
+func WhenNamed(condName string) *WhenClause {
+	fn := lookupCondition(condName)
+	if fn == nil {
+		panic(fmt.Sprintf("gostage: condition %q not registered", condName))
+	}
+	return &WhenClause{condition: fn, condName: condName}
+}
+
+// MapNamed adds a serializable data transformation step using a registered map function.
+// The function must be registered with MapFn() before building the workflow.
+//
+//	gostage.MapFn("parse-csv", func(ctx *gostage.Ctx) {
+//	    raw := gostage.Get[[]byte](ctx, "raw")
+//	    gostage.Set(ctx, "records", parseCSV(raw))
+//	})
+//	wf.MapNamed("parse-csv")
+func (b *WorkflowBuilder) MapNamed(mapFnName string) *WorkflowBuilder {
+	fn := lookupMapFn(mapFnName)
+	if fn == nil {
+		panic(fmt.Sprintf("gostage: map function %q not registered", mapFnName))
+	}
+	b.steps = append(b.steps, builderStep{
+		kind:      stepMap,
+		name:      "map",
+		mapFn:     fn,
+		mapFnName: mapFnName,
+	})
+	return b
+}
+
+// DoUntilNamed repeats a step until a registered condition returns true.
+// The condition must be registered with Condition() before building the workflow.
+//
+//	gostage.Condition("is-ready", func(ctx *gostage.Ctx) bool {
+//	    return gostage.Get[string](ctx, "status") == "ready"
+//	})
+//	wf.DoUntilNamed(gostage.Step("poll"), "is-ready")
+func (b *WorkflowBuilder) DoUntilNamed(ref StepRef, condName string) *WorkflowBuilder {
+	fn := lookupCondition(condName)
+	if fn == nil {
+		panic(fmt.Sprintf("gostage: condition %q not registered", condName))
+	}
+	b.steps = append(b.steps, builderStep{
+		kind:         stepDoUntil,
+		name:         "doUntil",
+		loopRef:      ref,
+		loopCond:     fn,
+		loopCondName: condName,
+	})
+	return b
+}
+
+// DoWhileNamed repeats a step while a registered condition returns true.
+// The condition must be registered with Condition() before building the workflow.
+//
+//	gostage.Condition("has-more", func(ctx *gostage.Ctx) bool {
+//	    return gostage.Get[bool](ctx, "has_more")
+//	})
+//	wf.DoWhileNamed(gostage.Step("fetch.page"), "has-more")
+func (b *WorkflowBuilder) DoWhileNamed(ref StepRef, condName string) *WorkflowBuilder {
+	fn := lookupCondition(condName)
+	if fn == nil {
+		panic(fmt.Sprintf("gostage: condition %q not registered", condName))
+	}
+	b.steps = append(b.steps, builderStep{
+		kind:         stepDoWhile,
+		name:         "doWhile",
+		loopRef:      ref,
+		loopCond:     fn,
+		loopCondName: condName,
 	})
 	return b
 }
@@ -509,10 +590,12 @@ func (b *WorkflowBuilder) Commit() *Workflow {
 
 		case stepMap:
 			s.mapFn = bs.mapFn
+			s.mapFnName = bs.mapFnName
 
 		case stepDoUntil, stepDoWhile:
 			s.loopRef = bs.loopRef
 			s.loopCond = bs.loopCond
+			s.loopCondName = bs.loopCondName
 			validateStepRef(bs.loopRef)
 
 		case stepSub:

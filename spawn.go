@@ -227,12 +227,16 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 
 		// For sub-workflow refs, serialize the workflow definition for child transfer
 		if s.forEachRef.subWorkflow != nil {
-			def := WorkflowToDefinition(s.forEachRef.subWorkflow)
-			defJSON, defErr := MarshalWorkflowDefinition(def)
-			if defErr == nil {
-				job.definitionJSON = defJSON
-				job.taskName = s.forEachRef.subWorkflow.ID
+			def, defErr := WorkflowToDefinition(s.forEachRef.subWorkflow)
+			if defErr != nil {
+				return fmt.Errorf("serialize workflow definition: %w", defErr)
 			}
+			defJSON, marshalErr := MarshalWorkflowDefinition(def)
+			if marshalErr != nil {
+				return fmt.Errorf("marshal workflow definition: %w", marshalErr)
+			}
+			job.definitionJSON = defJSON
+			job.taskName = s.forEachRef.subWorkflow.ID
 		}
 		ss.addJob(job)
 
@@ -259,16 +263,23 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 			}
 
 			var chainErr error
-			if len(e.spawnMiddleware) > 0 {
+			if len(e.childMiddleware) > 0 {
 				chain := doSpawn
-				for j := len(e.spawnMiddleware) - 1; j >= 0; j-- {
-					mw := e.spawnMiddleware[j]
+				for j := len(e.childMiddleware) - 1; j >= 0; j-- {
+					mw := e.childMiddleware[j]
 					next := chain
 					chain = func() error {
 						return mw(childCtx, job, next)
 					}
 				}
-				chainErr = chain()
+				chainErr = func() (rerr error) {
+					defer func() {
+						if r := recover(); r != nil {
+							rerr = fmt.Errorf("middleware panic: %v", r)
+						}
+					}()
+					return chain()
+				}()
 			} else {
 				chainErr = doSpawn()
 			}

@@ -77,10 +77,10 @@ func WithTaskMiddleware(m TaskMiddleware) EngineOption {
 	}
 }
 
-// WithSpawnMiddleware adds spawn-level middleware.
-func WithSpawnMiddleware(m SpawnMiddleware) EngineOption {
+// WithChildMiddleware adds child-process-level middleware.
+func WithChildMiddleware(m ChildMiddleware) EngineOption {
 	return func(e *Engine) error {
-		e.spawnMiddleware = append(e.spawnMiddleware, m)
+		e.childMiddleware = append(e.childMiddleware, m)
 		return nil
 	}
 }
@@ -97,8 +97,8 @@ func WithPlugin(p Plugin) EngineOption {
 		if m := p.TaskMiddleware(); m != nil {
 			e.taskMiddleware = append(e.taskMiddleware, m)
 		}
-		if m := p.SpawnMiddleware(); m != nil {
-			e.spawnMiddleware = append(e.spawnMiddleware, m)
+		if m := p.ChildMiddleware(); m != nil {
+			e.childMiddleware = append(e.childMiddleware, m)
 		}
 		return nil
 	}
@@ -111,6 +111,15 @@ func WithAutoRecover() EngineOption {
 		// Recovery happens after all options are applied, in New() post-init
 		// We mark the intent here; actual recovery runs after pool/scheduler start
 		e.autoRecover = true
+		return nil
+	}
+}
+
+// WithCacheSize limits the workflow cache to n entries.
+// When full, the oldest entry is evicted. 0 means unlimited (default).
+func WithCacheSize(n int) EngineOption {
+	return func(e *Engine) error {
+		e.cacheSize = n
 		return nil
 	}
 }

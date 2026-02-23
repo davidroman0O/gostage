@@ -63,7 +63,14 @@ func (e *Engine) executeWorkflow(ctx context.Context, wf *Workflow, runID RunID,
 					return mw(ctx, stepCopy, runID, next)
 				}
 			}
-			err = chain()
+			err = func() (rerr error) {
+				defer func() {
+					if r := recover(); r != nil {
+						rerr = fmt.Errorf("middleware panic: %v", r)
+					}
+				}()
+				return chain()
+			}()
 		} else {
 			err = e.executeStep(ctx, wf, s, runID, resuming)
 		}
@@ -171,6 +178,31 @@ func (e *Engine) executeStep(ctx context.Context, wf *Workflow, s *step, runID R
 	}
 }
 
+// executeTaskFn wraps a task function with the engine's task middleware chain and panic recovery.
+// Used by both executeSingle and executeForEachItem to ensure consistent middleware application.
+func (e *Engine) executeTaskFn(taskCtx *Ctx, taskName string, fn func(*Ctx) error) error {
+	if len(e.taskMiddleware) > 0 {
+		final := func() error { return fn(taskCtx) }
+		chain := final
+		for j := len(e.taskMiddleware) - 1; j >= 0; j-- {
+			mw := e.taskMiddleware[j]
+			next := chain
+			chain = func() error {
+				return mw(taskCtx, taskName, next)
+			}
+		}
+		return func() (rerr error) {
+			defer func() {
+				if r := recover(); r != nil {
+					rerr = fmt.Errorf("middleware panic: %v", r)
+				}
+			}()
+			return chain()
+		}()
+	}
+	return fn(taskCtx)
+}
+
 // executeSingle runs a single task with retry logic.
 func (e *Engine) executeSingle(ctx context.Context, wf *Workflow, taskName string, runID RunID, resuming bool) error {
 	td := lookupTask(taskName)
@@ -202,21 +234,7 @@ func (e *Engine) executeSingle(ctx context.Context, wf *Workflow, taskName strin
 		}
 
 		// Execute with task middleware if configured
-		var err error
-		if len(e.taskMiddleware) > 0 {
-			final := func() error { return td.fn(taskCtx) }
-			chain := final
-			for j := len(e.taskMiddleware) - 1; j >= 0; j-- {
-				mw := e.taskMiddleware[j]
-				next := chain
-				chain = func() error {
-					return mw(taskCtx, taskName, next)
-				}
-			}
-			err = chain()
-		} else {
-			err = td.fn(taskCtx)
-		}
+		err := e.executeTaskFn(taskCtx, taskName, td.fn)
 
 		if err == nil {
 			return nil
@@ -450,7 +468,7 @@ func (e *Engine) executeForEachItem(ctx context.Context, wf *Workflow, ref StepR
 			}
 		}
 
-		err := td.fn(taskCtx)
+		err := e.executeTaskFn(taskCtx, ref.taskName, td.fn)
 		if err == nil {
 			return nil
 		}

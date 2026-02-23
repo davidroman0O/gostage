@@ -511,7 +511,7 @@ func TestEngine_SubWorkflow(t *testing.T) {
 	inner := NewWorkflow("inner").Step("e.sub_inner").Commit()
 	outer := NewWorkflow("outer").
 		Step("e.sub_outer").
-		SubWorkflow(inner).
+		Sub(inner).
 		Commit()
 
 	engine, _ := New()

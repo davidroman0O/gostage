@@ -8,9 +8,11 @@ import (
 
 // timerScheduler manages sleeping workflows using a min-heap + single timer.
 // A single goroutine manages all sleeping workflows efficiently.
+// A map index (byRunID) provides O(1) lookup for Schedule and Cancel.
 type timerScheduler struct {
 	mu      sync.Mutex
 	entries timerHeap
+	byRunID map[RunID]*timerEntry // O(1) lookup index
 	timer   *time.Timer
 	wakeFn  func(RunID) // called when a timer fires
 	stopCh  chan struct{}
@@ -54,8 +56,9 @@ func (h *timerHeap) Pop() any {
 // newTimerScheduler creates a scheduler that calls wakeFn when a timer fires.
 func newTimerScheduler(wakeFn func(RunID)) *timerScheduler {
 	ts := &timerScheduler{
-		wakeFn: wakeFn,
-		stopCh: make(chan struct{}),
+		wakeFn:  wakeFn,
+		byRunID: make(map[RunID]*timerEntry),
+		stopCh:  make(chan struct{}),
 	}
 	heap.Init(&ts.entries)
 	return ts
@@ -70,18 +73,18 @@ func (ts *timerScheduler) Schedule(runID RunID, wakeAt time.Time) {
 		return
 	}
 
-	// Check if already scheduled — update if so
-	for _, e := range ts.entries {
-		if e.runID == runID {
-			e.wakeAt = wakeAt
-			heap.Fix(&ts.entries, e.index)
-			ts.resetTimerLocked()
-			return
-		}
+	// O(1) lookup via map
+	if e, ok := ts.byRunID[runID]; ok {
+		e.wakeAt = wakeAt
+		heap.Fix(&ts.entries, e.index)
+		ts.resetTimerLocked()
+		return
 	}
 
 	// New entry
-	heap.Push(&ts.entries, &timerEntry{runID: runID, wakeAt: wakeAt})
+	entry := &timerEntry{runID: runID, wakeAt: wakeAt}
+	heap.Push(&ts.entries, entry)
+	ts.byRunID[runID] = entry
 	ts.resetTimerLocked()
 }
 
@@ -90,26 +93,31 @@ func (ts *timerScheduler) Cancel(runID RunID) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 
-	for _, e := range ts.entries {
-		if e.runID == runID {
-			heap.Remove(&ts.entries, e.index)
-			ts.resetTimerLocked()
-			return
-		}
+	if e, ok := ts.byRunID[runID]; ok {
+		heap.Remove(&ts.entries, e.index)
+		delete(ts.byRunID, runID)
+		ts.resetTimerLocked()
 	}
 }
 
 // Populate loads sleeping runs from persistence on startup.
+// Deduplicates: skips runs already in the scheduler.
 func (ts *timerScheduler) Populate(runs []*RunState) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 
 	for _, run := range runs {
 		if run.Status == Sleeping && !run.WakeAt.IsZero() {
-			heap.Push(&ts.entries, &timerEntry{
+			// Skip if already scheduled
+			if _, ok := ts.byRunID[run.RunID]; ok {
+				continue
+			}
+			entry := &timerEntry{
 				runID:  run.RunID,
 				wakeAt: run.WakeAt,
-			})
+			}
+			heap.Push(&ts.entries, entry)
+			ts.byRunID[run.RunID] = entry
 		}
 	}
 	ts.resetTimerLocked()
@@ -166,6 +174,7 @@ func (ts *timerScheduler) fire() {
 
 	for ts.entries.Len() > 0 && !ts.entries[0].wakeAt.After(now) {
 		entry := heap.Pop(&ts.entries).(*timerEntry)
+		delete(ts.byRunID, entry.runID)
 		toWake = append(toWake, entry.runID)
 	}
 

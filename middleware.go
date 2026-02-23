@@ -11,8 +11,8 @@ type StepMiddleware func(ctx context.Context, s *step, runID RunID, next func() 
 // TaskMiddleware wraps task function invocation.
 type TaskMiddleware func(tctx *Ctx, taskName string, next func() error) error
 
-// SpawnMiddleware wraps child process spawning.
-type SpawnMiddleware func(ctx context.Context, job *spawnJob, next func() error) error
+// ChildMiddleware wraps child process execution.
+type ChildMiddleware func(ctx context.Context, job *spawnJob, next func() error) error
 
 // Plugin registers middleware at multiple levels.
 type Plugin interface {
@@ -22,8 +22,8 @@ type Plugin interface {
 	StepMiddleware() StepMiddleware
 	// TaskMiddleware returns task-level middleware, or nil.
 	TaskMiddleware() TaskMiddleware
-	// SpawnMiddleware returns spawn-level middleware, or nil.
-	SpawnMiddleware() SpawnMiddleware
+	// ChildMiddleware returns child-process-level middleware, or nil.
+	ChildMiddleware() ChildMiddleware
 }
 
 // MessageHandler is called when a child process sends an IPC message.
