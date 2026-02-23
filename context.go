@@ -2,6 +2,8 @@ package gostage
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"math"
 	"reflect"
 )
@@ -61,29 +63,52 @@ func (c *Ctx) Context() context.Context { return c.goCtx }
 // Direct type assertion is tried first (fast path). If that fails and T is
 // a numeric type, reflect-based conversion is used. This handles the common
 // case where JSON decoding turns int into float64.
+// For composite types (structs, slices, maps), JSON re-marshal is used to
+// restore the original type after persistence or spawn round-trips.
 func coerce[T any](val any) (T, bool) {
 	if typed, ok := val.(T); ok {
 		return typed, true
 	}
 	var zero T
 	targetType := reflect.TypeOf((*T)(nil)).Elem()
-	if targetType.Kind() < reflect.Int || targetType.Kind() > reflect.Float64 {
-		return zero, false // T is not numeric — no coercion possible
-	}
-	srcVal := reflect.ValueOf(val)
-	if !srcVal.IsValid() || !srcVal.Type().ConvertibleTo(targetType) {
-		return zero, false
-	}
-	// Guard: float → integer must not lose fractional part
-	if srcVal.Kind() == reflect.Float64 || srcVal.Kind() == reflect.Float32 {
-		f := srcVal.Float()
-		if targetType.Kind() >= reflect.Int && targetType.Kind() <= reflect.Uint64 {
-			if f != math.Trunc(f) {
-				return zero, false
+
+	// Numeric coercion: handles JSON float64 → int, etc.
+	if targetType.Kind() >= reflect.Int && targetType.Kind() <= reflect.Float64 {
+		srcVal := reflect.ValueOf(val)
+		if !srcVal.IsValid() || !srcVal.Type().ConvertibleTo(targetType) {
+			return zero, false
+		}
+		// Guard: float → integer must not lose fractional part
+		if srcVal.Kind() == reflect.Float64 || srcVal.Kind() == reflect.Float32 {
+			f := srcVal.Float()
+			if targetType.Kind() >= reflect.Int && targetType.Kind() <= reflect.Uint64 {
+				if f != math.Trunc(f) {
+					return zero, false
+				}
 			}
 		}
+		return srcVal.Convert(targetType).Interface().(T), true
 	}
-	return srcVal.Convert(targetType).Interface().(T), true
+
+	// JSON re-marshal for composite types.
+	// After persistence/spawn round-trip, JSON unmarshal into any produces
+	// map[string]interface{} for objects and []interface{} for arrays.
+	// Re-marshal to JSON and unmarshal into T to restore the original type.
+	targetKind := targetType.Kind()
+	if targetKind == reflect.Struct || targetKind == reflect.Map ||
+		targetKind == reflect.Slice || targetKind == reflect.Ptr {
+		jsonBytes, err := json.Marshal(val)
+		if err != nil {
+			return zero, false
+		}
+		result := reflect.New(targetType).Interface()
+		if err := json.Unmarshal(jsonBytes, result); err != nil {
+			return zero, false
+		}
+		return reflect.ValueOf(result).Elem().Interface().(T), true
+	}
+
+	return zero, false
 }
 
 // Get retrieves a typed value from the workflow store.
@@ -121,10 +146,20 @@ func GetOr[T any](ctx *Ctx, key string, def T) T {
 }
 
 // Set stores a typed value in the workflow store.
+// Returns an error if the value's type is not JSON-serializable (e.g. contains
+// channels, functions, or complex numbers).
+// In concurrent ForEach, items share the same state. Each item should
+// write to unique keys (e.g., fmt.Sprintf("result_%d", ItemIndex(ctx))).
+// Mutable values (slices, maps) are stored by reference, not copied.
 //
-//	gostage.Set(ctx, "result", 42)
-func Set[T any](ctx *Ctx, key string, value T) {
+//	if err := gostage.Set(ctx, "result", 42); err != nil { return err }
+func Set[T any](ctx *Ctx, key string, value T) error {
+	t := reflect.TypeOf(value)
+	if t != nil && !isJSONSerializable(t) {
+		return fmt.Errorf("gostage.Set: type %T is not JSON-serializable", value)
+	}
 	ctx.state.Set(key, value)
+	return nil
 }
 
 // --- Control flow functions ---

@@ -21,15 +21,12 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// Message types - matches your existing MessageType
+// Message types for parent-child IPC
 type MessageType int32
 
 const (
 	MessageType_MESSAGE_TYPE_UNSPECIFIED     MessageType = 0
-	MessageType_MESSAGE_TYPE_LOG             MessageType = 1
 	MessageType_MESSAGE_TYPE_STORE_PUT       MessageType = 2
-	MessageType_MESSAGE_TYPE_STORE_DELETE    MessageType = 3
-	MessageType_MESSAGE_TYPE_WORKFLOW_START  MessageType = 4
 	MessageType_MESSAGE_TYPE_WORKFLOW_RESULT MessageType = 5
 	MessageType_MESSAGE_TYPE_FINAL_STORE     MessageType = 6
 )
@@ -38,19 +35,13 @@ const (
 var (
 	MessageType_name = map[int32]string{
 		0: "MESSAGE_TYPE_UNSPECIFIED",
-		1: "MESSAGE_TYPE_LOG",
 		2: "MESSAGE_TYPE_STORE_PUT",
-		3: "MESSAGE_TYPE_STORE_DELETE",
-		4: "MESSAGE_TYPE_WORKFLOW_START",
 		5: "MESSAGE_TYPE_WORKFLOW_RESULT",
 		6: "MESSAGE_TYPE_FINAL_STORE",
 	}
 	MessageType_value = map[string]int32{
 		"MESSAGE_TYPE_UNSPECIFIED":     0,
-		"MESSAGE_TYPE_LOG":             1,
 		"MESSAGE_TYPE_STORE_PUT":       2,
-		"MESSAGE_TYPE_STORE_DELETE":    3,
-		"MESSAGE_TYPE_WORKFLOW_START":  4,
 		"MESSAGE_TYPE_WORKFLOW_RESULT": 5,
 		"MESSAGE_TYPE_FINAL_STORE":     6,
 	}
@@ -83,18 +74,18 @@ func (MessageType) EnumDescriptor() ([]byte, []int) {
 	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{0}
 }
 
-// Message metadata for comprehensive tracing
+// Message metadata for tracing
 type MessageContext struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
-	WorkflowId     string                 `protobuf:"bytes,1,opt,name=workflow_id,json=workflowId,proto3" json:"workflow_id,omitempty"`                // ID of the workflow that sent this message
-	StageId        string                 `protobuf:"bytes,2,opt,name=stage_id,json=stageId,proto3" json:"stage_id,omitempty"`                         // ID of the stage that sent this message
-	ActionName     string                 `protobuf:"bytes,3,opt,name=action_name,json=actionName,proto3" json:"action_name,omitempty"`                // Name of the action that sent this message
-	ProcessId      int32                  `protobuf:"varint,4,opt,name=process_id,json=processId,proto3" json:"process_id,omitempty"`                  // PID of the process that sent this message
-	IsChildProcess bool                   `protobuf:"varint,5,opt,name=is_child_process,json=isChildProcess,proto3" json:"is_child_process,omitempty"` // Whether this came from a spawned child process
-	ActionIndex    int32                  `protobuf:"varint,6,opt,name=action_index,json=actionIndex,proto3" json:"action_index,omitempty"`            // Index of action within stage (0-based)
-	IsLastAction   bool                   `protobuf:"varint,7,opt,name=is_last_action,json=isLastAction,proto3" json:"is_last_action,omitempty"`       // Whether this is the last action in the stage
-	SessionId      string                 `protobuf:"bytes,8,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`                   // Unique session identifier for this workflow run
-	SequenceNumber int64                  `protobuf:"varint,9,opt,name=sequence_number,json=sequenceNumber,proto3" json:"sequence_number,omitempty"`   // Incremental sequence number for this session
+	WorkflowId     string                 `protobuf:"bytes,1,opt,name=workflow_id,json=workflowId,proto3" json:"workflow_id,omitempty"`
+	StageId        string                 `protobuf:"bytes,2,opt,name=stage_id,json=stageId,proto3" json:"stage_id,omitempty"`
+	ActionName     string                 `protobuf:"bytes,3,opt,name=action_name,json=actionName,proto3" json:"action_name,omitempty"`
+	ProcessId      int32                  `protobuf:"varint,4,opt,name=process_id,json=processId,proto3" json:"process_id,omitempty"`
+	IsChildProcess bool                   `protobuf:"varint,5,opt,name=is_child_process,json=isChildProcess,proto3" json:"is_child_process,omitempty"`
+	ActionIndex    int32                  `protobuf:"varint,6,opt,name=action_index,json=actionIndex,proto3" json:"action_index,omitempty"`
+	IsLastAction   bool                   `protobuf:"varint,7,opt,name=is_last_action,json=isLastAction,proto3" json:"is_last_action,omitempty"`
+	SessionId      string                 `protobuf:"bytes,8,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	SequenceNumber int64                  `protobuf:"varint,9,opt,name=sequence_number,json=sequenceNumber,proto3" json:"sequence_number,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -198,17 +189,13 @@ type IPCMessage struct {
 	Type  MessageType            `protobuf:"varint,1,opt,name=type,proto3,enum=gostage.MessageType" json:"type,omitempty"`
 	// Types that are valid to be assigned to Payload:
 	//
-	//	*IPCMessage_Log
 	//	*IPCMessage_StorePut
-	//	*IPCMessage_StoreDelete
-	//	*IPCMessage_WorkflowStart
 	//	*IPCMessage_WorkflowResult
 	//	*IPCMessage_FinalStore
-	Payload isIPCMessage_Payload `protobuf_oneof:"payload"`
-	// Metadata for comprehensive tracking
-	MessageId     string          `protobuf:"bytes,20,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
-	Timestamp     int64           `protobuf:"varint,21,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	Context       *MessageContext `protobuf:"bytes,22,opt,name=context,proto3" json:"context,omitempty"` // Full context information
+	Payload       isIPCMessage_Payload `protobuf_oneof:"payload"`
+	MessageId     string               `protobuf:"bytes,20,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	Timestamp     int64                `protobuf:"varint,21,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	Context       *MessageContext      `protobuf:"bytes,22,opt,name=context,proto3" json:"context,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -257,37 +244,10 @@ func (x *IPCMessage) GetPayload() isIPCMessage_Payload {
 	return nil
 }
 
-func (x *IPCMessage) GetLog() *LogPayload {
-	if x != nil {
-		if x, ok := x.Payload.(*IPCMessage_Log); ok {
-			return x.Log
-		}
-	}
-	return nil
-}
-
 func (x *IPCMessage) GetStorePut() *StorePutPayload {
 	if x != nil {
 		if x, ok := x.Payload.(*IPCMessage_StorePut); ok {
 			return x.StorePut
-		}
-	}
-	return nil
-}
-
-func (x *IPCMessage) GetStoreDelete() *StoreDeletePayload {
-	if x != nil {
-		if x, ok := x.Payload.(*IPCMessage_StoreDelete); ok {
-			return x.StoreDelete
-		}
-	}
-	return nil
-}
-
-func (x *IPCMessage) GetWorkflowStart() *WorkflowStartPayload {
-	if x != nil {
-		if x, ok := x.Payload.(*IPCMessage_WorkflowStart); ok {
-			return x.WorkflowStart
 		}
 	}
 	return nil
@@ -336,20 +296,8 @@ type isIPCMessage_Payload interface {
 	isIPCMessage_Payload()
 }
 
-type IPCMessage_Log struct {
-	Log *LogPayload `protobuf:"bytes,10,opt,name=log,proto3,oneof"`
-}
-
 type IPCMessage_StorePut struct {
 	StorePut *StorePutPayload `protobuf:"bytes,11,opt,name=store_put,json=storePut,proto3,oneof"`
-}
-
-type IPCMessage_StoreDelete struct {
-	StoreDelete *StoreDeletePayload `protobuf:"bytes,12,opt,name=store_delete,json=storeDelete,proto3,oneof"`
-}
-
-type IPCMessage_WorkflowStart struct {
-	WorkflowStart *WorkflowStartPayload `protobuf:"bytes,13,opt,name=workflow_start,json=workflowStart,proto3,oneof"`
 }
 
 type IPCMessage_WorkflowResult struct {
@@ -360,99 +308,25 @@ type IPCMessage_FinalStore struct {
 	FinalStore *FinalStorePayload `protobuf:"bytes,15,opt,name=final_store,json=finalStore,proto3,oneof"`
 }
 
-func (*IPCMessage_Log) isIPCMessage_Payload() {}
-
 func (*IPCMessage_StorePut) isIPCMessage_Payload() {}
-
-func (*IPCMessage_StoreDelete) isIPCMessage_Payload() {}
-
-func (*IPCMessage_WorkflowStart) isIPCMessage_Payload() {}
 
 func (*IPCMessage_WorkflowResult) isIPCMessage_Payload() {}
 
 func (*IPCMessage_FinalStore) isIPCMessage_Payload() {}
 
-// Type-safe payload definitions
-type LogPayload struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Level         string                 `protobuf:"bytes,1,opt,name=level,proto3" json:"level,omitempty"`
-	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
-	Timestamp     int64                  `protobuf:"varint,3,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	Metadata      map[string]string      `protobuf:"bytes,4,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *LogPayload) Reset() {
-	*x = LogPayload{}
-	mi := &file_proto_workflow_ipc_proto_msgTypes[2]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *LogPayload) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*LogPayload) ProtoMessage() {}
-
-func (x *LogPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_workflow_ipc_proto_msgTypes[2]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use LogPayload.ProtoReflect.Descriptor instead.
-func (*LogPayload) Descriptor() ([]byte, []int) {
-	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{2}
-}
-
-func (x *LogPayload) GetLevel() string {
-	if x != nil {
-		return x.Level
-	}
-	return ""
-}
-
-func (x *LogPayload) GetMessage() string {
-	if x != nil {
-		return x.Message
-	}
-	return ""
-}
-
-func (x *LogPayload) GetTimestamp() int64 {
-	if x != nil {
-		return x.Timestamp
-	}
-	return 0
-}
-
-func (x *LogPayload) GetMetadata() map[string]string {
-	if x != nil {
-		return x.Metadata
-	}
-	return nil
-}
-
+// StorePutPayload carries key-value data or IPC messages from child Send() calls.
 type StorePutPayload struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
-	Value         []byte                 `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`                          // JSON-encoded value for flexibility
-	ValueType     string                 `protobuf:"bytes,3,opt,name=value_type,json=valueType,proto3" json:"value_type,omitempty"` // Type information for deserialization
+	Value         []byte                 `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	ValueType     string                 `protobuf:"bytes,3,opt,name=value_type,json=valueType,proto3" json:"value_type,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StorePutPayload) Reset() {
 	*x = StorePutPayload{}
-	mi := &file_proto_workflow_ipc_proto_msgTypes[3]
+	mi := &file_proto_workflow_ipc_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -464,7 +338,7 @@ func (x *StorePutPayload) String() string {
 func (*StorePutPayload) ProtoMessage() {}
 
 func (x *StorePutPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_workflow_ipc_proto_msgTypes[3]
+	mi := &file_proto_workflow_ipc_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -477,7 +351,7 @@ func (x *StorePutPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StorePutPayload.ProtoReflect.Descriptor instead.
 func (*StorePutPayload) Descriptor() ([]byte, []int) {
-	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{3}
+	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *StorePutPayload) GetKey() string {
@@ -501,102 +375,7 @@ func (x *StorePutPayload) GetValueType() string {
 	return ""
 }
 
-type StoreDeletePayload struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *StoreDeletePayload) Reset() {
-	*x = StoreDeletePayload{}
-	mi := &file_proto_workflow_ipc_proto_msgTypes[4]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *StoreDeletePayload) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*StoreDeletePayload) ProtoMessage() {}
-
-func (x *StoreDeletePayload) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_workflow_ipc_proto_msgTypes[4]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use StoreDeletePayload.ProtoReflect.Descriptor instead.
-func (*StoreDeletePayload) Descriptor() ([]byte, []int) {
-	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{4}
-}
-
-func (x *StoreDeletePayload) GetKey() string {
-	if x != nil {
-		return x.Key
-	}
-	return ""
-}
-
-type WorkflowStartPayload struct {
-	state              protoimpl.MessageState `protogen:"open.v1"`
-	WorkflowId         string                 `protobuf:"bytes,1,opt,name=workflow_id,json=workflowId,proto3" json:"workflow_id,omitempty"`
-	WorkflowDefinition []byte                 `protobuf:"bytes,2,opt,name=workflow_definition,json=workflowDefinition,proto3" json:"workflow_definition,omitempty"` // Serialized SubWorkflowDef
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
-}
-
-func (x *WorkflowStartPayload) Reset() {
-	*x = WorkflowStartPayload{}
-	mi := &file_proto_workflow_ipc_proto_msgTypes[5]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *WorkflowStartPayload) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*WorkflowStartPayload) ProtoMessage() {}
-
-func (x *WorkflowStartPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_workflow_ipc_proto_msgTypes[5]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use WorkflowStartPayload.ProtoReflect.Descriptor instead.
-func (*WorkflowStartPayload) Descriptor() ([]byte, []int) {
-	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{5}
-}
-
-func (x *WorkflowStartPayload) GetWorkflowId() string {
-	if x != nil {
-		return x.WorkflowId
-	}
-	return ""
-}
-
-func (x *WorkflowStartPayload) GetWorkflowDefinition() []byte {
-	if x != nil {
-		return x.WorkflowDefinition
-	}
-	return nil
-}
-
+// WorkflowResultPayload carries error results from child processes.
 type WorkflowResultPayload struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	WorkflowId      string                 `protobuf:"bytes,1,opt,name=workflow_id,json=workflowId,proto3" json:"workflow_id,omitempty"`
@@ -609,7 +388,7 @@ type WorkflowResultPayload struct {
 
 func (x *WorkflowResultPayload) Reset() {
 	*x = WorkflowResultPayload{}
-	mi := &file_proto_workflow_ipc_proto_msgTypes[6]
+	mi := &file_proto_workflow_ipc_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -621,7 +400,7 @@ func (x *WorkflowResultPayload) String() string {
 func (*WorkflowResultPayload) ProtoMessage() {}
 
 func (x *WorkflowResultPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_workflow_ipc_proto_msgTypes[6]
+	mi := &file_proto_workflow_ipc_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -634,7 +413,7 @@ func (x *WorkflowResultPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkflowResultPayload.ProtoReflect.Descriptor instead.
 func (*WorkflowResultPayload) Descriptor() ([]byte, []int) {
-	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{6}
+	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *WorkflowResultPayload) GetWorkflowId() string {
@@ -665,17 +444,18 @@ func (x *WorkflowResultPayload) GetExecutionTimeMs() int64 {
 	return 0
 }
 
+// FinalStorePayload carries the child's dirty store entries back to parent.
 type FinalStorePayload struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	StoreData     map[string][]byte      `protobuf:"bytes,1,rep,name=store_data,json=storeData,proto3" json:"store_data,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // Key -> JSON-encoded value
-	TypeInfo      map[string]string      `protobuf:"bytes,2,rep,name=type_info,json=typeInfo,proto3" json:"type_info,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`    // Key -> type information
+	StoreData     map[string][]byte      `protobuf:"bytes,1,rep,name=store_data,json=storeData,proto3" json:"store_data,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	TypeInfo      map[string]string      `protobuf:"bytes,2,rep,name=type_info,json=typeInfo,proto3" json:"type_info,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *FinalStorePayload) Reset() {
 	*x = FinalStorePayload{}
-	mi := &file_proto_workflow_ipc_proto_msgTypes[7]
+	mi := &file_proto_workflow_ipc_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -687,7 +467,7 @@ func (x *FinalStorePayload) String() string {
 func (*FinalStorePayload) ProtoMessage() {}
 
 func (x *FinalStorePayload) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_workflow_ipc_proto_msgTypes[7]
+	mi := &file_proto_workflow_ipc_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -700,7 +480,7 @@ func (x *FinalStorePayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FinalStorePayload.ProtoReflect.Descriptor instead.
 func (*FinalStorePayload) Descriptor() ([]byte, []int) {
-	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{7}
+	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *FinalStorePayload) GetStoreData() map[string][]byte {
@@ -717,19 +497,19 @@ func (x *FinalStorePayload) GetTypeInfo() map[string]string {
 	return nil
 }
 
-// Acknowledgment message
+// MessageAck acknowledges receipt of a message.
 type MessageAck struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
 	ErrorMessage  string                 `protobuf:"bytes,2,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
-	MessageId     string                 `protobuf:"bytes,3,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"` // Echo back the message ID
+	MessageId     string                 `protobuf:"bytes,3,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *MessageAck) Reset() {
 	*x = MessageAck{}
-	mi := &file_proto_workflow_ipc_proto_msgTypes[8]
+	mi := &file_proto_workflow_ipc_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -741,7 +521,7 @@ func (x *MessageAck) String() string {
 func (*MessageAck) ProtoMessage() {}
 
 func (x *MessageAck) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_workflow_ipc_proto_msgTypes[8]
+	mi := &file_proto_workflow_ipc_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -754,7 +534,7 @@ func (x *MessageAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MessageAck.ProtoReflect.Descriptor instead.
 func (*MessageAck) Descriptor() ([]byte, []int) {
-	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{8}
+	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *MessageAck) GetSuccess() bool {
@@ -778,20 +558,20 @@ func (x *MessageAck) GetMessageId() string {
 	return ""
 }
 
-// Workflow definition message for pull-model initialization
+// WorkflowDefinition carries the work assignment from parent to child.
 type WorkflowDefinition struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	Id             string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	Name           string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	DefinitionJson []byte                 `protobuf:"bytes,3,opt,name=definition_json,json=definitionJson,proto3" json:"definition_json,omitempty"`                                                                     // Serialized SubWorkflowDef as JSON
-	InitialStore   map[string][]byte      `protobuf:"bytes,4,rep,name=initial_store,json=initialStore,proto3" json:"initial_store,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // Initial store data
+	DefinitionJson []byte                 `protobuf:"bytes,3,opt,name=definition_json,json=definitionJson,proto3" json:"definition_json,omitempty"`
+	InitialStore   map[string][]byte      `protobuf:"bytes,4,rep,name=initial_store,json=initialStore,proto3" json:"initial_store,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
 
 func (x *WorkflowDefinition) Reset() {
 	*x = WorkflowDefinition{}
-	mi := &file_proto_workflow_ipc_proto_msgTypes[9]
+	mi := &file_proto_workflow_ipc_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -803,7 +583,7 @@ func (x *WorkflowDefinition) String() string {
 func (*WorkflowDefinition) ProtoMessage() {}
 
 func (x *WorkflowDefinition) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_workflow_ipc_proto_msgTypes[9]
+	mi := &file_proto_workflow_ipc_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -816,7 +596,7 @@ func (x *WorkflowDefinition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkflowDefinition.ProtoReflect.Descriptor instead.
 func (*WorkflowDefinition) Descriptor() ([]byte, []int) {
-	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{9}
+	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *WorkflowDefinition) GetId() string {
@@ -847,7 +627,7 @@ func (x *WorkflowDefinition) GetInitialStore() map[string][]byte {
 	return nil
 }
 
-// ReadySignal message for child process synchronization
+// ReadySignal is sent by child to request its work assignment.
 type ReadySignal struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ChildId       string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
@@ -857,7 +637,7 @@ type ReadySignal struct {
 
 func (x *ReadySignal) Reset() {
 	*x = ReadySignal{}
-	mi := &file_proto_workflow_ipc_proto_msgTypes[10]
+	mi := &file_proto_workflow_ipc_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -869,7 +649,7 @@ func (x *ReadySignal) String() string {
 func (*ReadySignal) ProtoMessage() {}
 
 func (x *ReadySignal) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_workflow_ipc_proto_msgTypes[10]
+	mi := &file_proto_workflow_ipc_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -882,7 +662,7 @@ func (x *ReadySignal) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadySignal.ProtoReflect.Descriptor instead.
 func (*ReadySignal) Descriptor() ([]byte, []int) {
-	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{10}
+	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ReadySignal) GetChildId() string {
@@ -910,15 +690,11 @@ const file_proto_workflow_ipc_proto_rawDesc = "" +
 	"\x0eis_last_action\x18\a \x01(\bR\fisLastAction\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\b \x01(\tR\tsessionId\x12'\n" +
-	"\x0fsequence_number\x18\t \x01(\x03R\x0esequenceNumber\"\xa7\x04\n" +
+	"\x0fsequence_number\x18\t \x01(\x03R\x0esequenceNumber\"\xf4\x02\n" +
 	"\n" +
 	"IPCMessage\x12(\n" +
-	"\x04type\x18\x01 \x01(\x0e2\x14.gostage.MessageTypeR\x04type\x12'\n" +
-	"\x03log\x18\n" +
-	" \x01(\v2\x13.gostage.LogPayloadH\x00R\x03log\x127\n" +
-	"\tstore_put\x18\v \x01(\v2\x18.gostage.StorePutPayloadH\x00R\bstorePut\x12@\n" +
-	"\fstore_delete\x18\f \x01(\v2\x1b.gostage.StoreDeletePayloadH\x00R\vstoreDelete\x12F\n" +
-	"\x0eworkflow_start\x18\r \x01(\v2\x1d.gostage.WorkflowStartPayloadH\x00R\rworkflowStart\x12I\n" +
+	"\x04type\x18\x01 \x01(\x0e2\x14.gostage.MessageTypeR\x04type\x127\n" +
+	"\tstore_put\x18\v \x01(\v2\x18.gostage.StorePutPayloadH\x00R\bstorePut\x12I\n" +
 	"\x0fworkflow_result\x18\x0e \x01(\v2\x1e.gostage.WorkflowResultPayloadH\x00R\x0eworkflowResult\x12=\n" +
 	"\vfinal_store\x18\x0f \x01(\v2\x1a.gostage.FinalStorePayloadH\x00R\n" +
 	"finalStore\x12\x1d\n" +
@@ -926,27 +702,12 @@ const file_proto_workflow_ipc_proto_rawDesc = "" +
 	"message_id\x18\x14 \x01(\tR\tmessageId\x12\x1c\n" +
 	"\ttimestamp\x18\x15 \x01(\x03R\ttimestamp\x121\n" +
 	"\acontext\x18\x16 \x01(\v2\x17.gostage.MessageContextR\acontextB\t\n" +
-	"\apayload\"\xd6\x01\n" +
-	"\n" +
-	"LogPayload\x12\x14\n" +
-	"\x05level\x18\x01 \x01(\tR\x05level\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\x12\x1c\n" +
-	"\ttimestamp\x18\x03 \x01(\x03R\ttimestamp\x12=\n" +
-	"\bmetadata\x18\x04 \x03(\v2!.gostage.LogPayload.MetadataEntryR\bmetadata\x1a;\n" +
-	"\rMetadataEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"X\n" +
+	"\apayload\"X\n" +
 	"\x0fStorePutPayload\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\fR\x05value\x12\x1d\n" +
 	"\n" +
-	"value_type\x18\x03 \x01(\tR\tvalueType\"&\n" +
-	"\x12StoreDeletePayload\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\"h\n" +
-	"\x14WorkflowStartPayload\x12\x1f\n" +
-	"\vworkflow_id\x18\x01 \x01(\tR\n" +
-	"workflowId\x12/\n" +
-	"\x13workflow_definition\x18\x02 \x01(\fR\x12workflowDefinition\"\xa3\x01\n" +
+	"value_type\x18\x03 \x01(\tR\tvalueType\"\xa3\x01\n" +
 	"\x15WorkflowResultPayload\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12\x18\n" +
@@ -978,13 +739,10 @@ const file_proto_workflow_ipc_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"(\n" +
 	"\vReadySignal\x12\x19\n" +
-	"\bchild_id\x18\x01 \x01(\tR\achildId*\xdd\x01\n" +
+	"\bchild_id\x18\x01 \x01(\tR\achildId*\x87\x01\n" +
 	"\vMessageType\x12\x1c\n" +
-	"\x18MESSAGE_TYPE_UNSPECIFIED\x10\x00\x12\x14\n" +
-	"\x10MESSAGE_TYPE_LOG\x10\x01\x12\x1a\n" +
-	"\x16MESSAGE_TYPE_STORE_PUT\x10\x02\x12\x1d\n" +
-	"\x19MESSAGE_TYPE_STORE_DELETE\x10\x03\x12\x1f\n" +
-	"\x1bMESSAGE_TYPE_WORKFLOW_START\x10\x04\x12 \n" +
+	"\x18MESSAGE_TYPE_UNSPECIFIED\x10\x00\x12\x1a\n" +
+	"\x16MESSAGE_TYPE_STORE_PUT\x10\x02\x12 \n" +
 	"\x1cMESSAGE_TYPE_WORKFLOW_RESULT\x10\x05\x12\x1c\n" +
 	"\x18MESSAGE_TYPE_FINAL_STORE\x10\x062\x96\x01\n" +
 	"\vWorkflowIPC\x12N\n" +
@@ -1004,47 +762,39 @@ func file_proto_workflow_ipc_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_workflow_ipc_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_workflow_ipc_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_proto_workflow_ipc_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_proto_workflow_ipc_proto_goTypes = []any{
 	(MessageType)(0),              // 0: gostage.MessageType
 	(*MessageContext)(nil),        // 1: gostage.MessageContext
 	(*IPCMessage)(nil),            // 2: gostage.IPCMessage
-	(*LogPayload)(nil),            // 3: gostage.LogPayload
-	(*StorePutPayload)(nil),       // 4: gostage.StorePutPayload
-	(*StoreDeletePayload)(nil),    // 5: gostage.StoreDeletePayload
-	(*WorkflowStartPayload)(nil),  // 6: gostage.WorkflowStartPayload
-	(*WorkflowResultPayload)(nil), // 7: gostage.WorkflowResultPayload
-	(*FinalStorePayload)(nil),     // 8: gostage.FinalStorePayload
-	(*MessageAck)(nil),            // 9: gostage.MessageAck
-	(*WorkflowDefinition)(nil),    // 10: gostage.WorkflowDefinition
-	(*ReadySignal)(nil),           // 11: gostage.ReadySignal
-	nil,                           // 12: gostage.LogPayload.MetadataEntry
-	nil,                           // 13: gostage.FinalStorePayload.StoreDataEntry
-	nil,                           // 14: gostage.FinalStorePayload.TypeInfoEntry
-	nil,                           // 15: gostage.WorkflowDefinition.InitialStoreEntry
+	(*StorePutPayload)(nil),       // 3: gostage.StorePutPayload
+	(*WorkflowResultPayload)(nil), // 4: gostage.WorkflowResultPayload
+	(*FinalStorePayload)(nil),     // 5: gostage.FinalStorePayload
+	(*MessageAck)(nil),            // 6: gostage.MessageAck
+	(*WorkflowDefinition)(nil),    // 7: gostage.WorkflowDefinition
+	(*ReadySignal)(nil),           // 8: gostage.ReadySignal
+	nil,                           // 9: gostage.FinalStorePayload.StoreDataEntry
+	nil,                           // 10: gostage.FinalStorePayload.TypeInfoEntry
+	nil,                           // 11: gostage.WorkflowDefinition.InitialStoreEntry
 }
 var file_proto_workflow_ipc_proto_depIdxs = []int32{
 	0,  // 0: gostage.IPCMessage.type:type_name -> gostage.MessageType
-	3,  // 1: gostage.IPCMessage.log:type_name -> gostage.LogPayload
-	4,  // 2: gostage.IPCMessage.store_put:type_name -> gostage.StorePutPayload
-	5,  // 3: gostage.IPCMessage.store_delete:type_name -> gostage.StoreDeletePayload
-	6,  // 4: gostage.IPCMessage.workflow_start:type_name -> gostage.WorkflowStartPayload
-	7,  // 5: gostage.IPCMessage.workflow_result:type_name -> gostage.WorkflowResultPayload
-	8,  // 6: gostage.IPCMessage.final_store:type_name -> gostage.FinalStorePayload
-	1,  // 7: gostage.IPCMessage.context:type_name -> gostage.MessageContext
-	12, // 8: gostage.LogPayload.metadata:type_name -> gostage.LogPayload.MetadataEntry
-	13, // 9: gostage.FinalStorePayload.store_data:type_name -> gostage.FinalStorePayload.StoreDataEntry
-	14, // 10: gostage.FinalStorePayload.type_info:type_name -> gostage.FinalStorePayload.TypeInfoEntry
-	15, // 11: gostage.WorkflowDefinition.initial_store:type_name -> gostage.WorkflowDefinition.InitialStoreEntry
-	11, // 12: gostage.WorkflowIPC.RequestWorkflowDefinition:input_type -> gostage.ReadySignal
-	2,  // 13: gostage.WorkflowIPC.SendMessage:input_type -> gostage.IPCMessage
-	10, // 14: gostage.WorkflowIPC.RequestWorkflowDefinition:output_type -> gostage.WorkflowDefinition
-	9,  // 15: gostage.WorkflowIPC.SendMessage:output_type -> gostage.MessageAck
-	14, // [14:16] is the sub-list for method output_type
-	12, // [12:14] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	3,  // 1: gostage.IPCMessage.store_put:type_name -> gostage.StorePutPayload
+	4,  // 2: gostage.IPCMessage.workflow_result:type_name -> gostage.WorkflowResultPayload
+	5,  // 3: gostage.IPCMessage.final_store:type_name -> gostage.FinalStorePayload
+	1,  // 4: gostage.IPCMessage.context:type_name -> gostage.MessageContext
+	9,  // 5: gostage.FinalStorePayload.store_data:type_name -> gostage.FinalStorePayload.StoreDataEntry
+	10, // 6: gostage.FinalStorePayload.type_info:type_name -> gostage.FinalStorePayload.TypeInfoEntry
+	11, // 7: gostage.WorkflowDefinition.initial_store:type_name -> gostage.WorkflowDefinition.InitialStoreEntry
+	8,  // 8: gostage.WorkflowIPC.RequestWorkflowDefinition:input_type -> gostage.ReadySignal
+	2,  // 9: gostage.WorkflowIPC.SendMessage:input_type -> gostage.IPCMessage
+	7,  // 10: gostage.WorkflowIPC.RequestWorkflowDefinition:output_type -> gostage.WorkflowDefinition
+	6,  // 11: gostage.WorkflowIPC.SendMessage:output_type -> gostage.MessageAck
+	10, // [10:12] is the sub-list for method output_type
+	8,  // [8:10] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_proto_workflow_ipc_proto_init() }
@@ -1053,10 +803,7 @@ func file_proto_workflow_ipc_proto_init() {
 		return
 	}
 	file_proto_workflow_ipc_proto_msgTypes[1].OneofWrappers = []any{
-		(*IPCMessage_Log)(nil),
 		(*IPCMessage_StorePut)(nil),
-		(*IPCMessage_StoreDelete)(nil),
-		(*IPCMessage_WorkflowStart)(nil),
 		(*IPCMessage_WorkflowResult)(nil),
 		(*IPCMessage_FinalStore)(nil),
 	}
@@ -1066,7 +813,7 @@ func file_proto_workflow_ipc_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_workflow_ipc_proto_rawDesc), len(file_proto_workflow_ipc_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   15,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

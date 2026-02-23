@@ -130,7 +130,9 @@ func registerAllTasks() {
 	gs.Task("greet", func(ctx *gs.Ctx) error {
 		name := gs.GetOr[string](ctx, "name", "World")
 		ctx.Log.Info("Hello, %s!", name)
-		gs.Set(ctx, "greeted", true)
+		if err := gs.Set(ctx, "greeted", true); err != nil {
+			return err
+		}
 		return nil
 	}, gs.WithDescription("Greet the user"))
 
@@ -140,39 +142,51 @@ func registerAllTasks() {
 			return fmt.Errorf("missing order_id")
 		}
 		ctx.Log.Info("Validated order %s", orderID)
-		gs.Set(ctx, "validated", true)
+		if err := gs.Set(ctx, "validated", true); err != nil {
+			return err
+		}
 		return nil
 	})
 
 	gs.Task("charge", func(ctx *gs.Ctx) error {
 		amount := gs.GetOr[float64](ctx, "amount", 0)
 		ctx.Log.Info("Charged $%.2f", amount)
-		gs.Set(ctx, "charged", true)
+		if err := gs.Set(ctx, "charged", true); err != nil {
+			return err
+		}
 		return nil
 	})
 
 	gs.Task("reserve", func(ctx *gs.Ctx) error {
 		ctx.Log.Info("Reserved inventory")
-		gs.Set(ctx, "reserved", true)
+		if err := gs.Set(ctx, "reserved", true); err != nil {
+			return err
+		}
 		return nil
 	})
 
 	gs.Task("check.fraud", func(ctx *gs.Ctx) error {
 		ctx.Log.Info("Fraud check passed")
-		gs.Set(ctx, "fraud_ok", true)
+		if err := gs.Set(ctx, "fraud_ok", true); err != nil {
+			return err
+		}
 		return nil
 	})
 
 	// ── Branch targets ─────────────────────────────────────────────────
 	gs.Task("urgent.process", func(ctx *gs.Ctx) error {
 		ctx.Log.Info("URGENT path")
-		gs.Set(ctx, "route", "urgent")
+		if err := gs.Set(ctx, "route", "urgent"); err != nil {
+			return err
+		}
 		return nil
 	})
 
 	gs.Task("normal.process", func(ctx *gs.Ctx) error {
 		ctx.Log.Info("Normal path")
-		gs.Set(ctx, "route", "normal")
+		if err := gs.Set(ctx, "route", "normal"); err != nil {
+			return err
+		}
 		return nil
 	})
 
@@ -187,7 +201,9 @@ func registerAllTasks() {
 	gs.Task("process.item", func(ctx *gs.Ctx) error {
 		item := gs.Item[string](ctx)
 		ctx.Log.Info("Processing item: %s", item)
-		gs.Set(ctx, "last_item", item)
+		if err := gs.Set(ctx, "last_item", item); err != nil {
+			return err
+		}
 		return nil
 	})
 
@@ -196,7 +212,9 @@ func registerAllTasks() {
 		item := gs.Item[string](ctx)
 		idx := gs.ItemIndex(ctx)
 		fmt.Printf("  [child] spawn.echo: item[%d]=%s\n", idx, item)
-		gs.Set(ctx, fmt.Sprintf("spawned_%d", idx), item)
+		if err := gs.Set(ctx, fmt.Sprintf("spawned_%d", idx), item); err != nil {
+			return err
+		}
 		// IPC message back to parent via gRPC
 		gs.Send(ctx, "spawn.done", gs.P{"item": item, "index": idx})
 		return nil
@@ -205,23 +223,31 @@ func registerAllTasks() {
 	gs.Task("spawn.step1", func(ctx *gs.Ctx) error {
 		item := gs.Item[string](ctx)
 		fmt.Printf("  [child] step1: received item=%s\n", item)
-		gs.Set(ctx, "step1_item", item)
+		if err := gs.Set(ctx, "step1_item", item); err != nil {
+			return err
+		}
 		return nil
 	})
 
 	gs.Task("spawn.step2", func(ctx *gs.Ctx) error {
 		prev := gs.Get[string](ctx, "step1_item")
 		fmt.Printf("  [child] step2: step1 passed us %q → enriching\n", prev)
-		gs.Set(ctx, "step2_done", true)
+		if err := gs.Set(ctx, "step2_done", true); err != nil {
+			return err
+		}
 		return nil
 	})
 
 	// ── Loop tasks ─────────────────────────────────────────────────────
 	gs.Task("poll.status", func(ctx *gs.Ctx) error {
 		count := gs.GetOr[int](ctx, "poll_count", 0) + 1
-		gs.Set(ctx, "poll_count", count)
+		if err := gs.Set(ctx, "poll_count", count); err != nil {
+			return err
+		}
 		if count >= 3 {
-			gs.Set(ctx, "status", "ready")
+			if err := gs.Set(ctx, "status", "ready"); err != nil {
+				return err
+			}
 		}
 		ctx.Log.Info("Poll #%d → %s", count, gs.GetOr[string](ctx, "status", "pending"))
 		return nil
@@ -229,8 +255,12 @@ func registerAllTasks() {
 
 	gs.Task("fetch.page", func(ctx *gs.Ctx) error {
 		page := gs.GetOr[int](ctx, "page", 0) + 1
-		gs.Set(ctx, "page", page)
-		gs.Set(ctx, "has_more", page < 3)
+		if err := gs.Set(ctx, "page", page); err != nil {
+			return err
+		}
+		if err := gs.Set(ctx, "has_more", page < 3); err != nil {
+			return err
+		}
 		ctx.Log.Info("Fetched page %d", page)
 		return nil
 	})
@@ -238,13 +268,17 @@ func registerAllTasks() {
 	// ── Sub-workflow inner tasks ───────────────────────────────────────
 	gs.Task("enrich.data", func(ctx *gs.Ctx) error {
 		ctx.Log.Info("Enriching data")
-		gs.Set(ctx, "enriched", true)
+		if err := gs.Set(ctx, "enriched", true); err != nil {
+			return err
+		}
 		return nil
 	})
 
 	gs.Task("deep.task", func(ctx *gs.Ctx) error {
 		ctx.Log.Info("Deep nested task executed")
-		gs.Set(ctx, "deep", true)
+		if err := gs.Set(ctx, "deep", true); err != nil {
+			return err
+		}
 		return nil
 	})
 
@@ -254,7 +288,9 @@ func registerAllTasks() {
 		if age < 18 {
 			return gs.Bail(ctx, fmt.Sprintf("Must be 18+, got %d", age))
 		}
-		gs.Set(ctx, "age_ok", true)
+		if err := gs.Set(ctx, "age_ok", true); err != nil {
+			return err
+		}
 		return nil
 	})
 
@@ -263,7 +299,9 @@ func registerAllTasks() {
 		if gs.IsResuming(ctx) {
 			approved := gs.ResumeData[bool](ctx, "approved")
 			ctx.Log.Info("Resumed with approved=%v", approved)
-			gs.Set(ctx, "approved", approved)
+			if err := gs.Set(ctx, "approved", approved); err != nil {
+				return err
+			}
 			return nil
 		}
 		ctx.Log.Info("Awaiting approval...")
@@ -276,13 +314,17 @@ func registerAllTasks() {
 			select {
 			case <-ctx.Context().Done():
 				ctx.Log.Info("Cancelled at iteration %d", i)
-				gs.Set(ctx, "cancelled_at", i)
+				if err := gs.Set(ctx, "cancelled_at", i); err != nil {
+					return err
+				}
 				return ctx.Context().Err()
 			default:
 				time.Sleep(5 * time.Millisecond)
 			}
 		}
-		gs.Set(ctx, "finished", true)
+		if err := gs.Set(ctx, "finished", true); err != nil {
+			return err
+		}
 		return nil
 	})
 
@@ -297,7 +339,9 @@ func registerAllTasks() {
 
 	gs.Task("bonus.step", func(ctx *gs.Ctx) error {
 		ctx.Log.Info("Bonus step executed!")
-		gs.Set(ctx, "bonus_applied", true)
+		if err := gs.Set(ctx, "bonus_applied", true); err != nil {
+			return err
+		}
 		return nil
 	})
 
@@ -320,19 +364,25 @@ func registerAllTasks() {
 
 	gs.Task("step.a", func(ctx *gs.Ctx) error {
 		ctx.Log.Info("Step A ran")
-		gs.Set(ctx, "a_ran", true)
+		if err := gs.Set(ctx, "a_ran", true); err != nil {
+			return err
+		}
 		return nil
 	})
 
 	gs.Task("step.b", func(ctx *gs.Ctx) error {
 		ctx.Log.Info("Step B ran")
-		gs.Set(ctx, "b_ran", true)
+		if err := gs.Set(ctx, "b_ran", true); err != nil {
+			return err
+		}
 		return nil
 	})
 
 	gs.Task("step.c", func(ctx *gs.Ctx) error {
 		ctx.Log.Info("Step C ran")
-		gs.Set(ctx, "c_ran", true)
+		if err := gs.Set(ctx, "c_ran", true); err != nil {
+			return err
+		}
 		return nil
 	})
 
@@ -387,7 +437,9 @@ func registerAllTasks() {
 			return fmt.Errorf("timeout (attempt %d)", retryAttempt)
 		}
 		ctx.Log.Info("Connected on attempt %d", retryAttempt)
-		gs.Set(ctx, "connected", true)
+		if err := gs.Set(ctx, "connected", true); err != nil {
+			return err
+		}
 		return nil
 	}, gs.WithRetry(5), gs.WithRetryDelay(10*time.Millisecond))
 
@@ -412,11 +464,15 @@ func registerAllTasks() {
 		return nil
 	})
 	gs.Task("order.express", func(ctx *gs.Ctx) error {
-		gs.Set(ctx, "shipping", "express")
+		if err := gs.Set(ctx, "shipping", "express"); err != nil {
+			return err
+		}
 		return nil
 	})
 	gs.Task("order.standard", func(ctx *gs.Ctx) error {
-		gs.Set(ctx, "shipping", "standard")
+		if err := gs.Set(ctx, "shipping", "standard"); err != nil {
+			return err
+		}
 		return nil
 	})
 	gs.Task("order.pack.item", func(ctx *gs.Ctx) error {
@@ -425,7 +481,9 @@ func registerAllTasks() {
 	})
 	gs.Task("order.confirm", func(ctx *gs.Ctx) error {
 		ctx.Log.Info("Order confirmed!")
-		gs.Set(ctx, "confirmed", true)
+		if err := gs.Set(ctx, "confirmed", true); err != nil {
+			return err
+		}
 		return nil
 	})
 }
@@ -445,7 +503,7 @@ func registerNamedFunctions() {
 	// Named map function — for serializable Map steps
 	gs.MapFn("normalize-name", func(ctx *gs.Ctx) {
 		raw := gs.GetOr[string](ctx, "name", "")
-		gs.Set(ctx, "name", strings.TrimSpace(titleCase(strings.ToLower(raw))))
+		_ = gs.Set(ctx, "name", strings.TrimSpace(titleCase(strings.ToLower(raw))))
 	})
 }
 
@@ -621,7 +679,7 @@ func demoMap(ctx context.Context) {
 					total += v
 				}
 			}
-			gs.Set(ctx, "total", total)
+			_ = gs.Set(ctx, "total", total)
 		}).
 		Commit()
 
@@ -688,7 +746,7 @@ func demoDoWhile(ctx context.Context) {
 	section("7a. DoWhile (closure condition)")
 
 	wf1 := gs.NewWorkflow("while-closure").
-		Map(func(ctx *gs.Ctx) { gs.Set(ctx, "has_more", true) }).
+		Map(func(ctx *gs.Ctx) { _ = gs.Set(ctx, "has_more", true) }).
 		DoWhile(gs.Step("fetch.page"), func(ctx *gs.Ctx) bool {
 			return gs.Get[bool](ctx, "has_more")
 		}).
@@ -703,7 +761,7 @@ func demoDoWhile(ctx context.Context) {
 	section("7b. DoWhileNamed (registered condition — serializable)")
 
 	wf2 := gs.NewWorkflow("while-named").
-		Map(func(ctx *gs.Ctx) { gs.Set(ctx, "has_more", true) }).
+		Map(func(ctx *gs.Ctx) { _ = gs.Set(ctx, "has_more", true) }).
 		DoWhileNamed(gs.Step("fetch.page"), "has-more-pages").
 		Commit()
 

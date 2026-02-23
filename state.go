@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sync"
 )
 
@@ -49,6 +50,9 @@ func newRunState(runID RunID, persist Persistence) *runState {
 }
 
 // Set stores a value and marks it dirty (will be flushed to persistence).
+// Values are stored by reference — mutable types (slices, maps, structs)
+// are not deep-copied. In concurrent ForEach, each item should write to
+// distinct keys to avoid data races on shared mutable values.
 func (s *runState) Set(key string, value any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -345,5 +349,69 @@ func convertType(val any, typeName string) any {
 		return f
 	default:
 		return val
+	}
+}
+
+// serializableCache stores the result of isJSONSerializable per reflect.Type.
+var serializableCache sync.Map
+
+// isJSONSerializable reports whether a value of the given type can be
+// marshaled to JSON without error. Results are cached per type.
+func isJSONSerializable(t reflect.Type) bool {
+	if t == nil {
+		return true
+	}
+	if cached, ok := serializableCache.Load(t); ok {
+		return cached.(bool)
+	}
+	result := checkSerializable(t, make(map[reflect.Type]bool))
+	serializableCache.Store(t, result)
+	return result
+}
+
+// checkSerializable walks the type tree and returns false if any component
+// is not JSON-serializable. The visited map breaks recursive type cycles.
+func checkSerializable(t reflect.Type, visited map[reflect.Type]bool) bool {
+	if t == nil {
+		return true
+	}
+	if visited[t] {
+		return true // cycle — assume OK
+	}
+	visited[t] = true
+
+	switch t.Kind() {
+	case reflect.Chan, reflect.Func, reflect.UnsafePointer:
+		return false
+	case reflect.Complex64, reflect.Complex128:
+		return false
+	case reflect.Ptr:
+		return checkSerializable(t.Elem(), visited)
+	case reflect.Slice, reflect.Array:
+		return checkSerializable(t.Elem(), visited)
+	case reflect.Map:
+		// JSON requires string keys
+		if t.Key().Kind() != reflect.String {
+			return false
+		}
+		return checkSerializable(t.Elem(), visited)
+	case reflect.Struct:
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			if !f.IsExported() {
+				continue
+			}
+			if f.Tag.Get("json") == "-" {
+				continue
+			}
+			if !checkSerializable(f.Type, visited) {
+				return false
+			}
+		}
+		return true
+	case reflect.Interface:
+		return true // can't check statically
+	default:
+		return true // primitives, strings
 	}
 }

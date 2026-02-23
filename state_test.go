@@ -3,6 +3,7 @@ package gostage
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -260,5 +261,108 @@ func TestState_LoadNilPersistence(t *testing.T) {
 	err := s.LoadFromPersistence(context.Background())
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
+	}
+}
+
+// === isJSONSerializable ===
+
+func TestIsJSONSerializable_Primitives(t *testing.T) {
+	cases := []struct {
+		name string
+		val  any
+	}{
+		{"int", int(0)},
+		{"string", ""},
+		{"float64", float64(0)},
+		{"bool", false},
+		{"uint32", uint32(0)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !isJSONSerializable(reflect.TypeOf(tc.val)) {
+				t.Fatalf("expected %s to be serializable", tc.name)
+			}
+		})
+	}
+}
+
+func TestIsJSONSerializable_Structs(t *testing.T) {
+	type Good struct {
+		Name  string `json:"name"`
+		Count int    `json:"count"`
+	}
+	type WithIgnored struct {
+		Name string        `json:"name"`
+		Ch   chan struct{} `json:"-"`
+	}
+	type Bad struct {
+		Name string
+		Ch   chan int
+	}
+	type BadFunc struct {
+		Name string
+		Fn   func()
+	}
+
+	if !isJSONSerializable(reflect.TypeOf(Good{})) {
+		t.Fatal("Good struct should be serializable")
+	}
+	if !isJSONSerializable(reflect.TypeOf(WithIgnored{})) {
+		t.Fatal("struct with json:\"-\" chan field should be serializable")
+	}
+	if isJSONSerializable(reflect.TypeOf(Bad{})) {
+		t.Fatal("struct with chan field should NOT be serializable")
+	}
+	if isJSONSerializable(reflect.TypeOf(BadFunc{})) {
+		t.Fatal("struct with func field should NOT be serializable")
+	}
+}
+
+func TestIsJSONSerializable_Collections(t *testing.T) {
+	// slice of strings: OK
+	if !isJSONSerializable(reflect.TypeOf([]string{})) {
+		t.Fatal("[]string should be serializable")
+	}
+	// map[string]int: OK
+	if !isJSONSerializable(reflect.TypeOf(map[string]int{})) {
+		t.Fatal("map[string]int should be serializable")
+	}
+	// map[int]string: NOT OK (non-string key)
+	if isJSONSerializable(reflect.TypeOf(map[int]string{})) {
+		t.Fatal("map[int]string should NOT be serializable")
+	}
+	// slice of chan: NOT OK
+	if isJSONSerializable(reflect.TypeOf([]chan int{})) {
+		t.Fatal("[]chan int should NOT be serializable")
+	}
+}
+
+func TestIsJSONSerializable_Rejected(t *testing.T) {
+	ch := make(chan int)
+	if isJSONSerializable(reflect.TypeOf(ch)) {
+		t.Fatal("chan should NOT be serializable")
+	}
+	fn := func() {}
+	if isJSONSerializable(reflect.TypeOf(fn)) {
+		t.Fatal("func should NOT be serializable")
+	}
+	c := complex(1, 2)
+	if isJSONSerializable(reflect.TypeOf(c)) {
+		t.Fatal("complex128 should NOT be serializable")
+	}
+}
+
+func TestIsJSONSerializable_Nil(t *testing.T) {
+	if !isJSONSerializable(nil) {
+		t.Fatal("nil type should be considered serializable")
+	}
+}
+
+func TestIsJSONSerializable_Pointer(t *testing.T) {
+	type S struct {
+		X int
+	}
+	if !isJSONSerializable(reflect.TypeOf((*S)(nil))) {
+		t.Fatal("*S should be serializable")
 	}
 }

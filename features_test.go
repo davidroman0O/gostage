@@ -809,6 +809,139 @@ func TestMutationDisableByTag(t *testing.T) {
 	}
 }
 
+func TestMutationInsertSurvivesResume(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("mut.inserter", func(ctx *Ctx) error {
+		InsertAfter(ctx, "mut.injected")
+		Set(ctx, "inserter_ran", true)
+		return nil
+	})
+	Task("mut.injected", func(ctx *Ctx) error {
+		Set(ctx, "injected_ran", true)
+		return nil
+	})
+	Task("mut.suspender", func(ctx *Ctx) error {
+		if !IsResuming(ctx) {
+			return Suspend(ctx, P{"reason": "wait"})
+		}
+		Set(ctx, "resumed", true)
+		return nil
+	})
+	Task("mut.final", func(ctx *Ctx) error {
+		Set(ctx, "final_ran", true)
+		return nil
+	})
+
+	wf := NewWorkflow("insert-survives-resume").
+		Step("mut.inserter").
+		Step("mut.suspender").
+		Step("mut.final").
+		Commit()
+
+	engine, err := New(WithSQLite(t.TempDir() + "/test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+
+	// First run: inserter inserts "injected", then suspender suspends
+	result, err := engine.RunSync(ctx, wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Suspended {
+		t.Fatalf("expected Suspended, got %s (error: %v)", result.Status, result.Error)
+	}
+
+	// Resume: injected step should still be present and run
+	result, err = engine.Resume(ctx, wf, result.RunID, P{"go": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s (error: %v)", result.Status, result.Error)
+	}
+	if result.Store["injected_ran"] != true {
+		t.Fatal("dynamically inserted step should have run after resume")
+	}
+	if result.Store["resumed"] != true {
+		t.Fatal("suspender should have taken resume path")
+	}
+	if result.Store["final_ran"] != true {
+		t.Fatal("final step should have run")
+	}
+}
+
+func TestMutationDisableSurvivesResume(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("mut.disabler", func(ctx *Ctx) error {
+		DisableStep(ctx, "mut.skipped")
+		Set(ctx, "disabler_ran", true)
+		return nil
+	})
+	Task("mut.suspender2", func(ctx *Ctx) error {
+		if !IsResuming(ctx) {
+			return Suspend(ctx, P{"reason": "wait"})
+		}
+		Set(ctx, "resumed2", true)
+		return nil
+	})
+	Task("mut.skipped", func(ctx *Ctx) error {
+		Set(ctx, "skipped_ran", true)
+		return nil
+	})
+	Task("mut.end2", func(ctx *Ctx) error {
+		Set(ctx, "end2_ran", true)
+		return nil
+	})
+
+	wf := NewWorkflow("disable-survives-resume").
+		Step("mut.disabler").
+		Step("mut.suspender2").
+		Step("mut.skipped").
+		Step("mut.end2").
+		Commit()
+
+	engine, err := New(WithSQLite(t.TempDir() + "/test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+
+	// First run: disabler disables "skipped", then suspender suspends
+	result, err := engine.RunSync(ctx, wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Suspended {
+		t.Fatalf("expected Suspended, got %s (error: %v)", result.Status, result.Error)
+	}
+
+	// Resume: "skipped" should still be disabled
+	result, err = engine.Resume(ctx, wf, result.RunID, P{"go": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s (error: %v)", result.Status, result.Error)
+	}
+	if result.Store["skipped_ran"] == true {
+		t.Fatal("disabled step should NOT have run after resume")
+	}
+	if result.Store["resumed2"] != true {
+		t.Fatal("suspender should have taken resume path")
+	}
+	if result.Store["end2_ran"] != true {
+		t.Fatal("end step should have run")
+	}
+}
+
 // === Serializable Workflow Definitions ===
 
 func TestWorkflowToDefinition(t *testing.T) {

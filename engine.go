@@ -227,6 +227,11 @@ func (e *Engine) Resume(ctx context.Context, wf *Workflow, runID RunID, data P) 
 		return nil, fmt.Errorf("load state for resume: %w", err)
 	}
 
+	// Replay dynamic mutations from the suspended run
+	if len(run.Mutations) > 0 {
+		replayMutations(wf, run.Mutations)
+	}
+
 	// Inject resume data
 	wf.state.Set("__resuming", true)
 	for k, v := range data {
@@ -359,6 +364,11 @@ func (e *Engine) wakeWorkflow(runID RunID) {
 			run.UpdatedAt = time.Now()
 			e.persistence.SaveRun(ctx, run)
 			return
+		}
+
+		// Replay dynamic mutations from the sleeping run
+		if len(run.Mutations) > 0 {
+			replayMutations(wf, run.Mutations)
 		}
 
 		// Update status to Running
@@ -551,6 +561,10 @@ func (e *Engine) doExecute(ctx context.Context, wf *Workflow, runID RunID, resum
 			if errors.As(err, &sleepErr) {
 				run.WakeAt = sleepErr.WakeAt
 			}
+		}
+		// Capture dynamic mutations for resume/wake replay
+		if result.Status == Suspended || result.Status == Sleeping {
+			run.Mutations = captureDynamicState(wf)
 		}
 		e.persistence.SaveRun(ctx, run)
 	}

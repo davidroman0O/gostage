@@ -2,6 +2,7 @@ package gostage
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 )
 
@@ -216,5 +217,314 @@ func TestCtx_Context(t *testing.T) {
 
 	if ctx.Context() != goCtx {
 		t.Fatal("expected same context")
+	}
+}
+
+// === Set[T] Validation ===
+
+func TestSetRejectsNonSerializable(t *testing.T) {
+	s := newRunState("test", nil)
+	ctx := newCtx(context.Background(), s, NewDefaultLogger())
+
+	// chan
+	if err := Set(ctx, "ch", make(chan int)); err == nil {
+		t.Fatal("expected error for chan type")
+	}
+
+	// func
+	if err := Set(ctx, "fn", func() {}); err == nil {
+		t.Fatal("expected error for func type")
+	}
+
+	// complex
+	if err := Set(ctx, "cx", complex(1, 2)); err == nil {
+		t.Fatal("expected error for complex type")
+	}
+
+	// struct with chan field
+	type BadStruct struct {
+		Ch chan int
+	}
+	if err := Set(ctx, "bad", BadStruct{}); err == nil {
+		t.Fatal("expected error for struct with chan field")
+	}
+}
+
+func TestSetAcceptsSerializableStruct(t *testing.T) {
+	s := newRunState("test", nil)
+	ctx := newCtx(context.Background(), s, NewDefaultLogger())
+
+	type User struct {
+		Name  string `json:"name"`
+		Age   int    `json:"age"`
+		Email string `json:"email"`
+	}
+	err := Set(ctx, "user", User{Name: "Alice", Age: 30, Email: "alice@example.com"})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+}
+
+func TestSetAcceptsPrimitives(t *testing.T) {
+	s := newRunState("test", nil)
+	ctx := newCtx(context.Background(), s, NewDefaultLogger())
+
+	if err := Set(ctx, "i", 42); err != nil {
+		t.Fatalf("int: %v", err)
+	}
+	if err := Set(ctx, "s", "hello"); err != nil {
+		t.Fatalf("string: %v", err)
+	}
+	if err := Set(ctx, "f", 3.14); err != nil {
+		t.Fatalf("float64: %v", err)
+	}
+	if err := Set(ctx, "b", true); err != nil {
+		t.Fatalf("bool: %v", err)
+	}
+}
+
+// === Struct Round-Trip via coerce[T] ===
+
+func TestStructCoercion(t *testing.T) {
+	type Config struct {
+		Host string `json:"host"`
+		Port int    `json:"port"`
+	}
+
+	s := newRunState("test", nil)
+	ctx := newCtx(context.Background(), s, NewDefaultLogger())
+
+	// Store struct normally
+	if err := Set(ctx, "cfg", Config{Host: "localhost", Port: 8080}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Direct retrieval works (type assertion path)
+	cfg := Get[Config](ctx, "cfg")
+	if cfg.Host != "localhost" || cfg.Port != 8080 {
+		t.Fatalf("direct Get failed: %+v", cfg)
+	}
+
+	// Simulate JSON round-trip: store as map[string]interface{} (what JSON unmarshal into any produces)
+	s.Set("cfg_json", map[string]interface{}{
+		"host": "example.com",
+		"port": float64(443), // JSON numbers become float64
+	})
+
+	// coerce[T] should re-marshal back to Config
+	cfg2 := Get[Config](ctx, "cfg_json")
+	if cfg2.Host != "example.com" {
+		t.Fatalf("expected host 'example.com', got %q", cfg2.Host)
+	}
+	if cfg2.Port != 443 {
+		t.Fatalf("expected port 443, got %d", cfg2.Port)
+	}
+}
+
+func TestSliceOfStructsCoercion(t *testing.T) {
+	type Item struct {
+		Name  string `json:"name"`
+		Value int    `json:"value"`
+	}
+
+	s := newRunState("test", nil)
+	ctx := newCtx(context.Background(), s, NewDefaultLogger())
+
+	// Simulate JSON round-trip: []interface{} with map entries
+	s.Set("items", []interface{}{
+		map[string]interface{}{"name": "a", "value": float64(1)},
+		map[string]interface{}{"name": "b", "value": float64(2)},
+	})
+
+	items := Get[[]Item](ctx, "items")
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(items))
+	}
+	if items[0].Name != "a" || items[0].Value != 1 {
+		t.Fatalf("item 0: %+v", items[0])
+	}
+	if items[1].Name != "b" || items[1].Value != 2 {
+		t.Fatalf("item 1: %+v", items[1])
+	}
+}
+
+func TestMapOfStructsCoercion(t *testing.T) {
+	type Score struct {
+		Points int  `json:"points"`
+		Passed bool `json:"passed"`
+	}
+
+	s := newRunState("test", nil)
+	ctx := newCtx(context.Background(), s, NewDefaultLogger())
+
+	// Simulate JSON round-trip
+	s.Set("scores", map[string]interface{}{
+		"alice": map[string]interface{}{"points": float64(95), "passed": true},
+		"bob":   map[string]interface{}{"points": float64(42), "passed": false},
+	})
+
+	scores := Get[map[string]Score](ctx, "scores")
+	if len(scores) != 2 {
+		t.Fatalf("expected 2 scores, got %d", len(scores))
+	}
+	if scores["alice"].Points != 95 || !scores["alice"].Passed {
+		t.Fatalf("alice: %+v", scores["alice"])
+	}
+	if scores["bob"].Points != 42 || scores["bob"].Passed {
+		t.Fatalf("bob: %+v", scores["bob"])
+	}
+}
+
+func TestStructPointerCoercion(t *testing.T) {
+	type Settings struct {
+		Debug bool `json:"debug"`
+	}
+
+	s := newRunState("test", nil)
+	ctx := newCtx(context.Background(), s, NewDefaultLogger())
+
+	// Simulate JSON round-trip
+	s.Set("settings", map[string]interface{}{"debug": true})
+
+	result := Get[*Settings](ctx, "settings")
+	if result == nil {
+		t.Fatal("expected non-nil pointer")
+	}
+	if !result.Debug {
+		t.Fatal("expected debug=true")
+	}
+}
+
+// === Struct Persistence Round-Trip ===
+
+func TestStructSurvivesPersistenceRoundTrip(t *testing.T) {
+	type User struct {
+		Name  string `json:"name"`
+		Age   int    `json:"age"`
+		Admin bool   `json:"admin"`
+	}
+
+	dir := t.TempDir()
+	p, err := newSQLitePersistence(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	bgCtx := context.Background()
+
+	// Write struct to state and flush
+	s := newRunState("run-struct", p)
+	s.Set("user", User{Name: "Alice", Age: 30, Admin: true})
+	if err := s.Flush(bgCtx); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	// Load into fresh state (simulates restart)
+	s2 := newRunState("run-struct", p)
+	if err := s2.LoadFromPersistence(bgCtx); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Raw Get returns map[string]interface{} after JSON unmarshal
+	raw, ok := s2.Get("user")
+	if !ok {
+		t.Fatal("expected user key to exist")
+	}
+	if _, isMap := raw.(map[string]interface{}); !isMap {
+		t.Fatalf("expected map[string]interface{} after load, got %T", raw)
+	}
+
+	// coerce[T] should restore the struct type
+	ctx := newCtx(bgCtx, s2, NewDefaultLogger())
+	user := Get[User](ctx, "user")
+	if user.Name != "Alice" {
+		t.Fatalf("expected Name=Alice, got %q", user.Name)
+	}
+	if user.Age != 30 {
+		t.Fatalf("expected Age=30, got %d", user.Age)
+	}
+	if !user.Admin {
+		t.Fatal("expected Admin=true")
+	}
+}
+
+// === Struct Spawn Round-Trip ===
+
+func TestStructSurvivesSpawnRoundTrip(t *testing.T) {
+	type Task struct {
+		ID       string `json:"id"`
+		Priority int    `json:"priority"`
+	}
+
+	s := newRunState("test-spawn-struct", nil)
+	s.Set("task", Task{ID: "abc", Priority: 5})
+
+	// Serialize (parent → child)
+	data, err := serializeStateForChild(s, nil, 0)
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+
+	// Deserialize (child receives)
+	result, err := deserializeStoreData(data)
+	if err != nil {
+		t.Fatalf("deserialize: %v", err)
+	}
+
+	// After deserialize, the value is map[string]interface{} (JSON behavior)
+	// Build a Ctx and use Get[T] to coerce it back
+	s2 := newRunState("test-spawn-struct-child", nil)
+	for k, v := range result {
+		s2.SetClean(k, v)
+	}
+	ctx := newCtx(context.Background(), s2, NewDefaultLogger())
+
+	task := Get[Task](ctx, "task")
+	if task.ID != "abc" {
+		t.Fatalf("expected ID=abc, got %q", task.ID)
+	}
+	if task.Priority != 5 {
+		t.Fatalf("expected Priority=5, got %d", task.Priority)
+	}
+}
+
+func TestSliceOfStructsSurvivesSpawnRoundTrip(t *testing.T) {
+	type Record struct {
+		Key   string `json:"key"`
+		Value int    `json:"value"`
+	}
+
+	s := newRunState("test-spawn-slice", nil)
+	s.Set("records", []Record{
+		{Key: "a", Value: 1},
+		{Key: "b", Value: 2},
+	})
+
+	data, err := serializeStateForChild(s, nil, 0)
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+
+	result, err := deserializeStoreData(data)
+	if err != nil {
+		t.Fatalf("deserialize: %v", err)
+	}
+
+	s2 := newRunState("child", nil)
+	for k, v := range result {
+		s2.SetClean(k, v)
+	}
+	ctx := newCtx(context.Background(), s2, NewDefaultLogger())
+
+	records := Get[[]Record](ctx, "records")
+	if len(records) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(records))
+	}
+	if records[0].Key != "a" || records[0].Value != 1 {
+		t.Fatalf("record 0: %+v", records[0])
+	}
+	if records[1].Key != "b" || records[1].Value != 2 {
+		t.Fatalf("record 1: %+v", records[1])
 	}
 }
