@@ -2,6 +2,7 @@ package gostage
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -48,6 +49,7 @@ type SpawnJob struct {
 	StoreData      map[string][]byte // serialized store snapshot including item/index
 	DefinitionJSON []byte            // serialized SubWorkflowDef for multi-stage children
 	resultCh       chan *spawnResult  // child sends result here (buffered, size 1)
+	token          string            // per-job auth token
 }
 
 // spawnResult holds the outcome of a child process execution.
@@ -69,7 +71,7 @@ func newSpawnServer(engine *Engine, secret string) (*spawnServer, error) {
 			return nil, status.Errorf(codes.Unauthenticated, "missing metadata")
 		}
 		tokens := md.Get("x-gostage-secret")
-		if len(tokens) == 0 || tokens[0] != secret {
+		if len(tokens) == 0 || subtle.ConstantTimeCompare([]byte(tokens[0]), []byte(secret)) != 1 {
 			return nil, status.Errorf(codes.Unauthenticated, "invalid secret")
 		}
 		return handler(ctx, req)
@@ -114,13 +116,20 @@ func (ss *spawnServer) addJob(job *SpawnJob) {
 }
 
 // RequestWorkflowDefinition is called by child processes to get their work assignment.
-func (ss *spawnServer) RequestWorkflowDefinition(_ context.Context, req *pb.ReadySignal) (*pb.WorkflowDefinition, error) {
+func (ss *spawnServer) RequestWorkflowDefinition(ctx context.Context, req *pb.ReadySignal) (*pb.WorkflowDefinition, error) {
 	ss.mu.Lock()
 	job, ok := ss.jobs[req.ChildId]
 	ss.mu.Unlock()
 
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "job %q not found", req.ChildId)
+	}
+
+	// Validate per-job token
+	md, _ := metadata.FromIncomingContext(ctx)
+	jobTokens := md.Get("x-gostage-job-token")
+	if len(jobTokens) == 0 || subtle.ConstantTimeCompare([]byte(jobTokens[0]), []byte(job.token)) != 1 {
+		return nil, status.Errorf(codes.PermissionDenied, "invalid job token")
 	}
 
 	return &pb.WorkflowDefinition{
@@ -133,10 +142,26 @@ func (ss *spawnServer) RequestWorkflowDefinition(_ context.Context, req *pb.Read
 
 // SendMessage handles messages from child processes.
 // Used for final store delivery and IPC messages.
-func (ss *spawnServer) SendMessage(_ context.Context, msg *pb.IPCMessage) (*pb.MessageAck, error) {
+func (ss *spawnServer) SendMessage(ctx context.Context, msg *pb.IPCMessage) (*pb.MessageAck, error) {
 	jobID := ""
 	if msg.Context != nil {
 		jobID = msg.Context.SessionId
+	}
+
+	// Validate per-job token unconditionally: reject empty job IDs and invalid tokens
+	if jobID == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "missing job identifier")
+	}
+	md, _ := metadata.FromIncomingContext(ctx)
+	jobTokens := md.Get("x-gostage-job-token")
+	ss.mu.Lock()
+	job, ok := ss.jobs[jobID]
+	ss.mu.Unlock()
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "job %q not found", jobID)
+	}
+	if len(jobTokens) == 0 || subtle.ConstantTimeCompare([]byte(jobTokens[0]), []byte(job.token)) != 1 {
+		return nil, status.Errorf(codes.PermissionDenied, "invalid job token for job %q", jobID)
 	}
 
 	switch msg.Type {
@@ -239,11 +264,13 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 		}
 
 		jobID := uuid.New().String()
+		jobToken := uuid.New().String()
 		job := &SpawnJob{
 			ID:        jobID,
 			TaskName:  s.forEachRef.taskName,
 			StoreData: storeData,
 			resultCh:  make(chan *spawnResult, 1),
+			token:     jobToken,
 		}
 
 		// For sub-workflow refs, serialize the workflow definition for child transfer
@@ -328,7 +355,9 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 			}
 
 			// Track per-item completion for resume support
-			e.persistence.UpdateStepStatus(ctx, runID, itemStepKey, Completed)
+			if persistErr := e.persistence.UpdateStepStatus(ctx, runID, itemStepKey, Completed); persistErr != nil {
+				e.logger.Warn("persist spawn item status: %v", persistErr)
+			}
 		}(job, i, itemKey)
 	}
 
@@ -350,7 +379,7 @@ func spawnChild(ctx context.Context, port int, job *SpawnJob, secret string) (*s
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = append(os.Environ(), "GOSTAGE_SECRET="+secret)
+	cmd.Env = buildChildEnv(secret, job.token)
 
 	// Orphan detection: lifeline pipe — child inherits read end as extra fd
 	lifelineR, lifelineW, pipeErr := os.Pipe()
@@ -412,6 +441,32 @@ func spawnChild(ctx context.Context, port int, job *SpawnJob, secret string) (*s
 		}
 		return nil, ctx.Err()
 	}
+}
+
+// buildChildEnv constructs a minimal environment for child processes,
+// forwarding only necessary variables and filtering out credentials.
+func buildChildEnv(secret, jobToken string) []string {
+	allowed := map[string]bool{
+		"PATH": true, "HOME": true, "USER": true, "LOGNAME": true,
+		"TMPDIR": true, "TMP": true, "TEMP": true,
+		"LANG": true, "SHELL": true,
+		"GOSTAGE_CHILD_TIMEOUT": true,
+	}
+
+	var env []string
+	for _, entry := range os.Environ() {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if allowed[key] || strings.HasPrefix(key, "LC_") {
+			env = append(env, entry)
+		}
+	}
+
+	env = append(env, "GOSTAGE_SECRET="+secret)
+	env = append(env, "GOSTAGE_JOB_TOKEN="+jobToken)
+	return env
 }
 
 // --- Store serialization helpers ---

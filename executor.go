@@ -100,24 +100,44 @@ func (e *Engine) executeWorkflow(ctx context.Context, wf *Workflow, runID RunID,
 
 			// Call error callback
 			if wf.cfg.onError != nil {
-				wf.cfg.onError(err)
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							e.logger.Warn("panic in onError callback: %v", r)
+						}
+					}()
+					wf.cfg.onError(err)
+				}()
 			}
 
 			// Update step status to Failed
-			e.persistence.UpdateStepStatus(ctx, runID, s.id, Failed)
+			if persistErr := e.persistence.UpdateStepStatus(ctx, runID, s.id, Failed); persistErr != nil {
+				e.logger.Warn("persist step failed status: %v", persistErr)
+			}
 			return fmt.Errorf("step %q failed: %w", s.name, err)
 		}
 
 		// Per-step flush: write dirty state entries to persistence
-		wf.state.Flush(ctx)
+		if flushErr := wf.state.Flush(ctx); flushErr != nil {
+			e.logger.Warn("flush state after step %q: %v", s.name, flushErr)
+		}
 
 		// Step completed successfully
-		e.persistence.UpdateStepStatus(ctx, runID, s.id, Completed)
+		if persistErr := e.persistence.UpdateStepStatus(ctx, runID, s.id, Completed); persistErr != nil {
+			e.logger.Warn("persist step completed status: %v", persistErr)
+		}
 
 		// Lifecycle callback
 		if wf.cfg.onStepComplete != nil {
-			stepCtx := newCtx(ctx, wf.state, e.logger)
-			wf.cfg.onStepComplete(s.name, stepCtx)
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						e.logger.Warn("panic in onStepComplete callback for step %q: %v", s.name, r)
+					}
+				}()
+				stepCtx := newCtx(ctx, wf.state, e.logger)
+				wf.cfg.onStepComplete(s.name, stepCtx)
+			}()
 		}
 
 		// Apply mutations between steps
@@ -209,7 +229,14 @@ func (e *Engine) executeTaskFn(taskCtx *Ctx, taskName string, fn func(*Ctx) erro
 			return chain()
 		}()
 	}
-	return fn(taskCtx)
+	return func() (rerr error) {
+		defer func() {
+			if r := recover(); r != nil {
+				rerr = fmt.Errorf("task %q panic: %v", taskName, r)
+			}
+		}()
+		return fn(taskCtx)
+	}()
 }
 
 // executeSingle runs a single task with retry logic.
@@ -299,7 +326,9 @@ func (e *Engine) executeParallel(ctx context.Context, wf *Workflow, refs []StepR
 		if err := e.executeRef(ctx, wf, refs[0], runID, resuming); err != nil {
 			return err
 		}
-		e.persistence.UpdateStepStatus(ctx, runID, refKey, Completed)
+		if persistErr := e.persistence.UpdateStepStatus(ctx, runID, refKey, Completed); persistErr != nil {
+			e.logger.Warn("persist parallel ref status: %v", persistErr)
+		}
 		return nil
 	}
 
@@ -334,7 +363,9 @@ func (e *Engine) executeParallel(ctx context.Context, wf *Workflow, refs []StepR
 				mu.Unlock()
 				return
 			}
-			e.persistence.UpdateStepStatus(ctx, runID, refKeyCopy, Completed)
+			if persistErr := e.persistence.UpdateStepStatus(ctx, runID, refKeyCopy, Completed); persistErr != nil {
+				e.logger.Warn("persist parallel ref status: %v", persistErr)
+			}
 		}()
 	}
 
@@ -366,7 +397,9 @@ func (e *Engine) executeStage(ctx context.Context, wf *Workflow, refs []StepRef,
 		if err := e.executeRef(ctx, wf, ref, runID, resuming); err != nil {
 			return err
 		}
-		e.persistence.UpdateStepStatus(ctx, runID, refKey, Completed)
+		if persistErr := e.persistence.UpdateStepStatus(ctx, runID, refKey, Completed); persistErr != nil {
+			e.logger.Warn("persist stage ref status: %v", persistErr)
+		}
 	}
 	return nil
 }
@@ -443,7 +476,9 @@ func (e *Engine) executeForEach(ctx context.Context, wf *Workflow, s *step, runI
 			}
 
 			// Track per-item completion
-			e.persistence.UpdateStepStatus(ctx, runID, itemKey, Completed)
+			if persistErr := e.persistence.UpdateStepStatus(ctx, runID, itemKey, Completed); persistErr != nil {
+				e.logger.Warn("persist foreach item status: %v", persistErr)
+			}
 		}
 		return nil
 	}
@@ -493,7 +528,9 @@ func (e *Engine) executeForEach(ctx context.Context, wf *Workflow, s *step, runI
 			}
 
 			// Track per-item completion
-			e.persistence.UpdateStepStatus(ctx, runID, itemKey, Completed)
+			if persistErr := e.persistence.UpdateStepStatus(ctx, runID, itemKey, Completed); persistErr != nil {
+				e.logger.Warn("persist foreach item status: %v", persistErr)
+			}
 		}()
 	}
 
@@ -659,10 +696,13 @@ func (e *Engine) executeSleep(ctx context.Context, d time.Duration) error {
 func (e *Engine) updateCurrentStep(ctx context.Context, runID RunID, stepID string) {
 	run, err := e.persistence.LoadRun(ctx, runID)
 	if err != nil {
+		e.logger.Warn("load run for step tracking: %v", err)
 		return
 	}
 	run.CurrentStep = stepID
-	e.persistence.SaveRun(ctx, run)
+	if err := e.persistence.SaveRun(ctx, run); err != nil {
+		e.logger.Warn("save current step tracking: %v", err)
+	}
 }
 
 // getSliceFromState extracts a slice from the run state for ForEach iteration.

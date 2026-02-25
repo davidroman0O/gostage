@@ -3,10 +3,16 @@ package gostage
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	pb "github.com/davidroman0O/gostage/proto"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 // === Step-Level Resume ===
@@ -2654,5 +2660,241 @@ func TestSleepTimerWakePrimaryPath(t *testing.T) {
 	// Verify that the sleep actually blocked (not skipped)
 	if elapsed < 80*time.Millisecond {
 		t.Fatalf("expected sleep to block ~100ms, but only took %v", elapsed)
+	}
+}
+
+// === Decision 006: Bug Fixes and Test Gaps ===
+
+// TestRunAndResumeAfterClose verifies that Run and Resume reject work after engine.Close().
+func TestRunAndResumeAfterClose(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("rac.task", func(ctx *Ctx) error { return nil })
+
+	wf, err := NewWorkflow("run-after-close").
+		Step("rac.task").
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run after Close should return error
+	_, runErr := engine.Run(context.Background(), wf, nil)
+	if runErr == nil {
+		t.Fatal("expected Run to fail after Close")
+	}
+	if !strings.Contains(runErr.Error(), "engine is closed") {
+		t.Fatalf("expected 'engine is closed' error, got: %v", runErr)
+	}
+
+	// Resume after Close should return error
+	_, resumeErr := engine.Resume(context.Background(), wf, "fake-run-id", nil)
+	if resumeErr == nil {
+		t.Fatal("expected Resume to fail after Close")
+	}
+	if !strings.Contains(resumeErr.Error(), "engine is closed") {
+		t.Fatalf("expected 'engine is closed' error, got: %v", resumeErr)
+	}
+}
+
+// TestTaskPanicWithoutMiddleware verifies panic recovery in the no-middleware task invocation path.
+func TestTaskPanicWithoutMiddleware(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("tpnm.panic_task", func(ctx *Ctx) error {
+		panic("boom")
+	})
+
+	wf, err := NewWorkflow("panic-no-middleware").
+		Step("tpnm.panic_task").
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create engine with NO middleware
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Failed {
+		t.Fatalf("expected Failed, got %s", result.Status)
+	}
+	if result.Error == nil {
+		t.Fatal("expected error to be set")
+	}
+	if !strings.Contains(result.Error.Error(), "panic") {
+		t.Fatalf("expected panic in error message, got: %v", result.Error)
+	}
+}
+
+// TestPerJobTokenRejection verifies the spawn server rejects messages with invalid or missing tokens.
+func TestPerJobTokenRejection(t *testing.T) {
+	// Create a spawnServer directly (no gRPC transport needed — call methods in-process)
+	ss := &spawnServer{
+		jobs:   make(map[string]*SpawnJob),
+		secret: "test-secret",
+	}
+
+	// Register a job with a known token
+	ss.addJob(&SpawnJob{
+		ID:       "job-1",
+		TaskName: "test-task",
+		token:    "valid-token-123",
+		resultCh: make(chan *spawnResult, 1),
+	})
+
+	// Helper to create context with gRPC metadata
+	ctxWithToken := func(jobToken string) context.Context {
+		md := metadata.Pairs("x-gostage-job-token", jobToken)
+		return metadata.NewIncomingContext(context.Background(), md)
+	}
+	ctxNoToken := func() context.Context {
+		return metadata.NewIncomingContext(context.Background(), metadata.MD{})
+	}
+
+	// Test 1: Empty jobID → InvalidArgument
+	msg := &pb.IPCMessage{
+		Type:    pb.MessageType_MESSAGE_TYPE_UNSPECIFIED,
+		Context: &pb.MessageContext{SessionId: ""},
+	}
+	_, err := ss.SendMessage(ctxWithToken("valid-token-123"), msg)
+	if err == nil {
+		t.Fatal("expected error for empty jobID")
+	}
+	if s, ok := status.FromError(err); !ok || s.Code() != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument, got: %v", err)
+	}
+
+	// Test 2: Valid jobID + wrong token → PermissionDenied
+	msg.Context.SessionId = "job-1"
+	_, err = ss.SendMessage(ctxWithToken("wrong-token"), msg)
+	if err == nil {
+		t.Fatal("expected error for wrong token")
+	}
+	if s, ok := status.FromError(err); !ok || s.Code() != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied, got: %v", err)
+	}
+
+	// Test 3: Valid jobID + no token → PermissionDenied
+	_, err = ss.SendMessage(ctxNoToken(), msg)
+	if err == nil {
+		t.Fatal("expected error for missing token")
+	}
+	if s, ok := status.FromError(err); !ok || s.Code() != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied, got: %v", err)
+	}
+
+	// Test 4: Valid jobID + valid token → success
+	_, err = ss.SendMessage(ctxWithToken("valid-token-123"), msg)
+	if err != nil {
+		t.Fatalf("expected success with valid token, got: %v", err)
+	}
+
+	// Test 5: RequestWorkflowDefinition with wrong token → PermissionDenied
+	req := &pb.ReadySignal{ChildId: "job-1"}
+	_, err = ss.RequestWorkflowDefinition(ctxWithToken("wrong-token"), req)
+	if err == nil {
+		t.Fatal("expected error for wrong token on RequestWorkflowDefinition")
+	}
+	if s, ok := status.FromError(err); !ok || s.Code() != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied, got: %v", err)
+	}
+
+	// Test 6: RequestWorkflowDefinition with valid token → success
+	_, err = ss.RequestWorkflowDefinition(ctxWithToken("valid-token-123"), req)
+	if err != nil {
+		t.Fatalf("expected success with valid token, got: %v", err)
+	}
+}
+
+// TestOnStepCompletePanicRecovery verifies that a panicking onStepComplete callback
+// does not crash the worker or hang the run.
+func TestOnStepCompletePanicRecovery(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("oscpr.task", func(ctx *Ctx) error {
+		Set(ctx, "done", true)
+		return nil
+	})
+
+	wf, err := NewWorkflow("callback-panic",
+		OnStepComplete(func(stepName string, ctx *Ctx) {
+			panic("callback boom")
+		}),
+	).
+		Step("oscpr.task").
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s (error: %v)", result.Status, result.Error)
+	}
+	if result.Store["done"] != true {
+		t.Fatal("expected done=true in store")
+	}
+}
+
+// TestOnErrorPanicRecovery verifies that a panicking onError callback
+// does not crash the worker or hang the run.
+func TestOnErrorPanicRecovery(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("oepr.fail_task", func(ctx *Ctx) error {
+		return fmt.Errorf("task failure")
+	})
+
+	wf, err := NewWorkflow("error-callback-panic",
+		OnError(func(err error) {
+			panic("error callback boom")
+		}),
+	).
+		Step("oepr.fail_task").
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Failed {
+		t.Fatalf("expected Failed, got %s", result.Status)
+	}
+	if result.Error == nil {
+		t.Fatal("expected error to be set")
 	}
 }

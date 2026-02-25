@@ -112,6 +112,13 @@ func (e *Engine) RunSync(ctx context.Context, wf *Workflow, params P) (*Result, 
 //
 //	runID, err := engine.Run(ctx, wf, gostage.P{"order_id": "ORD-123"})
 func (e *Engine) Run(ctx context.Context, wf *Workflow, params P) (RunID, error) {
+	// Guard: reject if engine is closed
+	select {
+	case <-e.closeCh:
+		return "", fmt.Errorf("engine is closed")
+	default:
+	}
+
 	runID := RunID(uuid.New().String())
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -125,7 +132,7 @@ func (e *Engine) Run(ctx context.Context, wf *Workflow, params P) (RunID, error)
 	e.runs[runID] = handle
 	e.mu.Unlock()
 
-	e.pool.Submit(func() {
+	if !e.pool.Submit(func() {
 		result, _ := e.executeRun(runCtx, wf, runID, params)
 		if result == nil {
 			result = &Result{RunID: runID, Status: Failed, Error: fmt.Errorf("execution returned nil result")}
@@ -137,7 +144,13 @@ func (e *Engine) Run(ctx context.Context, wf *Workflow, params P) (RunID, error)
 		e.mu.Lock()
 		delete(e.runs, runID)
 		e.mu.Unlock()
-	})
+	}) {
+		e.mu.Lock()
+		delete(e.runs, runID)
+		e.mu.Unlock()
+		cancel()
+		return "", fmt.Errorf("engine is closed")
+	}
 
 	return runID, nil
 }
@@ -198,6 +211,13 @@ func (e *Engine) Cancel(ctx context.Context, runID RunID) error {
 //
 //	result, err := engine.Resume(ctx, runID, gostage.P{"approved": true})
 func (e *Engine) Resume(ctx context.Context, wf *Workflow, runID RunID, data P) (*Result, error) {
+	// Guard: reject if engine is closed
+	select {
+	case <-e.closeCh:
+		return nil, fmt.Errorf("engine is closed")
+	default:
+	}
+
 	// Concurrent resume prevention: reserve slot before proceeding
 	runCtx, runCancel := context.WithCancel(ctx)
 
@@ -356,7 +376,7 @@ func (e *Engine) wakeWorkflow(runID RunID) {
 	default:
 	}
 
-	e.pool.Submit(func() {
+	if !e.pool.Submit(func() {
 		// Create cancellable context so woken workflows can be cancelled
 		ctx, cancel := context.WithCancel(context.Background())
 
@@ -392,7 +412,9 @@ func (e *Engine) wakeWorkflow(runID RunID) {
 			// Workflow not in cache — mark as failed
 			run.Status = Failed
 			run.UpdatedAt = time.Now()
-			e.persistence.SaveRun(ctx, run)
+			if err := e.persistence.SaveRun(ctx, run); err != nil {
+				e.logger.Warn("persist failed wake (no cache): %v", err)
+			}
 			return
 		}
 
@@ -404,7 +426,9 @@ func (e *Engine) wakeWorkflow(runID RunID) {
 		if err := wf.state.LoadFromPersistence(ctx); err != nil {
 			run.Status = Failed
 			run.UpdatedAt = time.Now()
-			e.persistence.SaveRun(ctx, run)
+			if saveErr := e.persistence.SaveRun(ctx, run); saveErr != nil {
+				e.logger.Warn("persist failed wake (state load): %v", saveErr)
+			}
 			return
 		}
 
@@ -416,7 +440,9 @@ func (e *Engine) wakeWorkflow(runID RunID) {
 		// Update status to Running
 		run.Status = Running
 		run.UpdatedAt = time.Now()
-		e.persistence.SaveRun(ctx, run)
+		if err := e.persistence.SaveRun(ctx, run); err != nil {
+			e.logger.Warn("persist wake status update: %v", err)
+		}
 
 		// Re-execute (resuming skips completed steps)
 		result := e.doExecute(ctx, wf, runID, true)
@@ -426,7 +452,9 @@ func (e *Engine) wakeWorkflow(runID RunID) {
 		case handle.done <- result:
 		default:
 		}
-	})
+	}) {
+		e.logger.Warn("failed to wake workflow %s: pool is closed", runID)
+	}
 }
 
 // Recover scans persistence for interrupted workflows and handles them.
@@ -443,7 +471,9 @@ func (e *Engine) Recover(ctx context.Context) error {
 	for _, run := range runningRuns {
 		run.Status = Failed
 		run.UpdatedAt = time.Now()
-		e.persistence.SaveRun(ctx, run)
+		if err := e.persistence.SaveRun(ctx, run); err != nil {
+			e.logger.Warn("persist recovery (mark failed): %v", err)
+		}
 	}
 
 	// Recover sleeping workflows
@@ -458,7 +488,9 @@ func (e *Engine) Recover(ctx context.Context) error {
 			// No wake time — mark as failed
 			run.Status = Failed
 			run.UpdatedAt = time.Now()
-			e.persistence.SaveRun(ctx, run)
+			if err := e.persistence.SaveRun(ctx, run); err != nil {
+				e.logger.Warn("persist recovery (no wake time): %v", err)
+			}
 			continue
 		}
 
@@ -612,16 +644,22 @@ func (e *Engine) doExecute(ctx context.Context, wf *Workflow, runID RunID, resum
 		if result.Status == Suspended || result.Status == Sleeping {
 			run.Mutations = captureDynamicState(wf)
 		}
-		e.persistence.SaveRun(bgCtx, run)
+		if saveErr := e.persistence.SaveRun(bgCtx, run); saveErr != nil {
+			e.logger.Warn("persist final run state: %v", saveErr)
+		}
 	}
 
 	// Final flush: write any remaining dirty state to persistence
-	wf.state.Flush(bgCtx)
+	if flushErr := wf.state.Flush(bgCtx); flushErr != nil {
+		e.logger.Warn("flush final state: %v", flushErr)
+	}
 
 	// Clean up persisted state for terminal runs — the final state is captured in Result.Store
 	switch result.Status {
 	case Completed, Failed, Bailed, Cancelled:
-		e.persistence.DeleteState(bgCtx, runID)
+		if delErr := e.persistence.DeleteState(bgCtx, runID); delErr != nil {
+			e.logger.Warn("cleanup terminal state: %v", delErr)
+		}
 	}
 
 	return result

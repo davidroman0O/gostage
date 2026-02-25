@@ -56,10 +56,15 @@ func (p *workerPool) worker() {
 
 // Submit queues work to the pool. Blocks if the job buffer is full (backpressure).
 // Returns false if the pool is closed.
-func (p *workerPool) Submit(fn func()) bool {
+func (p *workerPool) Submit(fn func()) (ok bool) {
 	if p.closed.Load() {
 		return false
 	}
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
 	p.jobs <- fn
 	return true
 }

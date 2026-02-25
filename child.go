@@ -77,10 +77,14 @@ func HandleChild() {
 
 	client := pb.NewWorkflowIPCClient(conn)
 
-	// Attach shared secret as gRPC metadata for all calls
+	// Attach shared secret and per-job token as gRPC metadata for all calls
 	secret := os.Getenv("GOSTAGE_SECRET")
 	if secret != "" {
 		ctx = metadata.AppendToOutgoingContext(ctx, "x-gostage-secret", secret)
+	}
+	jobToken := os.Getenv("GOSTAGE_JOB_TOKEN")
+	if jobToken != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "x-gostage-job-token", jobToken)
 	}
 
 	// Request our work assignment
