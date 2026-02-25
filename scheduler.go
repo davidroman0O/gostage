@@ -100,29 +100,6 @@ func (ts *timerScheduler) Cancel(runID RunID) {
 	}
 }
 
-// Populate loads sleeping runs from persistence on startup.
-// Deduplicates: skips runs already in the scheduler.
-func (ts *timerScheduler) Populate(runs []*RunState) {
-	ts.mu.Lock()
-	defer ts.mu.Unlock()
-
-	for _, run := range runs {
-		if run.Status == Sleeping && !run.WakeAt.IsZero() {
-			// Skip if already scheduled
-			if _, ok := ts.byRunID[run.RunID]; ok {
-				continue
-			}
-			entry := &timerEntry{
-				runID:  run.RunID,
-				wakeAt: run.WakeAt,
-			}
-			heap.Push(&ts.entries, entry)
-			ts.byRunID[run.RunID] = entry
-		}
-	}
-	ts.resetTimerLocked()
-}
-
 // Stop shuts down the scheduler.
 func (ts *timerScheduler) Stop() {
 	ts.mu.Lock()

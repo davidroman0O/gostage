@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -267,7 +268,7 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 			var chainErr error
 			if len(e.childMiddleware) > 0 {
 				chain := doSpawn
-				for j := len(e.childMiddleware) - 1; j >= 0; j-- {
+				for j := 0; j < len(e.childMiddleware); j++ {
 					mw := e.childMiddleware[j]
 					next := chain
 					chain = func() error {
@@ -301,7 +302,7 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 				merged, mergeErr := deserializeStoreData(result.storeData)
 				if mergeErr == nil {
 					for k, v := range merged {
-						if len(k) > 0 && k[0] != '_' {
+						if !strings.HasPrefix(k, "__") {
 							wf.state.Set(k, v)
 						}
 					}

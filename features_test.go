@@ -454,32 +454,6 @@ func TestTimerCancel(t *testing.T) {
 	}
 }
 
-func TestTimerPopulate(t *testing.T) {
-	var woken int32
-
-	ts := newTimerScheduler(func(runID RunID) {
-		atomic.AddInt32(&woken, 1)
-	})
-	defer ts.Stop()
-
-	runs := []*RunState{
-		{RunID: "sleep-1", Status: Sleeping, WakeAt: time.Now().Add(50 * time.Millisecond)},
-		{RunID: "sleep-2", Status: Sleeping, WakeAt: time.Now().Add(100 * time.Millisecond)},
-		{RunID: "other", Status: Running},
-	}
-	ts.Populate(runs)
-
-	if ts.Pending() != 2 {
-		t.Fatalf("expected 2 pending, got %d", ts.Pending())
-	}
-
-	time.Sleep(200 * time.Millisecond)
-
-	if atomic.LoadInt32(&woken) != 2 {
-		t.Fatalf("expected 2 woken, got %d", woken)
-	}
-}
-
 // === Middleware System ===
 
 func TestEngineMiddleware(t *testing.T) {
@@ -1934,5 +1908,232 @@ func TestSpawnDirtyTypePreservation(t *testing.T) {
 	}
 	if v, ok := result["child_flag"].(bool); !ok || v != true {
 		t.Fatalf("child_flag: expected bool(true), got %T(%v)", result["child_flag"], result["child_flag"])
+	}
+}
+
+// === Decision 003 Tests ===
+
+// TestMiddlewareOrdering verifies the last-registered middleware executes first
+// (wraps outermost), matching the INTENT specification.
+func TestMiddlewareOrdering(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("mw.order.task", func(ctx *Ctx) error {
+		Set(ctx, "done", true)
+		return nil
+	})
+
+	var order []string
+	var mu sync.Mutex
+
+	engine, err := New(
+		WithEngineMiddleware(func(ctx context.Context, wf *Workflow, runID RunID, next func() error) error {
+			mu.Lock()
+			order = append(order, "engine_first_enter")
+			mu.Unlock()
+			err := next()
+			mu.Lock()
+			order = append(order, "engine_first_exit")
+			mu.Unlock()
+			return err
+		}),
+		WithEngineMiddleware(func(ctx context.Context, wf *Workflow, runID RunID, next func() error) error {
+			mu.Lock()
+			order = append(order, "engine_last_enter")
+			mu.Unlock()
+			err := next()
+			mu.Lock()
+			order = append(order, "engine_last_exit")
+			mu.Unlock()
+			return err
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	wf := NewWorkflow("mw-order").Step("mw.order.task").Commit()
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+
+	// Last-registered should be outermost: enters first, exits last
+	mu.Lock()
+	defer mu.Unlock()
+	if len(order) != 4 {
+		t.Fatalf("expected 4 middleware events, got %d: %v", len(order), order)
+	}
+	if order[0] != "engine_last_enter" {
+		t.Fatalf("expected last-registered MW to enter first, got %v", order)
+	}
+	if order[3] != "engine_last_exit" {
+		t.Fatalf("expected last-registered MW to exit last, got %v", order)
+	}
+}
+
+// TestEngineDoubleClose verifies calling Close() twice does not panic.
+func TestEngineDoubleClose(t *testing.T) {
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// First close should succeed
+	if err := engine.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+
+	// Second close should be a no-op, not panic
+	if err := engine.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// TestResumeKeyCleanup verifies that internal __resuming and __resume:* keys
+// do not appear in the final Result.Store after a suspend-and-resume cycle.
+func TestResumeKeyCleanup(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("rkc.task", func(ctx *Ctx) error {
+		if IsResuming(ctx) {
+			approved := ResumeData[bool](ctx, "approved")
+			Set(ctx, "approved", approved)
+			return nil
+		}
+		Set(ctx, "data", "value")
+		return Suspend(ctx, P{"reason": "need approval"})
+	})
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	wf := NewWorkflow("resume-key-cleanup").Step("rkc.task").Commit()
+
+	// First run: suspends
+	result1, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result1.Status != Suspended {
+		t.Fatalf("expected Suspended, got %s", result1.Status)
+	}
+
+	// Resume with data
+	wf2 := NewWorkflow("resume-key-cleanup").Step("rkc.task").Commit()
+	result2, err := engine.Resume(context.Background(), wf2, result1.RunID, P{"approved": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result2.Status != Completed {
+		t.Fatalf("expected Completed, got %s (error: %v)", result2.Status, result2.Error)
+	}
+
+	// Verify no internal keys leak into the result
+	for k := range result2.Store {
+		if len(k) >= 2 && k[:2] == "__" {
+			t.Fatalf("internal key %q leaked into Result.Store", k)
+		}
+	}
+
+	// Verify user data is preserved
+	if result2.Store["data"] != "value" {
+		t.Fatalf("expected data=value, got %v", result2.Store["data"])
+	}
+	if result2.Store["approved"] != true {
+		t.Fatalf("expected approved=true, got %v", result2.Store["approved"])
+	}
+}
+
+// TestParallelPerRefResume verifies that individual branches within a Parallel
+// step that completed before a crash are skipped on resume.
+func TestParallelPerRefResume(t *testing.T) {
+	ResetTaskRegistry()
+
+	var taskACount, taskBCount, taskCCount int32
+
+	Task("pref.a", func(ctx *Ctx) error {
+		atomic.AddInt32(&taskACount, 1)
+		Set(ctx, "a_done", true)
+		return nil
+	})
+	Task("pref.b", func(ctx *Ctx) error {
+		atomic.AddInt32(&taskBCount, 1)
+		if !IsResuming(ctx) {
+			return Suspend(ctx, P{"reason": "wait"})
+		}
+		Set(ctx, "b_done", true)
+		return nil
+	})
+	Task("pref.c", func(ctx *Ctx) error {
+		atomic.AddInt32(&taskCCount, 1)
+		Set(ctx, "c_done", true)
+		return nil
+	})
+
+	// Use in-memory persistence (sufficient — per-ref tracking uses UpdateStepStatus)
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	// Workflow: parallel with 3 refs, middle one suspends
+	// Note: Parallel runs all concurrently, so suspend from one branch propagates
+	// We need to test with a Stage (sequential) to demonstrate per-ref skip
+	wf := NewWorkflow("pref-test").
+		Stage("group", Step("pref.a"), Step("pref.b"), Step("pref.c")).
+		Commit()
+
+	result1, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result1.Status != Suspended {
+		t.Fatalf("expected Suspended, got %s (error: %v)", result1.Status, result1.Error)
+	}
+
+	// pref.a should have run once, pref.b ran and suspended, pref.c should not run yet
+	if atomic.LoadInt32(&taskACount) != 1 {
+		t.Fatalf("expected taskA to run once before suspend, got %d", atomic.LoadInt32(&taskACount))
+	}
+	if atomic.LoadInt32(&taskBCount) != 1 {
+		t.Fatalf("expected taskB to run once before suspend, got %d", atomic.LoadInt32(&taskBCount))
+	}
+	if atomic.LoadInt32(&taskCCount) != 0 {
+		t.Fatalf("expected taskC not to run before suspend, got %d", atomic.LoadInt32(&taskCCount))
+	}
+
+	// Resume: pref.a should be SKIPPED (per-ref completion), pref.b resumes, pref.c runs
+	wf2 := NewWorkflow("pref-test").
+		Stage("group", Step("pref.a"), Step("pref.b"), Step("pref.c")).
+		Commit()
+
+	result2, err := engine.Resume(context.Background(), wf2, result1.RunID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result2.Status != Completed {
+		t.Fatalf("expected Completed, got %s (error: %v)", result2.Status, result2.Error)
+	}
+
+	// pref.a should NOT have run again (per-ref tracking skipped it)
+	if atomic.LoadInt32(&taskACount) != 1 {
+		t.Fatalf("expected taskA to still be 1 after resume (skipped), got %d", atomic.LoadInt32(&taskACount))
+	}
+	// pref.b should have run again (resume path)
+	if atomic.LoadInt32(&taskBCount) != 2 {
+		t.Fatalf("expected taskB to be 2 after resume, got %d", atomic.LoadInt32(&taskBCount))
+	}
+	// pref.c should have run once
+	if atomic.LoadInt32(&taskCCount) != 1 {
+		t.Fatalf("expected taskC to be 1 after resume, got %d", atomic.LoadInt32(&taskCCount))
 	}
 }

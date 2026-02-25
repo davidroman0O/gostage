@@ -162,6 +162,15 @@ func Set[T any](ctx *Ctx, key string, value T) error {
 	return nil
 }
 
+// Delete removes a key from the workflow store.
+// The deletion is durable — it is written to persistence on the next flush
+// and the key does not reappear after a crash and resume.
+//
+//	gostage.Delete(ctx, "temp_data")
+func Delete(ctx *Ctx, key string) {
+	ctx.state.Delete(key)
+}
+
 // --- Control flow functions ---
 
 // Bail signals the workflow to exit early (not an error).

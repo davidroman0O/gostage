@@ -589,16 +589,25 @@ func (b *WorkflowBuilder) Commit() *Workflow {
 			}
 
 		case stepMap:
+			if bs.mapFn == nil && bs.mapFnName == "" {
+				panic("gostage: Map step has nil function — use Map(fn) or MapNamed(name)")
+			}
 			s.mapFn = bs.mapFn
 			s.mapFnName = bs.mapFnName
 
 		case stepDoUntil, stepDoWhile:
+			if bs.loopCond == nil && bs.loopCondName == "" {
+				panic("gostage: loop step has nil condition — use DoUntil/DoWhile with a condition or DoUntilNamed/DoWhileNamed")
+			}
 			s.loopRef = bs.loopRef
 			s.loopCond = bs.loopCond
 			s.loopCondName = bs.loopCondName
 			validateStepRef(bs.loopRef)
 
 		case stepSub:
+			if bs.subWorkflow == nil {
+				panic("gostage: Sub step has nil workflow")
+			}
 			s.subWorkflow = bs.subWorkflow
 
 		case stepSleep:

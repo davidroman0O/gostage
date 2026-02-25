@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -53,6 +55,29 @@ func registerSpawnTestTasks() {
 	Task("spawn.slow", func(ctx *Ctx) error {
 		time.Sleep(100 * time.Millisecond)
 		Set(ctx, "slow_done", true)
+		return nil
+	})
+
+	// spawn.retry_flaky: fails on first call, succeeds on retry.
+	// Uses a temp file marker to track attempts within the child process.
+	Task("spawn.retry_flaky", func(ctx *Ctx) error {
+		markerPath := GetOr[string](ctx, "marker_path", "")
+		if markerPath == "" {
+			return fmt.Errorf("marker_path not set")
+		}
+		if _, err := os.Stat(markerPath); os.IsNotExist(err) {
+			// First attempt: create marker, fail
+			os.WriteFile(markerPath, []byte("attempted"), 0644)
+			return fmt.Errorf("transient failure")
+		}
+		// Retry attempt: marker exists, succeed
+		Set(ctx, "retried", true)
+		return nil
+	}, WithRetry(1))
+
+	// spawn.mw_echo: simple task for middleware testing
+	Task("spawn.mw_echo", func(ctx *Ctx) error {
+		Set(ctx, "mw_child_ran", true)
 		return nil
 	})
 }
@@ -388,5 +413,125 @@ func TestSpawn_EmptyCollection(t *testing.T) {
 	}
 	if result.Status != Completed {
 		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+}
+
+func TestSpawn_AllFourMiddlewareLevels(t *testing.T) {
+	ResetTaskRegistry()
+
+	// Register tasks: one normal step (triggers task middleware) + one spawn step (triggers child middleware)
+	Task("spawn.mw_setup", func(ctx *Ctx) error {
+		Set(ctx, "setup_ran", true)
+		return nil
+	})
+	Task("spawn.mw_echo", func(ctx *Ctx) error {
+		Set(ctx, "mw_child_ran", true)
+		return nil
+	})
+
+	var engineMW, stepMW, taskMW, childMW int32
+
+	engine, err := New(
+		WithEngineMiddleware(func(ctx context.Context, wf *Workflow, runID RunID, next func() error) error {
+			atomic.AddInt32(&engineMW, 1)
+			return next()
+		}),
+		WithStepMiddleware(func(ctx context.Context, s *step, runID RunID, next func() error) error {
+			atomic.AddInt32(&stepMW, 1)
+			return next()
+		}),
+		WithTaskMiddleware(func(tctx *Ctx, taskName string, next func() error) error {
+			atomic.AddInt32(&taskMW, 1)
+			return next()
+		}),
+		WithChildMiddleware(func(ctx context.Context, job *SpawnJob, next func() error) error {
+			atomic.AddInt32(&childMW, 1)
+			return next()
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	// Workflow: normal task step + ForEach with spawn
+	wf := NewWorkflow("mw-all-four").
+		Step("spawn.mw_setup").
+		ForEach("items", Step("spawn.mw_echo"), WithSpawn()).
+		Commit()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := engine.RunSync(ctx, wf, P{"items": []string{"a", "b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s (error: %v)", result.Status, result.Error)
+	}
+
+	if atomic.LoadInt32(&engineMW) < 1 {
+		t.Fatal("engine middleware did not fire")
+	}
+	if atomic.LoadInt32(&stepMW) < 1 {
+		t.Fatal("step middleware did not fire")
+	}
+	if atomic.LoadInt32(&taskMW) < 1 {
+		t.Fatal("task middleware did not fire")
+	}
+	if atomic.LoadInt32(&childMW) < 2 {
+		t.Fatalf("expected child middleware to fire >= 2 times (once per spawn item), got %d", atomic.LoadInt32(&childMW))
+	}
+}
+
+func TestSpawn_ChildRetryRespected(t *testing.T) {
+	ResetTaskRegistry()
+
+	// Create a temp file path for the marker
+	dir := t.TempDir()
+	markerPath := filepath.Join(dir, "retry_marker")
+
+	// Register task with retry — fails first call, succeeds on retry
+	Task("spawn.retry_flaky", func(ctx *Ctx) error {
+		mp := GetOr[string](ctx, "marker_path", "")
+		if mp == "" {
+			return fmt.Errorf("marker_path not set")
+		}
+		if _, err := os.Stat(mp); os.IsNotExist(err) {
+			os.WriteFile(mp, []byte("attempted"), 0644)
+			return fmt.Errorf("transient failure")
+		}
+		Set(ctx, "retried", true)
+		return nil
+	}, WithRetry(1))
+
+	wf := NewWorkflow("spawn-retry").
+		ForEach("items", Step("spawn.retry_flaky"), WithSpawn()).
+		Commit()
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := engine.RunSync(ctx, wf, P{
+		"items":       []string{"x"},
+		"marker_path": markerPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s (error: %v)", result.Status, result.Error)
+	}
+
+	// The child should have retried and set "retried" = true
+	if result.Store["retried"] != true {
+		t.Fatal("expected 'retried' to be true — child retry was not respected")
 	}
 }

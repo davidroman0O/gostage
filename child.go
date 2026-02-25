@@ -3,6 +3,7 @@ package gostage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -144,6 +145,11 @@ func HandleChild() {
 		}
 		defer childEngine.Close()
 
+		// Wire IPC: forward Send() calls from tasks inside the child workflow to the parent
+		childEngine.OnMessage("*", func(msgType string, payload map[string]any) {
+			ipcSendFn(msgType, payload)
+		})
+
 		// Execute the workflow (non-resuming)
 		taskErr = childEngine.executeWorkflow(ctx, childWf, RunID(jobID), false)
 	} else {
@@ -167,7 +173,39 @@ func HandleChild() {
 			}
 		}
 
-		taskErr = td.fn(taskCtx)
+		// Retry loop mirroring executeSingle — reads the task definition's
+		// retry count and delay so WithRetry is respected in child processes.
+		retries := td.retries
+		retryDelay := td.retryDelay
+
+		retryLoop:
+		for attempt := 0; attempt <= retries; attempt++ {
+			if attempt > 0 && retryDelay > 0 {
+				select {
+				case <-time.After(retryDelay):
+				case <-ctx.Done():
+					taskErr = ctx.Err()
+					break retryLoop
+				}
+			}
+
+			taskErr = td.fn(taskCtx)
+			if taskErr == nil {
+				break
+			}
+
+			// Don't retry bail/suspend/sleep — propagate immediately
+			var bailErr *BailError
+			var suspendErr *SuspendError
+			var sleepErr *SleepError
+			if errors.As(taskErr, &bailErr) || errors.As(taskErr, &suspendErr) || errors.As(taskErr, &sleepErr) {
+				break
+			}
+			if ctx.Err() != nil {
+				taskErr = ctx.Err()
+				break
+			}
+		}
 	}
 
 	if taskErr != nil {
@@ -183,7 +221,7 @@ func HandleChild() {
 		os.Exit(1)
 	}
 
-	client.SendMessage(ctx, &pb.IPCMessage{
+	_, sendErr := client.SendMessage(ctx, &pb.IPCMessage{
 		Type: pb.MessageType_MESSAGE_TYPE_FINAL_STORE,
 		Payload: &pb.IPCMessage_FinalStore{
 			FinalStore: &pb.FinalStorePayload{
@@ -192,6 +230,10 @@ func HandleChild() {
 		},
 		Context: &pb.MessageContext{SessionId: jobID},
 	})
+	if sendErr != nil {
+		fmt.Fprintf(os.Stderr, "gostage child: send final store: %v\n", sendErr)
+		os.Exit(1)
+	}
 
 	os.Exit(0)
 }

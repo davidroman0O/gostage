@@ -783,13 +783,18 @@ func TestEngine_WithSQLite_Integration(t *testing.T) {
 		t.Fatalf("expected Completed in SQLite, got %s", run.Status)
 	}
 
-	// Verify state was persisted
+	// Verify state was captured in result before cleanup
+	if result.Store["result"] != "persisted" {
+		t.Fatalf("expected result.Store to contain 'persisted', got %v", result.Store["result"])
+	}
+
+	// Verify state was cleaned up from persistence for completed runs
 	state, err := engine.persistence.LoadState(context.Background(), result.RunID)
 	if err != nil {
 		t.Fatalf("LoadState from SQLite failed: %v", err)
 	}
-	if len(state) == 0 {
-		t.Fatal("expected non-empty state data")
+	if len(state) != 0 {
+		t.Fatalf("expected empty state data after cleanup, got %d entries", len(state))
 	}
 }
 
@@ -872,5 +877,76 @@ func TestEngine_StepFailStopsExecution(t *testing.T) {
 	}
 	if result.Store["step3"] == true {
 		t.Fatal("expected step3 NOT to have run after failure")
+	}
+}
+
+func TestEngine_DeleteKeySurvivesResume(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("e.set_and_suspend", func(ctx *Ctx) error {
+		if IsResuming(ctx) {
+			// On resume: delete the "remove" key via the state directly
+			ctx.state.Delete("remove")
+			Set(ctx, "resumed", true)
+			return nil
+		}
+		// First execution: set both keys, then suspend
+		Set(ctx, "keep", "preserved")
+		Set(ctx, "remove", "should-disappear")
+		return Suspend(ctx, P{"reason": "test"})
+	})
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "delete-key.db")
+
+	// Engine 1: run until suspended
+	engine1, err := New(WithSQLite(dbPath))
+	if err != nil {
+		t.Fatalf("create engine1: %v", err)
+	}
+
+	wf := NewWorkflow("delete-key-test").Step("e.set_and_suspend").Commit()
+	result1, err := engine1.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatalf("RunSync: %v", err)
+	}
+	if result1.Status != Suspended {
+		t.Fatalf("expected Suspended, got %s", result1.Status)
+	}
+	runID := result1.RunID
+
+	// Close engine1 (simulates crash)
+	engine1.Close()
+
+	// Engine 2: new engine from same database (simulates restart)
+	engine2, err := New(WithSQLite(dbPath))
+	if err != nil {
+		t.Fatalf("create engine2: %v", err)
+	}
+	defer engine2.Close()
+
+	// Resume the run
+	wf2 := NewWorkflow("delete-key-test").Step("e.set_and_suspend").Commit()
+	result2, err := engine2.Resume(context.Background(), wf2, runID, nil)
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if result2.Status != Completed {
+		t.Fatalf("expected Completed after resume, got %s", result2.Status)
+	}
+
+	// "keep" should be present
+	if result2.Store["keep"] != "preserved" {
+		t.Fatalf("expected 'keep' to be 'preserved', got %v", result2.Store["keep"])
+	}
+
+	// "remove" should be absent (deleted during resume, flushed to persistence)
+	if _, exists := result2.Store["remove"]; exists {
+		t.Fatalf("expected 'remove' to be absent after delete, but got %v", result2.Store["remove"])
+	}
+
+	// "resumed" should confirm the resume path ran
+	if result2.Store["resumed"] != true {
+		t.Fatal("expected 'resumed' to be true")
 	}
 }

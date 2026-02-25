@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,9 +19,10 @@ type Engine struct {
 	pool        *workerPool
 	poolSize    int // 0 = default
 
-	mu      sync.Mutex
-	runs    map[RunID]*runHandle
-	closeCh chan struct{}
+	mu        sync.Mutex
+	runs      map[RunID]*runHandle
+	closeCh   chan struct{}
+	closeOnce sync.Once
 
 	// workflowCache stores workflows by ID for timer-based recovery.
 	workflowCacheMu sync.RWMutex
@@ -197,13 +199,17 @@ func (e *Engine) Cancel(ctx context.Context, runID RunID) error {
 //	result, err := engine.Resume(ctx, runID, gostage.P{"approved": true})
 func (e *Engine) Resume(ctx context.Context, wf *Workflow, runID RunID, data P) (*Result, error) {
 	// Concurrent resume prevention: reserve slot before proceeding
+	runCtx, runCancel := context.WithCancel(ctx)
+
 	e.mu.Lock()
 	if _, active := e.runs[runID]; active {
 		e.mu.Unlock()
+		runCancel()
 		return nil, fmt.Errorf("run %s is already active", runID)
 	}
 	handle := &runHandle{
-		done: make(chan *Result, 1),
+		cancel: runCancel,
+		done:   make(chan *Result, 1),
 	}
 	e.runs[runID] = handle
 	e.mu.Unlock()
@@ -222,6 +228,10 @@ func (e *Engine) Resume(ctx context.Context, wf *Workflow, runID RunID, data P) 
 
 	if run.Status != Suspended {
 		return nil, fmt.Errorf("cannot resume run %s: status is %s, expected suspended", runID, run.Status)
+	}
+
+	if wf.ID != run.WorkflowID {
+		return nil, fmt.Errorf("cannot resume run %s: workflow mismatch — run belongs to workflow %q but received workflow %q", runID, run.WorkflowID, wf.ID)
 	}
 
 	wf = wf.clone()
@@ -251,10 +261,7 @@ func (e *Engine) Resume(ctx context.Context, wf *Workflow, runID RunID, data P) 
 	}
 
 	// Re-execute the workflow (the task with IsResuming check will take the resume path)
-	result := e.doExecute(ctx, wf, runID, true)
-
-	// Clean up resume markers
-	wf.state.Delete("__resuming")
+	result := e.doExecute(runCtx, wf, runID, true)
 
 	return result, nil
 }
@@ -285,28 +292,35 @@ func (e *Engine) dispatchMessage(msgType string, payload map[string]any) {
 }
 
 // Close releases engine resources with ordered shutdown.
+// Safe to call multiple times — the second and subsequent calls are no-ops.
 func (e *Engine) Close() error {
-	close(e.closeCh)
+	var closeErr error
+	e.closeOnce.Do(func() {
+		close(e.closeCh)
 
-	// 1. Stop scheduler (no more timer fires)
-	if e.scheduler != nil {
-		e.scheduler.Stop()
-	}
+		// 1. Stop scheduler (no more timer fires)
+		if e.scheduler != nil {
+			e.scheduler.Stop()
+		}
 
-	// 2. Cancel all active runs
-	e.mu.Lock()
-	for _, handle := range e.runs {
-		handle.cancel()
-	}
-	e.mu.Unlock()
+		// 2. Cancel all active runs
+		e.mu.Lock()
+		for _, handle := range e.runs {
+			if handle.cancel != nil {
+				handle.cancel()
+			}
+		}
+		e.mu.Unlock()
 
-	// 3. Drain worker pool (waits for in-flight jobs)
-	if e.pool != nil {
-		e.pool.Shutdown()
-	}
+		// 3. Drain worker pool (waits for in-flight jobs)
+		if e.pool != nil {
+			e.pool.Shutdown()
+		}
 
-	// 4. Close persistence (last — active runs may flush during shutdown)
-	return e.persistence.Close()
+		// 4. Close persistence (last — active runs may flush during shutdown)
+		closeErr = e.persistence.Close()
+	})
+	return closeErr
 }
 
 // cacheWorkflow stores a workflow in the engine's cache for timer-based recovery.
@@ -487,7 +501,7 @@ func (e *Engine) doExecute(ctx context.Context, wf *Workflow, runID RunID, resum
 			return e.executeWorkflow(ctx, wf, runID, resuming)
 		}
 		chain := final
-		for i := len(e.engineMiddleware) - 1; i >= 0; i-- {
+		for i := 0; i < len(e.engineMiddleware); i++ {
 			mw := e.engineMiddleware[i]
 			next := chain
 			chain = func() error {
@@ -504,6 +518,14 @@ func (e *Engine) doExecute(ctx context.Context, wf *Workflow, runID RunID, resum
 		}()
 	} else {
 		err = e.executeWorkflow(ctx, wf, runID, resuming)
+	}
+
+	// Clean up internal double-underscore keys before building the result
+	// so they don't leak into the caller's result store.
+	for _, key := range wf.state.Keys() {
+		if strings.HasPrefix(key, "__") {
+			wf.state.Delete(key)
+		}
 	}
 
 	result := &Result{
@@ -547,8 +569,10 @@ func (e *Engine) doExecute(ctx context.Context, wf *Workflow, runID RunID, resum
 		result.Error = err
 	}
 
-	// Update persistence
-	run, loadErr := e.persistence.LoadRun(ctx, runID)
+	// Update persistence — use background context so writes succeed even if
+	// the workflow's context was cancelled.
+	bgCtx := context.Background()
+	run, loadErr := e.persistence.LoadRun(bgCtx, runID)
 	if loadErr == nil {
 		run.Status = result.Status
 		run.UpdatedAt = time.Now()
@@ -571,11 +595,17 @@ func (e *Engine) doExecute(ctx context.Context, wf *Workflow, runID RunID, resum
 		if result.Status == Suspended || result.Status == Sleeping {
 			run.Mutations = captureDynamicState(wf)
 		}
-		e.persistence.SaveRun(ctx, run)
+		e.persistence.SaveRun(bgCtx, run)
 	}
 
 	// Final flush: write any remaining dirty state to persistence
-	wf.state.Flush(ctx)
+	wf.state.Flush(bgCtx)
+
+	// Clean up persisted state for terminal runs — the final state is captured in Result.Store
+	switch result.Status {
+	case Completed, Failed, Bailed, Cancelled:
+		e.persistence.DeleteState(bgCtx, runID)
+	}
 
 	return result
 }

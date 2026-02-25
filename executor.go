@@ -64,7 +64,7 @@ func (e *Engine) executeWorkflow(ctx context.Context, wf *Workflow, runID RunID,
 				return e.executeStep(ctx, wf, s, runID, resuming)
 			}
 			chain := final
-			for j := len(allStepMW) - 1; j >= 0; j-- {
+			for j := 0; j < len(allStepMW); j++ {
 				mw := allStepMW[j]
 				next := chain
 				stepCopy := s
@@ -165,9 +165,9 @@ func (e *Engine) executeStep(ctx context.Context, wf *Workflow, s *step, runID R
 	case stepSingle:
 		return e.executeSingle(ctx, wf, s.taskName, runID, resuming)
 	case stepParallel:
-		return e.executeParallel(ctx, wf, s.refs, runID, resuming)
+		return e.executeParallel(ctx, wf, s.refs, runID, resuming, s.id)
 	case stepStage:
-		return e.executeStage(ctx, wf, s.refs, runID, resuming)
+		return e.executeStage(ctx, wf, s.refs, runID, resuming, s.id)
 	case stepBranch:
 		return e.executeBranch(ctx, wf, s.cases, runID, resuming)
 	case stepForEach:
@@ -193,7 +193,7 @@ func (e *Engine) executeTaskFn(taskCtx *Ctx, taskName string, fn func(*Ctx) erro
 	if len(e.taskMiddleware) > 0 {
 		final := func() error { return fn(taskCtx) }
 		chain := final
-		for j := len(e.taskMiddleware) - 1; j >= 0; j-- {
+		for j := 0; j < len(e.taskMiddleware); j++ {
 			mw := e.taskMiddleware[j]
 			next := chain
 			chain = func() error {
@@ -275,12 +275,32 @@ func (e *Engine) executeRef(ctx context.Context, wf *Workflow, ref StepRef, runI
 }
 
 // executeParallel runs steps concurrently using goroutines.
-func (e *Engine) executeParallel(ctx context.Context, wf *Workflow, refs []StepRef, runID RunID, resuming bool) error {
+// Per-ref completion tracking: each branch records its completion so that
+// on resume after a crash, completed branches are skipped.
+func (e *Engine) executeParallel(ctx context.Context, wf *Workflow, refs []StepRef, runID RunID, resuming bool, stepID string) error {
 	if len(refs) == 0 {
 		return nil
 	}
+
+	// Load step states for per-ref resume tracking
+	var stepStates map[string]Status
+	if resuming {
+		run, err := e.persistence.LoadRun(ctx, runID)
+		if err == nil && run.StepStates != nil {
+			stepStates = run.StepStates
+		}
+	}
+
 	if len(refs) == 1 {
-		return e.executeRef(ctx, wf, refs[0], runID, resuming)
+		refKey := fmt.Sprintf("%s:ref_0", stepID)
+		if resuming && stepStates != nil && stepStates[refKey] == Completed {
+			return nil
+		}
+		if err := e.executeRef(ctx, wf, refs[0], runID, resuming); err != nil {
+			return err
+		}
+		e.persistence.UpdateStepStatus(ctx, runID, refKey, Completed)
+		return nil
 	}
 
 	var (
@@ -292,8 +312,16 @@ func (e *Engine) executeParallel(ctx context.Context, wf *Workflow, refs []StepR
 	childCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	for _, ref := range refs {
+	for i, ref := range refs {
+		refKey := fmt.Sprintf("%s:ref_%d", stepID, i)
+
+		// Skip completed refs on resume
+		if resuming && stepStates != nil && stepStates[refKey] == Completed {
+			continue
+		}
+
 		ref := ref
+		refKeyCopy := refKey
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -301,10 +329,12 @@ func (e *Engine) executeParallel(ctx context.Context, wf *Workflow, refs []StepR
 				mu.Lock()
 				if firstErr == nil {
 					firstErr = err
-					cancel() // cancel other goroutines on first error
+					cancel()
 				}
 				mu.Unlock()
+				return
 			}
+			e.persistence.UpdateStepStatus(ctx, runID, refKeyCopy, Completed)
 		}()
 	}
 
@@ -313,11 +343,30 @@ func (e *Engine) executeParallel(ctx context.Context, wf *Workflow, refs []StepR
 }
 
 // executeStage runs steps sequentially within a named group.
-func (e *Engine) executeStage(ctx context.Context, wf *Workflow, refs []StepRef, runID RunID, resuming bool) error {
-	for _, ref := range refs {
+// Per-ref completion tracking: each ref records its completion so that
+// on resume after a crash, completed refs are skipped.
+func (e *Engine) executeStage(ctx context.Context, wf *Workflow, refs []StepRef, runID RunID, resuming bool, stepID string) error {
+	// Load step states for per-ref resume tracking
+	var stepStates map[string]Status
+	if resuming {
+		run, err := e.persistence.LoadRun(ctx, runID)
+		if err == nil && run.StepStates != nil {
+			stepStates = run.StepStates
+		}
+	}
+
+	for i, ref := range refs {
+		refKey := fmt.Sprintf("%s:ref_%d", stepID, i)
+
+		// Skip completed refs on resume
+		if resuming && stepStates != nil && stepStates[refKey] == Completed {
+			continue
+		}
+
 		if err := e.executeRef(ctx, wf, ref, runID, resuming); err != nil {
 			return err
 		}
+		e.persistence.UpdateStepStatus(ctx, runID, refKey, Completed)
 	}
 	return nil
 }
@@ -333,7 +382,21 @@ func (e *Engine) executeBranch(ctx context.Context, wf *Workflow, cases []Branch
 			defaultCase = c
 			continue
 		}
-		if c.condition != nil && c.condition(branchCtx) {
+		condResult, condErr := func() (result bool, err error) {
+			if c.condition == nil {
+				return false, nil
+			}
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("branch condition panic: %v", r)
+				}
+			}()
+			return c.condition(branchCtx), nil
+		}()
+		if condErr != nil {
+			return condErr
+		}
+		if condResult {
 			return e.executeRef(ctx, wf, c.ref, runID, resuming)
 		}
 	}
@@ -498,8 +561,13 @@ func (e *Engine) executeForEachItem(ctx context.Context, wf *Workflow, ref StepR
 }
 
 // executeMap runs an inline data transformation.
-func (e *Engine) executeMap(ctx context.Context, wf *Workflow, fn func(*Ctx)) error {
+func (e *Engine) executeMap(ctx context.Context, wf *Workflow, fn func(*Ctx)) (err error) {
 	mapCtx := newCtx(ctx, wf.state, e.logger)
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("map function panic: %v", r)
+		}
+	}()
 	fn(mapCtx)
 	return nil
 }
@@ -511,7 +579,18 @@ func (e *Engine) executeDoUntil(ctx context.Context, wf *Workflow, s *step, runI
 			return err
 		}
 		condCtx := newCtx(ctx, wf.state, e.logger)
-		if s.loopCond(condCtx) {
+		condResult, condErr := func() (result bool, err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("loop condition panic: %v", r)
+				}
+			}()
+			return s.loopCond(condCtx), nil
+		}()
+		if condErr != nil {
+			return condErr
+		}
+		if condResult {
 			return nil
 		}
 	}
@@ -522,7 +601,18 @@ func (e *Engine) executeDoUntil(ctx context.Context, wf *Workflow, s *step, runI
 func (e *Engine) executeDoWhile(ctx context.Context, wf *Workflow, s *step, runID RunID, resuming bool) error {
 	for i := 0; i < maxLoopIterations; i++ {
 		condCtx := newCtx(ctx, wf.state, e.logger)
-		if !s.loopCond(condCtx) {
+		condResult, condErr := func() (result bool, err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("loop condition panic: %v", r)
+				}
+			}()
+			return s.loopCond(condCtx), nil
+		}()
+		if condErr != nil {
+			return condErr
+		}
+		if !condResult {
 			return nil
 		}
 		if err := e.executeRef(ctx, wf, s.loopRef, runID, resuming); err != nil {

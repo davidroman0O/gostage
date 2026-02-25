@@ -47,7 +47,10 @@ func newWorkerPool(size int) *workerPool {
 func (p *workerPool) worker() {
 	defer p.wg.Done()
 	for fn := range p.jobs {
-		fn()
+		func() {
+			defer func() { recover() }()
+			fn()
+		}()
 	}
 }
 
