@@ -21,6 +21,7 @@ type taskDef struct {
 	fn          TaskFunc
 	retries     int
 	retryDelay  time.Duration
+	timeout     time.Duration
 	tags        []string
 	description string
 }
@@ -37,6 +38,10 @@ var (
 //	    return nil
 //	}, gostage.WithRetry(3), gostage.WithRetryDelay(time.Second))
 func Task(name string, fn TaskFunc, opts ...TaskOption) {
+	if name == "" {
+		panic("gostage.Task: " + ErrEmptyName.Error())
+	}
+
 	taskRegistryMu.Lock()
 	defer taskRegistryMu.Unlock()
 
@@ -98,6 +103,16 @@ func WithRetryDelay(d time.Duration) TaskOption {
 func WithTags(tags ...string) TaskOption {
 	return func(td *taskDef) {
 		td.tags = tags
+	}
+}
+
+// WithTaskTimeout sets a per-task timeout for individual invocations.
+// Each retry attempt gets its own timeout. Independent of the workflow-level timeout.
+//
+//	gostage.Task("slow", handler, gostage.WithTaskTimeout(30*time.Second))
+func WithTaskTimeout(d time.Duration) TaskOption {
+	return func(td *taskDef) {
+		td.timeout = d
 	}
 }
 

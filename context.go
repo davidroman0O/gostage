@@ -158,8 +158,7 @@ func Set[T any](ctx *Ctx, key string, value T) error {
 	if t != nil && !isJSONSerializable(t) {
 		return fmt.Errorf("gostage.Set: type %T is not JSON-serializable", value)
 	}
-	ctx.state.Set(key, value)
-	return nil
+	return ctx.state.setWithLimit(key, value)
 }
 
 // Delete removes a key from the workflow store.

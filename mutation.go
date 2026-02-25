@@ -112,33 +112,20 @@ func replayMutations(wf *Workflow, mutations []Mutation) {
 				wf.steps = append([]step{newStep}, wf.steps...)
 				continue
 			}
-			inserted := false
-			for i, s := range wf.steps {
-				if s.id == m.TargetID {
-					pos := i + 1
-					wf.steps = append(wf.steps, step{})
-					copy(wf.steps[pos+1:], wf.steps[pos:])
-					wf.steps[pos] = newStep
-					inserted = true
-					break
-				}
-			}
-			if !inserted {
+			idx := findStepByID(wf.steps, m.TargetID)
+			if idx >= 0 {
+				pos := idx + 1
+				wf.steps = append(wf.steps, step{})
+				copy(wf.steps[pos+1:], wf.steps[pos:])
+				wf.steps[pos] = newStep
+			} else {
 				// Anchor not found — append to end
 				wf.steps = append(wf.steps, newStep)
 			}
 		case MutDisableStep:
-			for i := range wf.steps {
-				if wf.steps[i].id == m.TargetID || wf.steps[i].name == m.TargetID {
-					wf.steps[i].disabled = true
-				}
-			}
+			setStepDisabledByIDOrName(wf.steps, m.TargetID, true)
 		case MutEnableStep:
-			for i := range wf.steps {
-				if wf.steps[i].id == m.TargetID || wf.steps[i].name == m.TargetID {
-					wf.steps[i].disabled = false
-				}
-			}
+			setStepDisabledByIDOrName(wf.steps, m.TargetID, false)
 		}
 	}
 }

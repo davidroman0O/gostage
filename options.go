@@ -116,10 +116,31 @@ func WithAutoRecover() EngineOption {
 }
 
 // WithCacheSize limits the workflow cache to n entries.
-// When full, the oldest entry is evicted. 0 means unlimited (default).
+// When full, the oldest entry is evicted. 0 means unlimited.
+// Default is 1000.
 func WithCacheSize(n int) EngineOption {
 	return func(e *Engine) error {
 		e.cacheSize = n
+		return nil
+	}
+}
+
+// WithShutdownTimeout sets the maximum time Close() waits for workers to finish.
+// If workers do not finish within the deadline, Close() proceeds and logs a warning.
+// Default is 0 (blocks indefinitely).
+func WithShutdownTimeout(d time.Duration) EngineOption {
+	return func(e *Engine) error {
+		e.shutdownTimeout = d
+		return nil
+	}
+}
+
+// WithStateLimit limits the number of entries in each workflow run's state.
+// When the limit is reached, new keys are rejected with ErrStateLimitExceeded.
+// Updating an existing key always succeeds. 0 means unlimited (default).
+func WithStateLimit(n int) EngineOption {
+	return func(e *Engine) error {
+		e.stateLimit = n
 		return nil
 	}
 }

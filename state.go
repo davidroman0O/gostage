@@ -38,6 +38,7 @@ type runState struct {
 	data    map[string]stateEntry
 	deleted map[string]struct{} // keys pending deletion in persistence
 	persist Persistence         // nil = memory-only (children, tests)
+	limit   int                 // max user entries, 0 = unlimited
 }
 
 // newRunState creates a new run state buffer.
@@ -63,6 +64,33 @@ func (s *runState) Set(key string, value any) {
 		typeName: goTypeName(value),
 		dirty:    true,
 	}
+}
+
+// setLimit configures the maximum number of entries in the state.
+// 0 means unlimited.
+func (s *runState) setLimit(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.limit = n
+}
+
+// setWithLimit stores a value like Set but enforces the entry limit.
+// If the limit is reached and the key is new, returns ErrStateLimitExceeded.
+// Updating an existing key always succeeds regardless of limit.
+func (s *runState) setWithLimit(key string, value any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.limit > 0 {
+		if _, exists := s.data[key]; !exists && len(s.data) >= s.limit {
+			return ErrStateLimitExceeded
+		}
+	}
+	s.data[key] = stateEntry{
+		value:    value,
+		typeName: goTypeName(value),
+		dirty:    true,
+	}
+	return nil
 }
 
 // SetClean stores a value without marking it dirty.

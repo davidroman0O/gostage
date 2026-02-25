@@ -1,6 +1,9 @@
 package gostage
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 // P is a convenience alias for map[string]any.
 // It's used for passing parameters, initial store data, and results.
@@ -76,3 +79,16 @@ type sleepError struct {
 func (e *sleepError) Error() string {
 	return "sleeping until " + e.wakeAt.Format(time.RFC3339)
 }
+
+// Sentinel errors for programmatic error checking via errors.Is.
+var (
+	ErrEngineClosed     = errors.New("engine is closed")
+	ErrRunNotFound      = errors.New("run not found")
+	ErrRunNotSuspended  = errors.New("run is not in suspended status")
+	ErrWorkflowMismatch = errors.New("workflow ID does not match run")
+	ErrRunAlreadyActive = errors.New("run is already active")
+	ErrNilWorkflow      = errors.New("workflow is nil")
+	ErrEmptyName        = errors.New("name must not be empty")
+	ErrNilHandler         = errors.New("handler must not be nil")
+	ErrStateLimitExceeded = errors.New("state entry limit exceeded")
+)

@@ -28,7 +28,7 @@ type Engine struct {
 	workflowCacheMu sync.RWMutex
 	workflowCache   map[string]*Workflow
 	cacheOrder      []string // insertion order for eviction
-	cacheSize       int      // 0 = unlimited
+	cacheSize       int      // max cached workflows; 0 = unlimited
 
 	// messageHandlers stores IPC message handler callbacks.
 	messageHandlersMu sync.RWMutex
@@ -45,6 +45,12 @@ type Engine struct {
 
 	// autoRecover enables crash recovery on startup.
 	autoRecover bool
+
+	// stateLimit is the max entries per run state, 0 = unlimited.
+	stateLimit int
+
+	// shutdownTimeout is how long Close() waits for workers, 0 = indefinite.
+	shutdownTimeout time.Duration
 }
 
 // runHandle tracks an in-flight workflow execution.
@@ -52,6 +58,8 @@ type runHandle struct {
 	cancel context.CancelFunc
 	done   chan *Result
 }
+
+const defaultCacheSize = 1000
 
 // EngineOption configures the engine.
 type EngineOption func(*Engine) error
@@ -68,6 +76,7 @@ func New(opts ...EngineOption) (*Engine, error) {
 		closeCh:         make(chan struct{}),
 		workflowCache:   make(map[string]*Workflow),
 		messageHandlers: make(map[string][]MessageHandler),
+		cacheSize:       defaultCacheSize,
 	}
 
 	for _, opt := range opts {
@@ -96,6 +105,9 @@ func New(opts ...EngineOption) (*Engine, error) {
 //
 //	result, err := engine.RunSync(ctx, wf, gostage.P{"order_id": "ORD-123"})
 func (e *Engine) RunSync(ctx context.Context, wf *Workflow, params P) (*Result, error) {
+	if wf == nil {
+		return nil, ErrNilWorkflow
+	}
 	runID := RunID(uuid.New().String())
 
 	// Apply timeout if configured
@@ -115,8 +127,12 @@ func (e *Engine) Run(ctx context.Context, wf *Workflow, params P) (RunID, error)
 	// Guard: reject if engine is closed
 	select {
 	case <-e.closeCh:
-		return "", fmt.Errorf("engine is closed")
+		return "", ErrEngineClosed
 	default:
+	}
+
+	if wf == nil {
+		return "", ErrNilWorkflow
 	}
 
 	runID := RunID(uuid.New().String())
@@ -149,7 +165,7 @@ func (e *Engine) Run(ctx context.Context, wf *Workflow, params P) (RunID, error)
 		delete(e.runs, runID)
 		e.mu.Unlock()
 		cancel()
-		return "", fmt.Errorf("engine is closed")
+		return "", ErrEngineClosed
 	}
 
 	return runID, nil
@@ -214,8 +230,12 @@ func (e *Engine) Resume(ctx context.Context, wf *Workflow, runID RunID, data P) 
 	// Guard: reject if engine is closed
 	select {
 	case <-e.closeCh:
-		return nil, fmt.Errorf("engine is closed")
+		return nil, ErrEngineClosed
 	default:
+	}
+
+	if wf == nil {
+		return nil, ErrNilWorkflow
 	}
 
 	// Concurrent resume prevention: reserve slot before proceeding
@@ -225,7 +245,7 @@ func (e *Engine) Resume(ctx context.Context, wf *Workflow, runID RunID, data P) 
 	if _, active := e.runs[runID]; active {
 		e.mu.Unlock()
 		runCancel()
-		return nil, fmt.Errorf("run %s is already active", runID)
+		return nil, fmt.Errorf("%w: %s", ErrRunAlreadyActive, runID)
 	}
 	handle := &runHandle{
 		cancel: runCancel,
@@ -243,21 +263,22 @@ func (e *Engine) Resume(ctx context.Context, wf *Workflow, runID RunID, data P) 
 
 	run, err := e.persistence.LoadRun(ctx, runID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %s", ErrRunNotFound, runID)
 	}
 
 	if run.Status != Suspended {
-		return nil, fmt.Errorf("cannot resume run %s: status is %s, expected suspended", runID, run.Status)
+		return nil, fmt.Errorf("%w: status is %s", ErrRunNotSuspended, run.Status)
 	}
 
 	if wf.ID != run.WorkflowID {
-		return nil, fmt.Errorf("cannot resume run %s: workflow mismatch — run belongs to workflow %q but received workflow %q", runID, run.WorkflowID, wf.ID)
+		return nil, fmt.Errorf("%w: expected %s, got %s", ErrWorkflowMismatch, run.WorkflowID, wf.ID)
 	}
 
 	wf = wf.clone()
 
 	// Restore state from persistence
 	wf.state = newRunState(runID, e.persistence)
+	wf.state.setLimit(e.stateLimit)
 	if err := wf.state.LoadFromPersistence(ctx); err != nil {
 		return nil, fmt.Errorf("load state for resume: %w", err)
 	}
@@ -290,6 +311,9 @@ func (e *Engine) Resume(ctx context.Context, wf *Workflow, runID RunID, data P) 
 // Handlers fire when a child process sends a message via Send(),
 // or when Send() is called in the parent process (local routing).
 func (e *Engine) OnMessage(msgType string, handler MessageHandler) {
+	if handler == nil {
+		return
+	}
 	e.messageHandlersMu.Lock()
 	defer e.messageHandlersMu.Unlock()
 	e.messageHandlers[msgType] = append(e.messageHandlers[msgType], handler)
@@ -334,7 +358,9 @@ func (e *Engine) Close() error {
 
 		// 3. Drain worker pool (waits for in-flight jobs)
 		if e.pool != nil {
-			e.pool.Shutdown()
+			if err := e.pool.Shutdown(e.shutdownTimeout); err != nil {
+				e.logger.Warn("pool shutdown: %v", err)
+			}
 		}
 
 		// 4. Close persistence (last — active runs may flush during shutdown)
@@ -423,6 +449,7 @@ func (e *Engine) wakeWorkflow(runID RunID) {
 
 		// Restore state from persistence
 		wf.state = newRunState(runID, e.persistence)
+		wf.state.setLimit(e.stateLimit)
 		if err := wf.state.LoadFromPersistence(ctx); err != nil {
 			run.Status = Failed
 			run.UpdatedAt = time.Now()
@@ -517,6 +544,7 @@ func (e *Engine) executeRun(ctx context.Context, wf *Workflow, runID RunID, para
 
 	// Create per-run state backed by persistence
 	wf.state = newRunState(runID, e.persistence)
+	wf.state.setLimit(e.stateLimit)
 
 	// Initialize state with params
 	for k, v := range params {

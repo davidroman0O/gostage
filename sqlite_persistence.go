@@ -42,7 +42,63 @@ func newSQLitePersistence(path string) (*sqlitePersistence, error) {
 	return p, nil
 }
 
+// migrations is the ordered list of schema migrations.
+// Each function receives a transaction and applies one version's changes.
+// New migrations are appended to the end; existing entries must never be modified.
+var migrations = []func(tx *sql.Tx) error{
+	migrateV1,
+}
+
 func (p *sqlitePersistence) migrate() error {
+	// Ensure the version tracking table exists.
+	if _, err := p.db.Exec(`CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)`); err != nil {
+		return fmt.Errorf("create schema_version table: %w", err)
+	}
+
+	// Read current schema version.
+	var current int
+	row := p.db.QueryRow(`SELECT version FROM schema_version LIMIT 1`)
+	if err := row.Scan(&current); err == sql.ErrNoRows {
+		current = 0
+	} else if err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+
+	// Apply pending migrations.
+	for i := current; i < len(migrations); i++ {
+		tx, err := p.db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin migration %d: %w", i+1, err)
+		}
+
+		if err := migrations[i](tx); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("migration %d: %w", i+1, err)
+		}
+
+		// Update version within the same transaction.
+		if current == 0 && i == 0 {
+			if _, err := tx.Exec(`INSERT INTO schema_version (version) VALUES (?)`, i+1); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("insert schema version: %w", err)
+			}
+		} else {
+			if _, err := tx.Exec(`UPDATE schema_version SET version = ?`, i+1); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("update schema version: %w", err)
+			}
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration %d: %w", i+1, err)
+		}
+	}
+
+	return nil
+}
+
+// migrateV1 creates the initial schema (runs, checkpoints, run_state tables).
+func migrateV1(tx *sql.Tx) error {
 	const schema = `
 	CREATE TABLE IF NOT EXISTS runs (
 		run_id       TEXT PRIMARY KEY,
@@ -75,7 +131,7 @@ func (p *sqlitePersistence) migrate() error {
 		PRIMARY KEY (run_id, key)
 	);
 	`
-	_, err := p.db.Exec(schema)
+	_, err := tx.Exec(schema)
 	return err
 }
 

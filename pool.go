@@ -1,9 +1,11 @@
 package gostage
 
 import (
+	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // workerPool is a bounded goroutine pool with backpressure.
@@ -70,10 +72,27 @@ func (p *workerPool) Submit(fn func()) (ok bool) {
 }
 
 // Shutdown drains pending jobs and waits for in-flight work to complete.
-func (p *workerPool) Shutdown() {
-	if p.closed.CompareAndSwap(false, true) {
-		close(p.jobs)
+// If timeout > 0 and workers do not finish within the deadline, returns an error.
+// If timeout <= 0, blocks indefinitely until all workers finish.
+func (p *workerPool) Shutdown(timeout time.Duration) error {
+	if !p.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	close(p.jobs)
+	if timeout <= 0 {
 		p.wg.Wait()
+		return nil
+	}
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("pool shutdown timed out after %v", timeout)
 	}
 }
 

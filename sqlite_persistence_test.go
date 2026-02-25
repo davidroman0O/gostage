@@ -339,3 +339,63 @@ func TestSQLite_Persistence_FileExists(t *testing.T) {
 	}
 }
 
+func TestSQLite_SchemaVersioning(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "versioned.db")
+
+	// First open: runs all migrations, sets version to 1
+	p1, err := newSQLitePersistence(path)
+	if err != nil {
+		t.Fatalf("first open failed: %v", err)
+	}
+
+	// Verify version is 1
+	var version int
+	if err := p1.db.QueryRow(`SELECT version FROM schema_version`).Scan(&version); err != nil {
+		t.Fatalf("read version: %v", err)
+	}
+	if version != 1 {
+		t.Fatalf("expected version 1, got %d", version)
+	}
+
+	// Verify tables exist by inserting a run
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Microsecond)
+	run := &RunState{
+		RunID:      "run-v1",
+		WorkflowID: "wf-v1",
+		Status:     Running,
+		StepStates: make(map[string]Status),
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if err := p1.SaveRun(ctx, run); err != nil {
+		t.Fatalf("save run: %v", err)
+	}
+	p1.Close()
+
+	// Second open: should not re-run migration, data preserved
+	p2, err := newSQLitePersistence(path)
+	if err != nil {
+		t.Fatalf("second open failed: %v", err)
+	}
+	defer p2.Close()
+
+	// Version still 1
+	if err := p2.db.QueryRow(`SELECT version FROM schema_version`).Scan(&version); err != nil {
+		t.Fatalf("read version after reopen: %v", err)
+	}
+	if version != 1 {
+		t.Fatalf("expected version 1 after reopen, got %d", version)
+	}
+
+	// Data still there
+	loaded, err := p2.LoadRun(ctx, "run-v1")
+	if err != nil {
+		t.Fatalf("load run after reopen: %v", err)
+	}
+	if loaded.WorkflowID != "wf-v1" {
+		t.Fatalf("expected wf-v1, got %s", loaded.WorkflowID)
+	}
+}
+

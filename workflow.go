@@ -317,6 +317,9 @@ type WorkflowBuilder struct {
 //	    Step("charge").
 //	    Commit()
 func NewWorkflow(id string, opts ...WorkflowOption) *WorkflowBuilder {
+	if id == "" {
+		panic("gostage.NewWorkflow: " + ErrEmptyName.Error())
+	}
 	b := &WorkflowBuilder{id: id, name: id}
 	for _, opt := range opts {
 		opt(&b.cfg)
