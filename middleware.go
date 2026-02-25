@@ -5,8 +5,18 @@ import "context"
 // EngineMiddleware wraps the entire workflow execution.
 type EngineMiddleware func(ctx context.Context, wf *Workflow, runID RunID, next func() error) error
 
+// StepInfo exposes step metadata to middleware implementations.
+type StepInfo struct {
+	ID       string
+	Name     string
+	Kind     StepKind
+	Tags     []string
+	Disabled bool
+	TaskName string
+}
+
 // StepMiddleware wraps individual step execution.
-type StepMiddleware func(ctx context.Context, s *step, runID RunID, next func() error) error
+type StepMiddleware func(ctx context.Context, info StepInfo, runID RunID, next func() error) error
 
 // TaskMiddleware wraps task function invocation.
 type TaskMiddleware func(tctx *Ctx, taskName string, next func() error) error

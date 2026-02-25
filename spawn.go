@@ -18,6 +18,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -35,6 +36,8 @@ type spawnServer struct {
 
 	// engine reference for routing child IPC messages to handlers
 	engine *Engine
+
+	secret string
 }
 
 // SpawnJob represents one ForEach item to execute in a child process.
@@ -54,16 +57,29 @@ type spawnResult struct {
 }
 
 // newSpawnServer creates and starts a gRPC server on a random available port.
-func newSpawnServer(engine *Engine) (*spawnServer, error) {
+func newSpawnServer(engine *Engine, secret string) (*spawnServer, error) {
 	lis, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		return nil, fmt.Errorf("listen: %w", err)
 	}
 
+	authInterceptor := grpc.UnaryInterceptor(func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		md, ok := metadata.FromIncomingContext(ctx)
+		if !ok {
+			return nil, status.Errorf(codes.Unauthenticated, "missing metadata")
+		}
+		tokens := md.Get("x-gostage-secret")
+		if len(tokens) == 0 || tokens[0] != secret {
+			return nil, status.Errorf(codes.Unauthenticated, "invalid secret")
+		}
+		return handler(ctx, req)
+	})
+
 	ss := &spawnServer{
 		jobs:     make(map[string]*SpawnJob),
 		listener: lis,
 		srv: grpc.NewServer(
+			authInterceptor,
 			grpc.KeepaliveParams(keepalive.ServerParameters{
 				Time:    10 * time.Second,
 				Timeout: 5 * time.Second,
@@ -75,6 +91,7 @@ func newSpawnServer(engine *Engine) (*spawnServer, error) {
 		),
 		port:   lis.Addr().(*net.TCPAddr).Port,
 		engine: engine,
+		secret: secret,
 	}
 
 	pb.RegisterWorkflowIPCServer(ss.srv, ss)
@@ -169,7 +186,8 @@ func (ss *spawnServer) SendMessage(_ context.Context, msg *pb.IPCMessage) (*pb.M
 
 // executeForEachSpawn runs ForEach items in isolated child processes.
 func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step, items []any, runID RunID, resuming bool) error {
-	ss, err := newSpawnServer(e)
+	secret := uuid.New().String()
+	ss, err := newSpawnServer(e, secret)
 	if err != nil {
 		return fmt.Errorf("start spawn server: %w", err)
 	}
@@ -255,7 +273,7 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 			var spawnErr error
 
 			doSpawn := func() error {
-				result, spawnErr = spawnChild(childCtx, ss.port, job)
+				result, spawnErr = spawnChild(childCtx, ss.port, job, ss.secret)
 				if spawnErr != nil {
 					return spawnErr
 				}
@@ -319,7 +337,7 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 }
 
 // spawnChild spawns a child process, waits for it to complete, and returns its result.
-func spawnChild(ctx context.Context, port int, job *SpawnJob) (*spawnResult, error) {
+func spawnChild(ctx context.Context, port int, job *SpawnJob, secret string) (*spawnResult, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("get executable: %w", err)
@@ -332,6 +350,7 @@ func spawnChild(ctx context.Context, port int, job *SpawnJob) (*spawnResult, err
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(), "GOSTAGE_SECRET="+secret)
 
 	// Orphan detection: lifeline pipe — child inherits read end as extra fd
 	lifelineR, lifelineW, pipeErr := os.Pipe()

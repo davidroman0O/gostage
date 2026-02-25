@@ -8,30 +8,30 @@ import (
 
 // --- Step kind name mapping ---
 
-var stepKindNames = map[stepKind]string{
-	stepSingle:   "single",
-	stepParallel: "parallel",
-	stepBranch:   "branch",
-	stepForEach:  "forEach",
-	stepMap:      "map",
-	stepDoUntil:  "doUntil",
-	stepDoWhile:  "doWhile",
-	stepSub:      "sub",
-	stepSleep:    "sleep",
-	stepStage:    "stage",
+var StepKindNames = map[StepKind]string{
+	StepSingle:   "single",
+	StepParallel: "parallel",
+	StepBranch:   "branch",
+	StepForEach:  "forEach",
+	StepMap:      "map",
+	StepDoUntil:  "doUntil",
+	StepDoWhile:  "doWhile",
+	StepSub:      "sub",
+	StepSleep:    "sleep",
+	StepStage:    "stage",
 }
 
-var stepKindFromName = map[string]stepKind{
-	"single":   stepSingle,
-	"parallel": stepParallel,
-	"branch":   stepBranch,
-	"forEach":  stepForEach,
-	"map":      stepMap,
-	"doUntil":  stepDoUntil,
-	"doWhile":  stepDoWhile,
-	"sub":      stepSub,
-	"sleep":    stepSleep,
-	"stage":    stepStage,
+var StepKindFromName = map[string]StepKind{
+	"single":   StepSingle,
+	"parallel": StepParallel,
+	"branch":   StepBranch,
+	"forEach":  StepForEach,
+	"map":      StepMap,
+	"doUntil":  StepDoUntil,
+	"doWhile":  StepDoWhile,
+	"sub":      StepSub,
+	"sleep":    StepSleep,
+	"stage":    StepStage,
 }
 
 // --- Serializable definition types ---
@@ -55,32 +55,32 @@ type StepDef struct {
 	Name string   `json:"name"`
 	Tags []string `json:"tags,omitempty"`
 
-	// stepSingle
+	// StepSingle
 	TaskName string `json:"task_name,omitempty"`
 
-	// stepParallel / stepStage
+	// StepParallel / StepStage
 	Refs []RefDef `json:"refs,omitempty"`
 
-	// stepBranch
+	// StepBranch
 	Cases []CaseDef `json:"cases,omitempty"`
 
-	// stepForEach
+	// StepForEach
 	CollectionKey string  `json:"collection_key,omitempty"`
 	ForEachRef    *RefDef `json:"foreach_ref,omitempty"`
 	Concurrency   int     `json:"concurrency,omitempty"`
 	UseSpawn      bool    `json:"use_spawn,omitempty"`
 
-	// stepMap
+	// StepMap
 	MapFnName string `json:"map_fn_name,omitempty"`
 
-	// stepDoUntil / stepDoWhile
+	// StepDoUntil / StepDoWhile
 	LoopRef      *RefDef `json:"loop_ref,omitempty"`
 	LoopCondName string  `json:"loop_cond_name,omitempty"`
 
-	// stepSub
+	// StepSub
 	SubWorkflow *WorkflowDef `json:"sub_workflow,omitempty"`
 
-	// stepSleep
+	// StepSleep
 	SleepDuration string `json:"sleep_duration,omitempty"`
 }
 
@@ -107,7 +107,7 @@ func WorkflowToDefinition(wf *Workflow) (*WorkflowDef, error) {
 	}
 
 	for _, s := range wf.steps {
-		kindName, ok := stepKindNames[s.kind]
+		kindName, ok := StepKindNames[s.kind]
 		if !ok {
 			return nil, fmt.Errorf("step %q: unknown kind %d", s.name, s.kind)
 		}
@@ -119,10 +119,10 @@ func WorkflowToDefinition(wf *Workflow) (*WorkflowDef, error) {
 		}
 
 		switch s.kind {
-		case stepSingle:
+		case StepSingle:
 			sd.TaskName = s.taskName
 
-		case stepParallel, stepStage:
+		case StepParallel, StepStage:
 			for _, ref := range s.refs {
 				rd, err := refToRefDef(ref)
 				if err != nil {
@@ -131,7 +131,7 @@ func WorkflowToDefinition(wf *Workflow) (*WorkflowDef, error) {
 				sd.Refs = append(sd.Refs, rd)
 			}
 
-		case stepBranch:
+		case StepBranch:
 			for _, c := range s.cases {
 				cd := CaseDef{
 					IsDefault: c.isDefault,
@@ -150,7 +150,7 @@ func WorkflowToDefinition(wf *Workflow) (*WorkflowDef, error) {
 				sd.Cases = append(sd.Cases, cd)
 			}
 
-		case stepForEach:
+		case StepForEach:
 			sd.CollectionKey = s.collectionKey
 			sd.Concurrency = s.concurrency
 			sd.UseSpawn = s.useSpawn
@@ -160,13 +160,13 @@ func WorkflowToDefinition(wf *Workflow) (*WorkflowDef, error) {
 			}
 			sd.ForEachRef = &rd
 
-		case stepMap:
+		case StepMap:
 			if s.mapFnName == "" {
 				return nil, fmt.Errorf("step %q: cannot serialize unnamed map function; use MapNamed()", s.name)
 			}
 			sd.MapFnName = s.mapFnName
 
-		case stepDoUntil, stepDoWhile:
+		case StepDoUntil, StepDoWhile:
 			if s.loopCondName == "" {
 				return nil, fmt.Errorf("step %q: cannot serialize unnamed loop condition; use DoUntilNamed()/DoWhileNamed()", s.name)
 			}
@@ -177,7 +177,7 @@ func WorkflowToDefinition(wf *Workflow) (*WorkflowDef, error) {
 			}
 			sd.LoopRef = &rd
 
-		case stepSub:
+		case StepSub:
 			if s.subWorkflow == nil {
 				return nil, fmt.Errorf("step %q: sub-workflow is nil", s.name)
 			}
@@ -187,7 +187,7 @@ func WorkflowToDefinition(wf *Workflow) (*WorkflowDef, error) {
 			}
 			sd.SubWorkflow = subDef
 
-		case stepSleep:
+		case StepSleep:
 			sd.SleepDuration = s.sleepDuration.String()
 		}
 
@@ -211,11 +211,21 @@ func refToRefDef(ref StepRef) (RefDef, error) {
 
 // --- Deserialization: Definition → Workflow ---
 
+// maxWorkflowDepth limits recursion depth when deserializing nested workflow definitions.
+const maxWorkflowDepth = 64
+
 // NewWorkflowFromDef rebuilds a Workflow from a serialized definition.
 // Tasks are resolved via the task registry, conditions via the condition registry,
 // and map functions via the map function registry. Returns an error if any
 // required function is not registered.
 func NewWorkflowFromDef(def *WorkflowDef) (*Workflow, error) {
+	return newWorkflowFromDef(def, maxWorkflowDepth)
+}
+
+func newWorkflowFromDef(def *WorkflowDef, depth int) (*Workflow, error) {
+	if depth <= 0 {
+		return nil, fmt.Errorf("workflow nesting exceeds maximum depth (%d)", maxWorkflowDepth)
+	}
 	wf := &Workflow{
 		ID:    def.ID,
 		Name:  def.Name,
@@ -228,7 +238,7 @@ func NewWorkflowFromDef(def *WorkflowDef) (*Workflow, error) {
 	}
 
 	for i, sd := range def.Steps {
-		kind, ok := stepKindFromName[sd.Kind]
+		kind, ok := StepKindFromName[sd.Kind]
 		if !ok {
 			return nil, fmt.Errorf("step %q: unknown kind %q", sd.Name, sd.Kind)
 		}
@@ -241,20 +251,20 @@ func NewWorkflowFromDef(def *WorkflowDef) (*Workflow, error) {
 		}
 
 		switch kind {
-		case stepSingle:
+		case StepSingle:
 			if lookupTask(sd.TaskName) == nil {
 				return nil, fmt.Errorf("task %q not registered", sd.TaskName)
 			}
 			s.taskName = sd.TaskName
 
-		case stepParallel, stepStage:
-			refs, err := refDefsToRefs(sd.Refs)
+		case StepParallel, StepStage:
+			refs, err := refDefsToRefs(sd.Refs, depth)
 			if err != nil {
 				return nil, fmt.Errorf("step %q: %w", sd.Name, err)
 			}
 			s.refs = refs
 
-		case stepBranch:
+		case StepBranch:
 			for _, cd := range sd.Cases {
 				bc := BranchCase{
 					isDefault: cd.IsDefault,
@@ -267,7 +277,7 @@ func NewWorkflowFromDef(def *WorkflowDef) (*Workflow, error) {
 					bc.condition = fn
 					bc.condName = cd.ConditionName
 				}
-				ref, err := refDefToRef(cd.Ref)
+				ref, err := refDefToRef(cd.Ref, depth)
 				if err != nil {
 					return nil, fmt.Errorf("step %q case: %w", sd.Name, err)
 				}
@@ -275,19 +285,19 @@ func NewWorkflowFromDef(def *WorkflowDef) (*Workflow, error) {
 				s.cases = append(s.cases, bc)
 			}
 
-		case stepForEach:
+		case StepForEach:
 			s.collectionKey = sd.CollectionKey
 			s.concurrency = sd.Concurrency
 			s.useSpawn = sd.UseSpawn
 			if sd.ForEachRef != nil {
-				ref, err := refDefToRef(*sd.ForEachRef)
+				ref, err := refDefToRef(*sd.ForEachRef, depth)
 				if err != nil {
 					return nil, fmt.Errorf("step %q forEach ref: %w", sd.Name, err)
 				}
 				s.forEachRef = ref
 			}
 
-		case stepMap:
+		case StepMap:
 			fn := lookupMapFn(sd.MapFnName)
 			if fn == nil {
 				return nil, fmt.Errorf("map function %q not registered", sd.MapFnName)
@@ -295,7 +305,7 @@ func NewWorkflowFromDef(def *WorkflowDef) (*Workflow, error) {
 			s.mapFn = fn
 			s.mapFnName = sd.MapFnName
 
-		case stepDoUntil, stepDoWhile:
+		case StepDoUntil, StepDoWhile:
 			fn := lookupCondition(sd.LoopCondName)
 			if fn == nil {
 				return nil, fmt.Errorf("condition %q not registered", sd.LoopCondName)
@@ -303,23 +313,23 @@ func NewWorkflowFromDef(def *WorkflowDef) (*Workflow, error) {
 			s.loopCond = fn
 			s.loopCondName = sd.LoopCondName
 			if sd.LoopRef != nil {
-				ref, err := refDefToRef(*sd.LoopRef)
+				ref, err := refDefToRef(*sd.LoopRef, depth)
 				if err != nil {
 					return nil, fmt.Errorf("step %q loop ref: %w", sd.Name, err)
 				}
 				s.loopRef = ref
 			}
 
-		case stepSub:
+		case StepSub:
 			if sd.SubWorkflow != nil {
-				subWf, err := NewWorkflowFromDef(sd.SubWorkflow)
+				subWf, err := newWorkflowFromDef(sd.SubWorkflow, depth-1)
 				if err != nil {
 					return nil, fmt.Errorf("step %q sub: %w", sd.Name, err)
 				}
 				s.subWorkflow = subWf
 			}
 
-		case stepSleep:
+		case StepSleep:
 			d, err := time.ParseDuration(sd.SleepDuration)
 			if err != nil {
 				return nil, fmt.Errorf("step %q: parse sleep duration %q: %w", sd.Name, sd.SleepDuration, err)
@@ -334,9 +344,9 @@ func NewWorkflowFromDef(def *WorkflowDef) (*Workflow, error) {
 }
 
 // refDefToRef converts a RefDef to a StepRef by looking up registered tasks.
-func refDefToRef(rd RefDef) (StepRef, error) {
+func refDefToRef(rd RefDef, depth int) (StepRef, error) {
 	if rd.SubWorkflow != nil {
-		subWf, err := NewWorkflowFromDef(rd.SubWorkflow)
+		subWf, err := newWorkflowFromDef(rd.SubWorkflow, depth-1)
 		if err != nil {
 			return StepRef{}, err
 		}
@@ -349,10 +359,10 @@ func refDefToRef(rd RefDef) (StepRef, error) {
 }
 
 // refDefsToRefs converts a slice of RefDef to StepRefs.
-func refDefsToRefs(rds []RefDef) ([]StepRef, error) {
+func refDefsToRefs(rds []RefDef, depth int) ([]StepRef, error) {
 	refs := make([]StepRef, 0, len(rds))
 	for _, rd := range rds {
-		ref, err := refDefToRef(rd)
+		ref, err := refDefToRef(rd, depth)
 		if err != nil {
 			return nil, err
 		}

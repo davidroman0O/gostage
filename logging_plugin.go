@@ -34,15 +34,15 @@ func (p *loggingPlugin) EngineMiddleware() EngineMiddleware {
 }
 
 func (p *loggingPlugin) StepMiddleware() StepMiddleware {
-	return func(ctx context.Context, s *step, runID RunID, next func() error) error {
-		p.logger.Debug("step %s started (run %s)", s.id, runID)
+	return func(ctx context.Context, info StepInfo, runID RunID, next func() error) error {
+		p.logger.Debug("step %s started (run %s)", info.ID, runID)
 		start := time.Now()
 		err := next()
 		dur := time.Since(start)
 		if err != nil {
-			p.logger.Warn("step %s failed after %s: %v", s.id, dur, err)
+			p.logger.Warn("step %s failed after %s: %v", info.ID, dur, err)
 		} else {
-			p.logger.Debug("step %s completed in %s", s.id, dur)
+			p.logger.Debug("step %s completed in %s", info.ID, dur)
 		}
 		return err
 	}

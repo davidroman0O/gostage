@@ -67,9 +67,9 @@ func (e *Engine) executeWorkflow(ctx context.Context, wf *Workflow, runID RunID,
 			for j := 0; j < len(allStepMW); j++ {
 				mw := allStepMW[j]
 				next := chain
-				stepCopy := s
+				stepInfo := s.info()
 				chain = func() error {
-					return mw(ctx, stepCopy, runID, next)
+					return mw(ctx, stepInfo, runID, next)
 				}
 			}
 			err = func() (rerr error) {
@@ -88,7 +88,7 @@ func (e *Engine) executeWorkflow(ctx context.Context, wf *Workflow, runID RunID,
 			// Don't retry bail/suspend/sleep — propagate immediately
 			var bailErr *BailError
 			var suspendErr *SuspendError
-			var sleepErr *SleepError
+			var sleepErr *sleepError
 			if errors.As(err, &bailErr) || errors.As(err, &suspendErr) || errors.As(err, &sleepErr) {
 				return err
 			}
@@ -129,7 +129,7 @@ func (e *Engine) executeWorkflow(ctx context.Context, wf *Workflow, runID RunID,
 					wf.dynCounter++
 					newStep := step{
 						id:       fmt.Sprintf("%s:dyn:%d", wf.ID, wf.dynCounter),
-						kind:     stepSingle,
+						kind:     StepSingle,
 						name:     m.TaskName,
 						taskName: m.TaskName,
 					}
@@ -162,25 +162,25 @@ func (e *Engine) executeWorkflow(ctx context.Context, wf *Workflow, runID RunID,
 // executeStep dispatches to the correct executor based on step kind.
 func (e *Engine) executeStep(ctx context.Context, wf *Workflow, s *step, runID RunID, resuming bool) error {
 	switch s.kind {
-	case stepSingle:
+	case StepSingle:
 		return e.executeSingle(ctx, wf, s.taskName, runID, resuming)
-	case stepParallel:
+	case StepParallel:
 		return e.executeParallel(ctx, wf, s.refs, runID, resuming, s.id)
-	case stepStage:
+	case StepStage:
 		return e.executeStage(ctx, wf, s.refs, runID, resuming, s.id)
-	case stepBranch:
+	case StepBranch:
 		return e.executeBranch(ctx, wf, s.cases, runID, resuming)
-	case stepForEach:
+	case StepForEach:
 		return e.executeForEach(ctx, wf, s, runID, resuming)
-	case stepMap:
+	case StepMap:
 		return e.executeMap(ctx, wf, s.mapFn)
-	case stepDoUntil:
+	case StepDoUntil:
 		return e.executeDoUntil(ctx, wf, s, runID, resuming)
-	case stepDoWhile:
+	case StepDoWhile:
 		return e.executeDoWhile(ctx, wf, s, runID, resuming)
-	case stepSub:
+	case StepSub:
 		return e.executeSub(ctx, wf, s.subWorkflow, runID, resuming)
-	case stepSleep:
+	case StepSleep:
 		return e.executeSleep(ctx, s.sleepDuration)
 	default:
 		return fmt.Errorf("unknown step kind: %d", s.kind)
@@ -252,7 +252,7 @@ func (e *Engine) executeSingle(ctx context.Context, wf *Workflow, taskName strin
 		// Don't retry bail/suspend/sleep/context errors
 		var bailErr *BailError
 		var suspendErr *SuspendError
-		var sleepErr *SleepError
+		var sleepErr *sleepError
 		if errors.As(err, &bailErr) || errors.As(err, &suspendErr) || errors.As(err, &sleepErr) {
 			return err
 		}
@@ -642,9 +642,9 @@ func (e *Engine) executeSleep(ctx context.Context, d time.Duration) error {
 		return nil
 	}
 
-	// With persistence, return SleepError so the engine saves state
+	// With persistence, return sleepError so the engine saves state
 	if _, ok := e.persistence.(*memoryPersistence); !ok {
-		return &SleepError{WakeAt: time.Now().Add(d)}
+		return &sleepError{wakeAt: time.Now().Add(d)}
 	}
 	// Without persistence (memory only), block
 	select {

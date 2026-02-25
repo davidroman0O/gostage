@@ -103,7 +103,7 @@ func replayMutations(wf *Workflow, mutations []Mutation) {
 			wf.dynCounter++
 			newStep := step{
 				id:       fmt.Sprintf("%s:dyn:%d", wf.ID, wf.dynCounter),
-				kind:     stepSingle,
+				kind:     StepSingle,
 				name:     m.TaskName,
 				taskName: m.TaskName,
 			}

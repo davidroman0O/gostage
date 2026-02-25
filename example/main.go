@@ -54,16 +54,16 @@ func main() {
 	// PART 1: All 10 Step Kinds
 	// ═══════════════════════════════════════════════════════════════════
 
-	demoStep(ctx)             // 1.  stepSingle
-	demoParallel(ctx)         // 2.  stepParallel (tasks + sub-workflows)
-	demoBranch(ctx)           // 3.  stepBranch (tasks + sub-workflows)
-	demoForEach(ctx)          // 4.  stepForEach (tasks, sub-workflows, spawn)
-	demoMap(ctx)              // 5.  stepMap (closure + named)
-	demoDoUntil(ctx)          // 6.  stepDoUntil (closure, named, sub-workflow)
-	demoDoWhile(ctx)          // 7.  stepDoWhile (closure, named)
-	demoSubWorkflow(ctx)      // 8.  stepSub (single, nested)
-	demoSleep(ctx)            // 9.  stepSleep
-	demoStage(ctx)            // 10. stepStage (tasks + sub-workflows)
+	demoStep(ctx)             // 1.  StepSingle
+	demoParallel(ctx)         // 2.  StepParallel (tasks + sub-workflows)
+	demoBranch(ctx)           // 3.  StepBranch (tasks + sub-workflows)
+	demoForEach(ctx)          // 4.  StepForEach (tasks, sub-workflows, spawn)
+	demoMap(ctx)              // 5.  StepMap (closure + named)
+	demoDoUntil(ctx)          // 6.  StepDoUntil (closure, named, sub-workflow)
+	demoDoWhile(ctx)          // 7.  StepDoWhile (closure, named)
+	demoSubWorkflow(ctx)      // 8.  StepSub (single, nested)
+	demoSleep(ctx)            // 9.  StepSleep
+	demoStage(ctx)            // 10. StepStage (tasks + sub-workflows)
 
 	// ═══════════════════════════════════════════════════════════════════
 	// PART 2: Control Flow
@@ -511,14 +511,17 @@ func registerNamedFunctions() {
 // PART 1: All 10 Step Kinds
 // ===========================================================================
 
-// 1. stepSingle — basic sequential task execution
+// 1. StepSingle — basic sequential task execution
 func demoStep(ctx context.Context) {
 	section("1. Step (sequential tasks)")
 
-	wf := gs.NewWorkflow("step-demo").
+	wf, err := gs.NewWorkflow("step-demo").
 		Step("greet").
 		Step("validate").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"step"}))
 	defer engine.Close()
@@ -527,22 +530,28 @@ func demoStep(ctx context.Context) {
 	printResult(result, err)
 }
 
-// 2. stepParallel — concurrent execution with task refs AND sub-workflow refs
+// 2. StepParallel — concurrent execution with task refs AND sub-workflow refs
 func demoParallel(ctx context.Context) {
 	section("2. Parallel (tasks + sub-workflow refs)")
 
 	// Sub-workflow used as a parallel branch
-	subWf := gs.NewWorkflow("fraud-check-wf").
+	subWf, err := gs.NewWorkflow("fraud-check-wf").
 		Step("check.fraud").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	wf := gs.NewWorkflow("parallel-demo").
+	wf, err := gs.NewWorkflow("parallel-demo").
 		Parallel(
 			gs.Step("charge"),     // task ref
 			gs.Step("reserve"),    // task ref
 			gs.Sub(subWf),         // sub-workflow ref
 		).
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"par"}))
 	defer engine.Close()
@@ -553,15 +562,18 @@ func demoParallel(ctx context.Context) {
 		result.Store["charged"], result.Store["reserved"], result.Store["fraud_ok"])
 }
 
-// 3. stepBranch — conditional routing with task refs AND sub-workflow refs
+// 3. StepBranch — conditional routing with task refs AND sub-workflow refs
 func demoBranch(ctx context.Context) {
 	section("3. Branch (tasks + sub-workflow refs)")
 
-	urgentWf := gs.NewWorkflow("urgent-wf").
+	urgentWf, err := gs.NewWorkflow("urgent-wf").
 		Step("urgent.process").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	wf := gs.NewWorkflow("branch-demo").
+	wf, err := gs.NewWorkflow("branch-demo").
 		Branch(
 			gs.When(func(ctx *gs.Ctx) bool {
 				return gs.Get[string](ctx, "priority") == "high"
@@ -569,6 +581,9 @@ func demoBranch(ctx context.Context) {
 			gs.Default().Step("normal.process"),   // task ref
 		).
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"br"}))
 	defer engine.Close()
@@ -582,13 +597,16 @@ func demoBranch(ctx context.Context) {
 	fmt.Printf("    Route: %s\n", r2.Store["route"])
 }
 
-// 4. stepForEach — iteration with tasks, sub-workflows, and spawn
+// 4. StepForEach — iteration with tasks, sub-workflows, and spawn
 func demoForEach(ctx context.Context) {
 	section("4a. ForEach (task ref + concurrency)")
 
-	wf1 := gs.NewWorkflow("foreach-task").
+	wf1, err := gs.NewWorkflow("foreach-task").
 		ForEach("tracks", gs.Step("download.track"), gs.WithConcurrency(2)).
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"each"}))
 	defer engine.Close()
@@ -601,14 +619,20 @@ func demoForEach(ctx context.Context) {
 	section("4b. ForEach (sub-workflow ref)")
 
 	// Each iteration runs a full sub-workflow instead of a single task
-	itemWf := gs.NewWorkflow("item-pipeline").
+	itemWf, err := gs.NewWorkflow("item-pipeline").
 		Step("process.item").
 		Step("noop").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	wf2 := gs.NewWorkflow("foreach-sub").
+	wf2, err := gs.NewWorkflow("foreach-sub").
 		ForEach("items", gs.Sub(itemWf), gs.WithConcurrency(2)).
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	r2, _ := engine.RunSync(ctx, wf2, gs.P{
 		"items": []any{"Widget", "Gadget"},
@@ -620,9 +644,12 @@ func demoForEach(ctx context.Context) {
 	// WithSpawn() spawns each iteration as an isolated child process.
 	// Each item runs in a separate OS process communicating via gRPC.
 	// Proof: child output via fmt.Printf, store values merged back, IPC messages.
-	wf3 := gs.NewWorkflow("foreach-spawn").
+	wf3, err := gs.NewWorkflow("foreach-spawn").
 		ForEach("items", gs.Step("spawn.echo"), gs.WithConcurrency(1), gs.WithSpawn()).
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	// Register IPC handler — child sends "spawn.done" messages via gRPC
 	engine.OnMessage("spawn.done", func(msgType string, payload map[string]any) {
@@ -645,14 +672,20 @@ func demoForEach(ctx context.Context) {
 	// Each child process runs a FULL sub-workflow (2 steps) — not just one task.
 	// step1 reads the ForEach item, step2 reads step1's output.
 	// Proves: sub-workflow execution + data flow between steps inside child.
-	spawnSubWf := gs.NewWorkflow("spawn-sub-pipeline").
+	spawnSubWf, err := gs.NewWorkflow("spawn-sub-pipeline").
 		Step("spawn.step1").
 		Step("spawn.step2").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	wf4 := gs.NewWorkflow("foreach-sub-spawn").
+	wf4, err := gs.NewWorkflow("foreach-sub-spawn").
 		ForEach("items", gs.Sub(spawnSubWf), gs.WithConcurrency(1), gs.WithSpawn()).
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	r4, err := engine.RunSync(ctx, wf4, gs.P{
 		"items": []any{"Gamma", "Delta"},
@@ -666,11 +699,11 @@ func demoForEach(ctx context.Context) {
 	}
 }
 
-// 5. stepMap — inline data transformation (closure + named)
+// 5. StepMap — inline data transformation (closure + named)
 func demoMap(ctx context.Context) {
 	section("5a. Map (inline closure)")
 
-	wf1 := gs.NewWorkflow("map-closure").
+	wf1, err := gs.NewWorkflow("map-closure").
 		Map(func(ctx *gs.Ctx) {
 			prices := gs.GetOr[[]any](ctx, "prices", nil)
 			total := 0.0
@@ -682,6 +715,9 @@ func demoMap(ctx context.Context) {
 			_ = gs.Set(ctx, "total", total)
 		}).
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"map"}))
 	defer engine.Close()
@@ -691,23 +727,29 @@ func demoMap(ctx context.Context) {
 
 	section("5b. MapNamed (registered function — serializable)")
 
-	wf2 := gs.NewWorkflow("map-named").
+	wf2, err := gs.NewWorkflow("map-named").
 		MapNamed("normalize-name").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	r2, _ := engine.RunSync(ctx, wf2, gs.P{"name": "  jOHN dOE  "})
 	fmt.Printf("  Normalized: %q\n", r2.Store["name"])
 }
 
-// 6. stepDoUntil — repeat-until loop (closure, named, sub-workflow ref)
+// 6. StepDoUntil — repeat-until loop (closure, named, sub-workflow ref)
 func demoDoUntil(ctx context.Context) {
 	section("6a. DoUntil (closure condition)")
 
-	wf1 := gs.NewWorkflow("until-closure").
+	wf1, err := gs.NewWorkflow("until-closure").
 		DoUntil(gs.Step("poll.status"), func(ctx *gs.Ctx) bool {
 			return gs.Get[string](ctx, "status") == "ready"
 		}).
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"until"}))
 	defer engine.Close()
@@ -717,9 +759,12 @@ func demoDoUntil(ctx context.Context) {
 
 	section("6b. DoUntilNamed (registered condition — serializable)")
 
-	wf2 := gs.NewWorkflow("until-named").
+	wf2, err := gs.NewWorkflow("until-named").
 		DoUntilNamed(gs.Step("poll.status"), "status-is-ready").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	r2, _ := engine.RunSync(ctx, wf2, nil)
 	fmt.Printf("  Polls: %d\n", r2.Store["poll_count"])
@@ -727,30 +772,39 @@ func demoDoUntil(ctx context.Context) {
 	section("6c. DoUntil (sub-workflow ref)")
 
 	// Loop body is a full sub-workflow instead of a single task
-	loopBody := gs.NewWorkflow("poll-wf").
+	loopBody, err := gs.NewWorkflow("poll-wf").
 		Step("poll.status").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	wf3 := gs.NewWorkflow("until-sub").
+	wf3, err := gs.NewWorkflow("until-sub").
 		DoUntil(gs.Sub(loopBody), func(ctx *gs.Ctx) bool {
 			return gs.Get[string](ctx, "status") == "ready"
 		}).
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	r3, _ := engine.RunSync(ctx, wf3, nil)
 	fmt.Printf("  Polls (via sub-wf): %d\n", r3.Store["poll_count"])
 }
 
-// 7. stepDoWhile — while-do loop (closure + named)
+// 7. StepDoWhile — while-do loop (closure + named)
 func demoDoWhile(ctx context.Context) {
 	section("7a. DoWhile (closure condition)")
 
-	wf1 := gs.NewWorkflow("while-closure").
+	wf1, err := gs.NewWorkflow("while-closure").
 		Map(func(ctx *gs.Ctx) { _ = gs.Set(ctx, "has_more", true) }).
 		DoWhile(gs.Step("fetch.page"), func(ctx *gs.Ctx) bool {
 			return gs.Get[bool](ctx, "has_more")
 		}).
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"while"}))
 	defer engine.Close()
@@ -760,28 +814,37 @@ func demoDoWhile(ctx context.Context) {
 
 	section("7b. DoWhileNamed (registered condition — serializable)")
 
-	wf2 := gs.NewWorkflow("while-named").
+	wf2, err := gs.NewWorkflow("while-named").
 		Map(func(ctx *gs.Ctx) { _ = gs.Set(ctx, "has_more", true) }).
 		DoWhileNamed(gs.Step("fetch.page"), "has-more-pages").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	r2, _ := engine.RunSync(ctx, wf2, nil)
 	fmt.Printf("  Pages: %d\n", r2.Store["page"])
 }
 
-// 8. stepSub — nested sub-workflow (single level + deep nesting)
+// 8. StepSub — nested sub-workflow (single level + deep nesting)
 func demoSubWorkflow(ctx context.Context) {
 	section("8a. Sub (single-level nesting)")
 
-	inner := gs.NewWorkflow("enrichment").
+	inner, err := gs.NewWorkflow("enrichment").
 		Step("enrich.data").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	outer := gs.NewWorkflow("pipeline-single").
+	outer, err := gs.NewWorkflow("pipeline-single").
 		Step("validate").
 		Sub(inner).
 		Step("greet").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"sub"}))
 	defer engine.Close()
@@ -792,34 +855,46 @@ func demoSubWorkflow(ctx context.Context) {
 
 	section("8b. Sub (deep nesting — sub within sub)")
 
-	deepest := gs.NewWorkflow("deep-inner").
+	deepest, err := gs.NewWorkflow("deep-inner").
 		Step("deep.task").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	middle := gs.NewWorkflow("middle").
+	middle, err := gs.NewWorkflow("middle").
 		Step("enrich.data").
 		Sub(deepest).
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	outerDeep := gs.NewWorkflow("pipeline-deep").
+	outerDeep, err := gs.NewWorkflow("pipeline-deep").
 		Sub(middle).
 		Step("greet").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	r2, _ := engine.RunSync(ctx, outerDeep, gs.P{"name": "Nested"})
 	printResult(r2, nil)
 	fmt.Printf("  Enriched=%v Deep=%v\n", r2.Store["enriched"], r2.Store["deep"])
 }
 
-// 9. stepSleep — timed delay
+// 9. StepSleep — timed delay
 func demoSleep(ctx context.Context) {
 	section("9. Sleep")
 
-	wf := gs.NewWorkflow("sleep-demo").
+	wf, err := gs.NewWorkflow("sleep-demo").
 		Step("greet").
 		Sleep(50 * time.Millisecond).
 		Step("after.sleep").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"slp"}))
 	defer engine.Close()
@@ -830,15 +905,18 @@ func demoSleep(ctx context.Context) {
 	fmt.Printf("  Elapsed: %s\n", time.Since(start).Round(time.Millisecond))
 }
 
-// 10. stepStage — named groups with task refs AND sub-workflow refs
+// 10. StepStage — named groups with task refs AND sub-workflow refs
 func demoStage(ctx context.Context) {
 	section("10. Stage (tasks + sub-workflow refs)")
 
-	fraudWf := gs.NewWorkflow("fraud-wf").
+	fraudWf, err := gs.NewWorkflow("fraud-wf").
 		Step("check.fraud").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	wf := gs.NewWorkflow("stage-demo").
+	wf, err := gs.NewWorkflow("stage-demo").
 		Stage("validation",
 			gs.Step("validate"),   // task ref
 			gs.Sub(fraudWf),       // sub-workflow ref
@@ -848,6 +926,9 @@ func demoStage(ctx context.Context) {
 			gs.Step("reserve"),
 		).
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"stg"}))
 	defer engine.Close()
@@ -864,10 +945,13 @@ func demoStage(ctx context.Context) {
 func demoBail(ctx context.Context) {
 	section("11. Bail (early exit)")
 
-	wf := gs.NewWorkflow("bail-demo").
+	wf, err := gs.NewWorkflow("bail-demo").
 		Step("age.check").
 		Step("greet"). // should not execute
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"bail"}))
 	defer engine.Close()
@@ -881,10 +965,13 @@ func demoBail(ctx context.Context) {
 func demoSuspendResume(ctx context.Context) {
 	section("12. Suspend / Resume")
 
-	wf := gs.NewWorkflow("suspend-demo").
+	wf, err := gs.NewWorkflow("suspend-demo").
 		Step("request.approval").
 		Step("greet").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(
 		gs.WithLogger(&consoleLogger{"sus"}),
@@ -907,9 +994,12 @@ func demoSuspendResume(ctx context.Context) {
 func demoCancellation(ctx context.Context) {
 	section("13. ctx.Context() cancellation")
 
-	wf := gs.NewWorkflow("cancel-ctx-demo").
+	wf, err := gs.NewWorkflow("cancel-ctx-demo").
 		Step("long.running").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"cancel"}))
 	defer engine.Close()
@@ -933,10 +1023,13 @@ func demoCancellation(ctx context.Context) {
 func demoInsertAfter(ctx context.Context) {
 	section("14. InsertAfter (dynamic step injection)")
 
-	wf := gs.NewWorkflow("insert-demo").
+	wf, err := gs.NewWorkflow("insert-demo").
 		Step("decide.extras").
 		Step("final.step").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"ins"}))
 	defer engine.Close()
@@ -950,12 +1043,15 @@ func demoInsertAfter(ctx context.Context) {
 func demoDisableEnable(ctx context.Context) {
 	section("15. DisableStep + EnableStep")
 
-	wf := gs.NewWorkflow("disable-demo").
+	wf, err := gs.NewWorkflow("disable-demo").
 		Step("disable.b").   // step 0: disables step B
 		Step("step.b").      // step 1: will be disabled
 		Step("enable.check"). // step 2: re-enables for future
 		Step("step.c").      // step 3: runs normally
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"dis"}))
 	defer engine.Close()
@@ -970,13 +1066,16 @@ func demoDisableEnable(ctx context.Context) {
 func demoTagMutations(ctx context.Context) {
 	section("16. Tag Mutations (FindStepsByTag + DisableByTag)")
 
-	wf := gs.NewWorkflow("tag-mut-demo").
+	wf, err := gs.NewWorkflow("tag-mut-demo").
 		Step("gate.keeper").
 		Step("billing.charge", gs.WithStepTags("billing")).
 		Step("shipping.label", gs.WithStepTags("shipping")).
 		Step("shipping.dispatch", gs.WithStepTags("shipping")).
 		Step("final.step").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"tmut"}))
 	defer engine.Close()
@@ -998,11 +1097,14 @@ func demoTagMutations(ctx context.Context) {
 func demoTags(ctx context.Context) {
 	section("17. Tags (step + task tags)")
 
-	wf := gs.NewWorkflow("tags-demo").
+	wf, err := gs.NewWorkflow("tags-demo").
 		Step("billing.charge", gs.WithStepTags("billing", "critical")).
 		Step("billing.receipt", gs.WithStepTags("billing")).
 		Step("shipping.label", gs.WithStepTags("shipping")).
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"tag"}))
 	defer engine.Close()
@@ -1019,9 +1121,12 @@ func demoTags(ctx context.Context) {
 func demoIPC(ctx context.Context) {
 	section("18. IPC (Send + OnMessage + wildcard)")
 
-	wf := gs.NewWorkflow("ipc-demo").
+	wf, err := gs.NewWorkflow("ipc-demo").
 		Step("report.progress").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"ipc"}))
 	defer engine.Close()
@@ -1064,9 +1169,12 @@ func demoAllMiddleware(ctx context.Context) {
 		return err
 	}
 
-	wf := gs.NewWorkflow("mw-demo").
+	wf, err := gs.NewWorkflow("mw-demo").
 		Step("greet").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(
 		gs.WithLogger(&consoleLogger{"mw"}),
@@ -1083,9 +1191,12 @@ func demoAllMiddleware(ctx context.Context) {
 func demoPlugin(ctx context.Context) {
 	section("20. LoggingPlugin")
 
-	wf := gs.NewWorkflow("plugin-demo").
+	wf, err := gs.NewWorkflow("plugin-demo").
 		Step("greet").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(
 		gs.WithPlugin(gs.LoggingPlugin(&consoleLogger{"plugin"})),
@@ -1108,7 +1219,10 @@ func demoAsync(ctx context.Context) {
 	defer engine.Close()
 
 	// Run async and wait
-	wf := gs.NewWorkflow("async-demo").Step("greet").Commit()
+	wf, err := gs.NewWorkflow("async-demo").Step("greet").Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 	runID, _ := engine.Run(ctx, wf, gs.P{"name": "Async"})
 	fmt.Printf("  Started: %s\n", runID)
 
@@ -1116,7 +1230,10 @@ func demoAsync(ctx context.Context) {
 	printResult(result, nil)
 
 	// Cancel demo
-	slowWf := gs.NewWorkflow("slow").Sleep(10 * time.Second).Commit()
+	slowWf, err := gs.NewWorkflow("slow").Sleep(10 * time.Second).Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 	slowID, _ := engine.Run(ctx, slowWf, nil)
 	time.Sleep(10 * time.Millisecond)
 	engine.Cancel(ctx, slowID)
@@ -1127,7 +1244,10 @@ func demoAsync(ctx context.Context) {
 func demoRetry(ctx context.Context) {
 	section("22. Retry (WithRetry + WithRetryDelay)")
 
-	wf := gs.NewWorkflow("retry-demo").Step("flaky.service").Commit()
+	wf, err := gs.NewWorkflow("retry-demo").Step("flaky.service").Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"retry"}))
 	defer engine.Close()
@@ -1143,7 +1263,7 @@ func demoWorkflowOptions(ctx context.Context) {
 
 	var completed []string
 
-	wf := gs.NewWorkflow("opts-demo",
+	wf, err := gs.NewWorkflow("opts-demo",
 		gs.WithDefaultRetry(3, 10*time.Millisecond),
 		gs.OnStepComplete(func(step string, ctx *gs.Ctx) {
 			completed = append(completed, step)
@@ -1156,6 +1276,9 @@ func demoWorkflowOptions(ctx context.Context) {
 		Step("validate").
 		Step("greet").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"opts"}))
 	defer engine.Close()
@@ -1181,7 +1304,10 @@ func demoEngineOptions(ctx context.Context) {
 	}
 	defer engine.Close()
 
-	wf := gs.NewWorkflow("engine-opts").Step("greet").Commit()
+	wf, err := gs.NewWorkflow("engine-opts").Step("greet").Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 	result, _ := engine.RunSync(ctx, wf, gs.P{"name": "EngineOpts"})
 	printResult(result, nil)
 }
@@ -1196,7 +1322,10 @@ func demoSQLite(ctx context.Context) {
 	)
 	defer engine.Close()
 
-	wf := gs.NewWorkflow("sqlite-demo").Step("greet").Commit()
+	wf, err := gs.NewWorkflow("sqlite-demo").Step("greet").Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 	result, _ := engine.RunSync(ctx, wf, gs.P{"name": "SQLite"})
 	printResult(result, nil)
 	fmt.Printf("  Persisted run: %s\n", result.RunID)
@@ -1217,7 +1346,10 @@ func demoAutoRecover(ctx context.Context) {
 	}
 	defer engine.Close()
 
-	wf := gs.NewWorkflow("recover-demo").Step("greet").Commit()
+	wf, err := gs.NewWorkflow("recover-demo").Step("greet").Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 	result, _ := engine.RunSync(ctx, wf, gs.P{"name": "Recover"})
 	printResult(result, nil)
 
@@ -1238,7 +1370,7 @@ func demoSerialization(ctx context.Context) {
 	section("27. Serialization (full round-trip)")
 
 	// Build a serializable workflow using only named functions
-	wf := gs.NewWorkflow("serializable").
+	wf, err := gs.NewWorkflow("serializable").
 		Step("validate").
 		MapNamed("normalize-name").
 		Branch(
@@ -1248,6 +1380,9 @@ func demoSerialization(ctx context.Context) {
 		DoUntilNamed(gs.Step("poll.status"), "status-is-ready").
 		DoWhileNamed(gs.Step("fetch.page"), "has-more-pages").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	// Serialize → JSON
 	def, _ := gs.WorkflowToDefinition(wf)
@@ -1286,7 +1421,7 @@ func demoSerialization(ctx context.Context) {
 func demoOrderPipeline(ctx context.Context) {
 	section("28. Order Pipeline (all step kinds combined)")
 
-	wf := gs.NewWorkflow("order-pipeline",
+	wf, err := gs.NewWorkflow("order-pipeline",
 		gs.WithDefaultRetry(2, 50*time.Millisecond),
 		gs.OnStepComplete(func(step string, ctx *gs.Ctx) {
 			fmt.Printf("  [done] %s\n", step)
@@ -1308,6 +1443,9 @@ func demoOrderPipeline(ctx context.Context) {
 		// Stage 5: Confirm
 		Step("order.confirm").
 		Commit()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"pipe"}))
 	defer engine.Close()

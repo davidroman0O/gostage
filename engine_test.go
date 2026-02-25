@@ -19,7 +19,10 @@ func TestEngine_RunSync_Simple(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("greet").Step("e.greet").Commit()
+	wf, err := NewWorkflow("greet").Step("e.greet").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, err := New()
 	if err != nil {
 		t.Fatal(err)
@@ -57,11 +60,14 @@ func TestEngine_RunSync_MultiStep(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("multi").
+	wf, err := NewWorkflow("multi").
 		Step("e.step1").
 		Step("e.step2").
 		Step("e.step3").
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, _ := New()
 	defer engine.Close()
@@ -86,7 +92,10 @@ func TestEngine_RunSync_Bail(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("bail").Step("e.check_age").Commit()
+	wf, err := NewWorkflow("bail").Step("e.check_age").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, _ := New()
 	defer engine.Close()
 
@@ -109,7 +118,10 @@ func TestEngine_RunSync_Suspend(t *testing.T) {
 		return Suspend(ctx, P{"reason": "needs approval"})
 	})
 
-	wf := NewWorkflow("suspend").Step("e.approve").Commit()
+	wf, err := NewWorkflow("suspend").Step("e.approve").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, _ := New()
 	defer engine.Close()
 
@@ -126,7 +138,10 @@ func TestEngine_RunSync_Failed(t *testing.T) {
 		return errors.New("something broke")
 	})
 
-	wf := NewWorkflow("fail").Step("e.fail").Commit()
+	wf, err := NewWorkflow("fail").Step("e.fail").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, _ := New()
 	defer engine.Close()
 
@@ -147,7 +162,10 @@ func TestEngine_RunAndWait(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("async").Step("e.async").Commit()
+	wf, err := NewWorkflow("async").Step("e.async").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, _ := New()
 	defer engine.Close()
 
@@ -178,7 +196,10 @@ func TestEngine_Cancel(t *testing.T) {
 		}
 	})
 
-	wf := NewWorkflow("cancel").Step("e.slow").Commit()
+	wf, err := NewWorkflow("cancel").Step("e.slow").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, _ := New()
 	defer engine.Close()
 
@@ -209,7 +230,10 @@ func TestEngine_WithTimeout(t *testing.T) {
 		}
 	})
 
-	wf := NewWorkflow("timeout").Step("e.timeout").Commit()
+	wf, err := NewWorkflow("timeout").Step("e.timeout").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, _ := New(WithTimeout(100 * time.Millisecond))
 	defer engine.Close()
 
@@ -234,9 +258,12 @@ func TestEngine_Parallel_RealConcurrency(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("par").
+	wf, err := NewWorkflow("par").
 		Parallel(Step("e.par_task"), Step("e.par_task"), Step("e.par_task")).
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, _ := New()
 	defer engine.Close()
@@ -261,9 +288,12 @@ func TestEngine_Parallel_FirstError(t *testing.T) {
 		return errors.New("parallel failure")
 	})
 
-	wf := NewWorkflow("par-fail").
+	wf, err := NewWorkflow("par-fail").
 		Parallel(Step("e.par_ok"), Step("e.par_fail")).
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, _ := New()
 	defer engine.Close()
@@ -284,9 +314,12 @@ func TestEngine_ForEach_Sequential(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("foreach").
+	wf, err := NewWorkflow("foreach").
 		ForEach("items", Step("e.fe_task")).
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, _ := New()
 	defer engine.Close()
@@ -325,9 +358,12 @@ func TestEngine_ForEach_Concurrent(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("foreach-conc").
+	wf, err := NewWorkflow("foreach-conc").
 		ForEach("items", Step("e.fe_conc"), WithConcurrency(3)).
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, _ := New()
 	defer engine.Close()
@@ -361,7 +397,7 @@ func TestEngine_Branch_MatchFirst(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("branch").
+	wf, err := NewWorkflow("branch").
 		Branch(
 			When(func(ctx *Ctx) bool {
 				return Get[string](ctx, "priority") == "high"
@@ -369,6 +405,9 @@ func TestEngine_Branch_MatchFirst(t *testing.T) {
 			Default().Step("e.normal"),
 		).
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, _ := New()
 	defer engine.Close()
@@ -391,7 +430,7 @@ func TestEngine_Branch_Default(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("branch-default").
+	wf, err := NewWorkflow("branch-default").
 		Branch(
 			When(func(ctx *Ctx) bool {
 				return Get[string](ctx, "priority") == "high"
@@ -399,6 +438,9 @@ func TestEngine_Branch_Default(t *testing.T) {
 			Default().Step("e.normal2"),
 		).
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, _ := New()
 	defer engine.Close()
@@ -418,11 +460,14 @@ func TestEngine_DoUntil(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("until").
+	wf, err := NewWorkflow("until").
 		DoUntil(Step("e.increment"), func(ctx *Ctx) bool {
 			return Get[int](ctx, "count") >= 5
 		}).
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, _ := New()
 	defer engine.Close()
@@ -447,7 +492,7 @@ func TestEngine_DoWhile(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("while").
+	wf, err := NewWorkflow("while").
 		Map(func(ctx *Ctx) {
 			Set(ctx, "has_more", true) // seed the condition
 		}).
@@ -455,6 +500,9 @@ func TestEngine_DoWhile(t *testing.T) {
 			return Get[bool](ctx, "has_more")
 		}).
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, _ := New()
 	defer engine.Close()
@@ -477,12 +525,15 @@ func TestEngine_Map(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("map").
+	wf, err := NewWorkflow("map").
 		Map(func(ctx *Ctx) {
 			Set(ctx, "records", []string{"a", "b", "c"})
 		}).
 		Step("e.use_data").
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, _ := New()
 	defer engine.Close()
@@ -508,11 +559,17 @@ func TestEngine_SubWorkflow(t *testing.T) {
 		return nil
 	})
 
-	inner := NewWorkflow("inner").Step("e.sub_inner").Commit()
-	outer := NewWorkflow("outer").
+	inner, err := NewWorkflow("inner").Step("e.sub_inner").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer, err := NewWorkflow("outer").
 		Step("e.sub_outer").
 		Sub(inner).
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, _ := New()
 	defer engine.Close()
@@ -542,9 +599,12 @@ func TestEngine_Stage(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("staged").
+	wf, err := NewWorkflow("staged").
 		Stage("validation", Step("e.s1"), Step("e.s2")).
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, _ := New()
 	defer engine.Close()
@@ -571,7 +631,10 @@ func TestEngine_Retry_TaskLevel(t *testing.T) {
 		return nil
 	}, WithRetry(3))
 
-	wf := NewWorkflow("retry").Step("e.flaky").Commit()
+	wf, err := NewWorkflow("retry").Step("e.flaky").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, _ := New()
 	defer engine.Close()
 
@@ -596,9 +659,12 @@ func TestEngine_Retry_WorkflowDefault(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("retry-default", WithDefaultRetry(5, 10*time.Millisecond)).
+	wf, err := NewWorkflow("retry-default", WithDefaultRetry(5, 10*time.Millisecond)).
 		Step("e.flaky2").
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, _ := New()
 	defer engine.Close()
@@ -616,7 +682,10 @@ func TestEngine_Retry_ExhaustedFails(t *testing.T) {
 		return errors.New("always fails")
 	}, WithRetry(2))
 
-	wf := NewWorkflow("exhaust").Step("e.always_fail").Commit()
+	wf, err := NewWorkflow("exhaust").Step("e.always_fail").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, _ := New()
 	defer engine.Close()
 
@@ -635,7 +704,7 @@ func TestEngine_LifecycleCallbacks(t *testing.T) {
 	Task("e.cb_ok", func(ctx *Ctx) error { return nil })
 	Task("e.cb_fail", func(ctx *Ctx) error { return errors.New("oops") })
 
-	wf := NewWorkflow("callbacks",
+	wf, err := NewWorkflow("callbacks",
 		OnStepComplete(func(step string, ctx *Ctx) {
 			completedSteps = append(completedSteps, step)
 		}),
@@ -646,6 +715,9 @@ func TestEngine_LifecycleCallbacks(t *testing.T) {
 		Step("e.cb_ok").
 		Step("e.cb_fail").
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, _ := New()
 	defer engine.Close()
@@ -671,10 +743,13 @@ func TestEngine_Sleep_Memory(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("sleep").
+	wf, err := NewWorkflow("sleep").
 		Sleep(10 * time.Millisecond).
 		Step("e.after_sleep").
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, _ := New() // memory persistence → blocking sleep
 	defer engine.Close()
@@ -695,10 +770,13 @@ func TestEngine_Sleep_Persistent(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("sleep-persist").
+	wf, err := NewWorkflow("sleep-persist").
 		Sleep(time.Hour).
 		Step("e.post_sleep").
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	dir := t.TempDir()
 	engine, _ := New(WithSQLite(filepath.Join(dir, "test.db")))
@@ -725,7 +803,10 @@ func TestEngine_Resume(t *testing.T) {
 		return Suspend(ctx, P{"reason": "needs approval"})
 	})
 
-	wf := NewWorkflow("resume").Step("e.approve_order").Commit()
+	wf, err := NewWorkflow("resume").Step("e.approve_order").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, _ := New()
 	defer engine.Close()
 
@@ -736,7 +817,10 @@ func TestEngine_Resume(t *testing.T) {
 	}
 
 	// Resume with approval
-	wf2 := NewWorkflow("resume").Step("e.approve_order").Commit()
+	wf2, err := NewWorkflow("resume").Step("e.approve_order").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	resumed, err := engine.Resume(context.Background(), wf2, result.RunID, P{"approved": true})
 	if err != nil {
 		t.Fatal(err)
@@ -754,7 +838,10 @@ func TestEngine_WithSQLite_Integration(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("sqlite-test").Step("e.sqlite_task").Commit()
+	wf, err := NewWorkflow("sqlite-test").Step("e.sqlite_task").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "engine.db")
@@ -806,9 +893,12 @@ func TestEngine_ForEach_Empty(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("empty").
+	wf, err := NewWorkflow("empty").
 		ForEach("items", Step("e.noop")).
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, _ := New()
 	defer engine.Close()
@@ -831,7 +921,10 @@ func TestEngine_Retry_BailNotRetried(t *testing.T) {
 		return Bail(ctx, "done")
 	}, WithRetry(3))
 
-	wf := NewWorkflow("bail-no-retry").Step("e.bail_retry").Commit()
+	wf, err := NewWorkflow("bail-no-retry").Step("e.bail_retry").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, _ := New()
 	defer engine.Close()
 
@@ -859,11 +952,14 @@ func TestEngine_StepFailStopsExecution(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("stop").
+	wf, err := NewWorkflow("stop").
 		Step("e.ok_step").
 		Step("e.fail_step").
 		Step("e.after_fail").
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, _ := New()
 	defer engine.Close()
@@ -905,7 +1001,10 @@ func TestEngine_DeleteKeySurvivesResume(t *testing.T) {
 		t.Fatalf("create engine1: %v", err)
 	}
 
-	wf := NewWorkflow("delete-key-test").Step("e.set_and_suspend").Commit()
+	wf, err := NewWorkflow("delete-key-test").Step("e.set_and_suspend").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	result1, err := engine1.RunSync(context.Background(), wf, nil)
 	if err != nil {
 		t.Fatalf("RunSync: %v", err)
@@ -926,7 +1025,10 @@ func TestEngine_DeleteKeySurvivesResume(t *testing.T) {
 	defer engine2.Close()
 
 	// Resume the run
-	wf2 := NewWorkflow("delete-key-test").Step("e.set_and_suspend").Commit()
+	wf2, err := NewWorkflow("delete-key-test").Step("e.set_and_suspend").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	result2, err := engine2.Resume(context.Background(), wf2, runID, nil)
 	if err != nil {
 		t.Fatalf("Resume: %v", err)

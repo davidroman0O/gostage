@@ -35,11 +35,14 @@ func TestStepLevelResume(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("step-resume").
+	wf, err := NewWorkflow("step-resume").
 		Step("resume.step1").
 		Step("resume.step2").
 		Step("resume.step3").
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, err := New()
 	if err != nil {
@@ -107,11 +110,14 @@ func TestForEachPerItemResume(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("foreach-resume").
+	wf, err := NewWorkflow("foreach-resume").
 		Step("resume.prepare").
 		ForEach("items", Step("resume.process")).
 		Step("resume.done").
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, err := New(WithSQLite(":memory:"))
 	if err != nil {
@@ -214,7 +220,10 @@ func TestPoolBoundsWorkflows(t *testing.T) {
 	}
 	defer engine.Close()
 
-	wf := NewWorkflow("pool-bounded").Step("pool.slow").Commit()
+	wf, err := NewWorkflow("pool-bounded").Step("pool.slow").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Start 6 workflows async
 	var ids []RunID
@@ -273,10 +282,13 @@ func TestStepTags(t *testing.T) {
 	Task("tag.validate", func(ctx *Ctx) error { return nil })
 	Task("tag.charge", func(ctx *Ctx) error { return nil })
 
-	wf := NewWorkflow("tagged-steps").
+	wf, err := NewWorkflow("tagged-steps").
 		Step("tag.validate", WithStepTags("validation")).
 		Step("tag.charge", WithStepTags("billing", "critical")).
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if len(wf.steps[0].tags) != 1 || wf.steps[0].tags[0] != "validation" {
 		t.Fatal("step 0 should have 'validation' tag")
@@ -291,9 +303,12 @@ func TestWorkflowTags(t *testing.T) {
 
 	Task("tag.noop", func(ctx *Ctx) error { return nil })
 
-	wf := NewWorkflow("tagged-workflow", WithWorkflowTags("billing", "critical")).
+	wf, err := NewWorkflow("tagged-workflow", WithWorkflowTags("billing", "critical")).
 		Step("tag.noop").
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if len(wf.Tags) != 2 {
 		t.Fatalf("expected 2 workflow tags, got %d", len(wf.Tags))
@@ -311,11 +326,14 @@ func TestFindStepsByTag(t *testing.T) {
 	Task("tag.b", func(ctx *Ctx) error { return nil })
 	Task("tag.c", func(ctx *Ctx) error { return nil })
 
-	wf := NewWorkflow("find-by-tag").
+	wf, err := NewWorkflow("find-by-tag").
 		Step("tag.a").
 		Step("tag.b", WithStepTags("optional")).
 		Step("tag.c", WithStepTags("optional")).
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, err := New()
 	if err != nil {
@@ -349,7 +367,10 @@ func TestOnMessage(t *testing.T) {
 		return Send(ctx, "progress", P{"pct": 50})
 	})
 
-	wf := NewWorkflow("on-message").Step("ipc.sender").Commit()
+	wf, err := NewWorkflow("on-message").Step("ipc.sender").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, err := New()
 	if err != nil {
 		t.Fatal(err)
@@ -391,7 +412,10 @@ func TestOnMessageWildcard(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("wildcard-handler").Step("ipc.multi").Commit()
+	wf, err := NewWorkflow("wildcard-handler").Step("ipc.multi").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, err := New()
 	if err != nil {
 		t.Fatal(err)
@@ -469,7 +493,10 @@ func TestEngineMiddleware(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("engine-mw").Step("mw.task").Commit()
+	wf, err := NewWorkflow("engine-mw").Step("mw.task").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, err := New(
 		WithEngineMiddleware(func(ctx context.Context, wf *Workflow, runID RunID, next func() error) error {
 			mu.Lock()
@@ -506,11 +533,14 @@ func TestStepMiddleware(t *testing.T) {
 	Task("mw.a", func(ctx *Ctx) error { return nil })
 	Task("mw.b", func(ctx *Ctx) error { return nil })
 
-	wf := NewWorkflow("step-mw").Step("mw.a").Step("mw.b").Commit()
+	wf, err := NewWorkflow("step-mw").Step("mw.a").Step("mw.b").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, err := New(
-		WithStepMiddleware(func(ctx context.Context, s *step, runID RunID, next func() error) error {
+		WithStepMiddleware(func(ctx context.Context, info StepInfo, runID RunID, next func() error) error {
 			mu.Lock()
-			stepNames = append(stepNames, s.name)
+			stepNames = append(stepNames, info.Name)
 			mu.Unlock()
 			return next()
 		}),
@@ -535,7 +565,10 @@ func TestTaskMiddleware(t *testing.T) {
 
 	Task("mw.t1", func(ctx *Ctx) error { return nil })
 
-	wf := NewWorkflow("task-mw").Step("mw.t1").Commit()
+	wf, err := NewWorkflow("task-mw").Step("mw.t1").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, err := New(
 		WithTaskMiddleware(func(tctx *Ctx, taskName string, next func() error) error {
 			mu.Lock()
@@ -569,7 +602,10 @@ func TestMiddlewarePlugin(t *testing.T) {
 
 	Task("mw.plug", func(ctx *Ctx) error { return nil })
 
-	wf := NewWorkflow("middleware-plugin").Step("mw.plug").Commit()
+	wf, err := NewWorkflow("middleware-plugin").Step("mw.plug").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, err := New(WithPlugin(pluginAdapter{p}))
 	if err != nil {
 		t.Fatal(err)
@@ -600,7 +636,7 @@ func (a pluginAdapter) EngineMiddleware() EngineMiddleware {
 	}
 }
 func (a pluginAdapter) StepMiddleware() StepMiddleware {
-	return func(ctx context.Context, s *step, runID RunID, next func() error) error {
+	return func(ctx context.Context, info StepInfo, runID RunID, next func() error) error {
 		atomic.AddInt32(&a.p.stepCalled, 1)
 		return next()
 	}
@@ -622,15 +658,18 @@ func TestPerWorkflowMiddleware(t *testing.T) {
 	Task("mw.wf1", func(ctx *Ctx) error { return nil })
 	Task("mw.wf2", func(ctx *Ctx) error { return nil })
 
-	wfMW := func(ctx context.Context, s *step, runID RunID, next func() error) error {
+	wfMW := func(ctx context.Context, info StepInfo, runID RunID, next func() error) error {
 		mu.Lock()
-		wfStepNames = append(wfStepNames, s.name)
+		wfStepNames = append(wfStepNames, info.Name)
 		mu.Unlock()
 		return next()
 	}
 
-	wf := NewWorkflow("per-workflow-mw", WithWorkflowMiddleware(wfMW)).
+	wf, err := NewWorkflow("per-workflow-mw", WithWorkflowMiddleware(wfMW)).
 		Step("mw.wf1").Step("mw.wf2").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, err := New()
 	if err != nil {
@@ -673,10 +712,13 @@ func TestMutationInsertAfter(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("insert-after").
+	wf, err := NewWorkflow("insert-after").
 		Step("mut.first").
 		Step("mut.last").
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, err := New()
 	if err != nil {
@@ -717,11 +759,14 @@ func TestMutationDisableStep(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("disable-step").
+	wf, err := NewWorkflow("disable-step").
 		Step("mut.enable").
 		Step("mut.skip").
 		Step("mut.end").
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, err := New()
 	if err != nil {
@@ -761,12 +806,15 @@ func TestMutationDisableByTag(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("disable-by-tag").
+	wf, err := NewWorkflow("disable-by-tag").
 		Step("mut.controller").
 		Step("mut.opt1", WithStepTags("optional")).
 		Step("mut.opt2", WithStepTags("optional")).
 		Step("mut.required").
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, err := New()
 	if err != nil {
@@ -807,11 +855,14 @@ func TestMutationInsertSurvivesResume(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("insert-survives-resume").
+	wf, err := NewWorkflow("insert-survives-resume").
 		Step("mut.inserter").
 		Step("mut.suspender").
 		Step("mut.final").
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, err := New(WithSQLite(t.TempDir() + "/test.db"))
 	if err != nil {
@@ -873,12 +924,15 @@ func TestMutationDisableSurvivesResume(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("disable-survives-resume").
+	wf, err := NewWorkflow("disable-survives-resume").
 		Step("mut.disabler").
 		Step("mut.suspender2").
 		Step("mut.skipped").
 		Step("mut.end2").
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, err := New(WithSQLite(t.TempDir() + "/test.db"))
 	if err != nil {
@@ -924,10 +978,13 @@ func TestWorkflowToDefinition(t *testing.T) {
 	Task("def.validate", func(ctx *Ctx) error { return nil })
 	Task("def.charge", func(ctx *Ctx) error { return nil })
 
-	wf := NewWorkflow("order-def").
+	wf, err := NewWorkflow("order-def").
 		Step("def.validate").
 		Step("def.charge").
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	def, err := WorkflowToDefinition(wf)
 	if err != nil {
@@ -950,7 +1007,10 @@ func TestDefinitionMarshalUnmarshal(t *testing.T) {
 	Task("def.a", func(ctx *Ctx) error { return nil })
 	Task("def.b", func(ctx *Ctx) error { return nil })
 
-	wf := NewWorkflow("serial-def").Step("def.a").Step("def.b").Commit()
+	wf, err := NewWorkflow("serial-def").Step("def.a").Step("def.b").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	def, defErr := WorkflowToDefinition(wf)
 	if defErr != nil {
 		t.Fatal(defErr)
@@ -985,7 +1045,10 @@ func TestNewWorkflowFromDef(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("rebuild-def").Step("def.step1").Step("def.step2").Commit()
+	wf, err := NewWorkflow("rebuild-def").Step("def.step1").Step("def.step2").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	def, defErr := WorkflowToDefinition(wf)
 	if defErr != nil {
 		t.Fatal(defErr)
@@ -1084,9 +1147,12 @@ func TestNamedBuilderMethods(t *testing.T) {
 	}
 
 	// MapNamed
-	wf := NewWorkflow("nb-test").
+	wf, err := NewWorkflow("nb-test").
 		MapNamed("nb.transform").
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if wf.steps[0].mapFnName != "nb.transform" {
 		t.Fatalf("expected mapFnName 'nb.transform', got %q", wf.steps[0].mapFnName)
 	}
@@ -1095,17 +1161,23 @@ func TestNamedBuilderMethods(t *testing.T) {
 	}
 
 	// DoUntilNamed
-	wf2 := NewWorkflow("nb-until").
+	wf2, err := NewWorkflow("nb-until").
 		DoUntilNamed(Step("nb.task"), "nb.cond").
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if wf2.steps[0].loopCondName != "nb.cond" {
 		t.Fatalf("expected loopCondName 'nb.cond', got %q", wf2.steps[0].loopCondName)
 	}
 
 	// DoWhileNamed
-	wf3 := NewWorkflow("nb-while").
+	wf3, err := NewWorkflow("nb-while").
 		DoWhileNamed(Step("nb.task"), "nb.cond").
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if wf3.steps[0].loopCondName != "nb.cond" {
 		t.Fatalf("expected loopCondName 'nb.cond', got %q", wf3.steps[0].loopCondName)
 	}
@@ -1134,24 +1206,30 @@ func TestDefinitionAllStepKinds(t *testing.T) {
 	Condition("all.has-more", func(ctx *Ctx) bool { return false })
 	MapFn("all.transform", func(ctx *Ctx) {})
 
-	// Build a sub-workflow for stepSub
-	subWf := NewWorkflow("all-sub").Step("all.task3").Commit()
+	// Build a sub-workflow for StepSub
+	subWf, err := NewWorkflow("all-sub").Step("all.task3").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	wf := NewWorkflow("all-kinds").
-		Step("all.task1").                                           // stepSingle
-		Stage("validation", Step("all.task1"), Step("all.task2")).   // stepStage
-		Parallel(Step("all.task1"), Step("all.task2")).              // stepParallel
-		Branch(                                                     // stepBranch
+	wf, err := NewWorkflow("all-kinds").
+		Step("all.task1").                                           // StepSingle
+		Stage("validation", Step("all.task1"), Step("all.task2")).   // StepStage
+		Parallel(Step("all.task1"), Step("all.task2")).              // StepParallel
+		Branch(                                                     // StepBranch
 			WhenNamed("all.is-ready").Step("all.task1"),
 			Default().Step("all.task2"),
 		).
-		ForEach("items", Step("all.task1"), WithConcurrency(3)).    // stepForEach
-		MapNamed("all.transform").                                  // stepMap
-		DoUntilNamed(Step("all.loop"), "all.is-ready").             // stepDoUntil
-		DoWhileNamed(Step("all.loop"), "all.has-more").             // stepDoWhile
-		Sub(subWf).                                                 // stepSub
-		Sleep(5 * time.Second).                                     // stepSleep
+		ForEach("items", Step("all.task1"), WithConcurrency(3)).    // StepForEach
+		MapNamed("all.transform").                                  // StepMap
+		DoUntilNamed(Step("all.loop"), "all.is-ready").             // StepDoUntil
+		DoWhileNamed(Step("all.loop"), "all.has-more").             // StepDoWhile
+		Sub(subWf).                                                 // StepSub
+		Sleep(5 * time.Second).                                     // StepSleep
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Serialize
 	def, err := WorkflowToDefinition(wf)
@@ -1241,7 +1319,7 @@ func TestDefinitionAllStepKinds(t *testing.T) {
 	}
 
 	// Verify rebuilt step kinds match
-	expectedStepKinds := []stepKind{stepSingle, stepStage, stepParallel, stepBranch, stepForEach, stepMap, stepDoUntil, stepDoWhile, stepSub, stepSleep}
+	expectedStepKinds := []StepKind{StepSingle, StepStage, StepParallel, StepBranch, StepForEach, StepMap, StepDoUntil, StepDoWhile, StepSub, StepSleep}
 	for i, expected := range expectedStepKinds {
 		if rebuilt.steps[i].kind != expected {
 			t.Fatalf("rebuilt step %d: expected kind %d, got %d", i, expected, rebuilt.steps[i].kind)
@@ -1269,10 +1347,13 @@ func TestDefinitionAnonymousError(t *testing.T) {
 	Task("anon.task", func(ctx *Ctx) error { return nil })
 
 	// Anonymous branch condition → error
-	wfBranch := NewWorkflow("anon-branch").
+	wfBranch, err := NewWorkflow("anon-branch").
 		Branch(When(func(ctx *Ctx) bool { return true }).Step("anon.task")).
 		Commit()
-	_, err := WorkflowToDefinition(wfBranch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = WorkflowToDefinition(wfBranch)
 	if err == nil {
 		t.Fatal("expected error for anonymous branch condition")
 	}
@@ -1281,9 +1362,12 @@ func TestDefinitionAnonymousError(t *testing.T) {
 	}
 
 	// Anonymous map function → error
-	wfMap := NewWorkflow("anon-map").
+	wfMap, err := NewWorkflow("anon-map").
 		Map(func(ctx *Ctx) {}).
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, err = WorkflowToDefinition(wfMap)
 	if err == nil {
 		t.Fatal("expected error for anonymous map function")
@@ -1293,9 +1377,12 @@ func TestDefinitionAnonymousError(t *testing.T) {
 	}
 
 	// Anonymous loop condition → error
-	wfLoop := NewWorkflow("anon-loop").
+	wfLoop, err := NewWorkflow("anon-loop").
 		DoUntil(Step("anon.task"), func(ctx *Ctx) bool { return true }).
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, err = WorkflowToDefinition(wfLoop)
 	if err == nil {
 		t.Fatal("expected error for anonymous loop condition")
@@ -1317,11 +1404,17 @@ func TestDefinitionSubWorkflow(t *testing.T) {
 		return nil
 	})
 
-	inner := NewWorkflow("inner-wf").Step("sub.inner").Commit()
-	outer := NewWorkflow("outer-wf").
+	inner, err := NewWorkflow("inner-wf").Step("sub.inner").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer, err := NewWorkflow("outer-wf").
 		Step("sub.outer").
 		Sub(inner).
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Serialize
 	def, err := WorkflowToDefinition(outer)
@@ -1420,7 +1513,10 @@ func TestRecoverSleepingPastDue(t *testing.T) {
 	ctx := context.Background()
 
 	// Cache a workflow for the wake function to find
-	wf := NewWorkflow("recover-wake").Step("recover.wake").Commit()
+	wf, err := NewWorkflow("recover-wake").Step("recover.wake").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine.cacheWorkflow(wf)
 
 	// Simulate a sleeping run whose wake time has passed
@@ -1513,11 +1609,14 @@ func TestIntegration_TagsAndMutations(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("int-combo").
+	wf, err := NewWorkflow("int-combo").
 		Step("int.setup").
 		Step("int.opt", WithStepTags("optional")).
 		Step("int.finish").
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, err := New()
 	if err != nil {
@@ -1552,7 +1651,10 @@ func TestIntegration_MiddlewareAndIPC(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("int-mw-ipc").Step("int.ipc").Commit()
+	wf, err := NewWorkflow("int-mw-ipc").Step("int.ipc").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, err := New(
 		WithTaskMiddleware(func(tctx *Ctx, taskName string, next func() error) error {
 			mu.Lock()
@@ -1634,7 +1736,10 @@ func TestLoggingPlugin(t *testing.T) {
 	})
 
 	logger := &capturingLogger{}
-	wf := NewWorkflow("logging-test").Step("log.task1").Commit()
+	wf, err := NewWorkflow("logging-test").Step("log.task1").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, err := New(WithPlugin(LoggingPlugin(logger)))
 	if err != nil {
 		t.Fatal(err)
@@ -1698,11 +1803,14 @@ func TestMiddlewarePanicRecovery(t *testing.T) {
 		return nil
 	})
 
-	panicMW := func(ctx context.Context, s *step, runID RunID, next func() error) error {
+	panicMW := func(ctx context.Context, info StepInfo, runID RunID, next func() error) error {
 		panic("test panic from middleware")
 	}
 
-	wf := NewWorkflow("panic-mw-test").Step("panic.task").Commit()
+	wf, err := NewWorkflow("panic-mw-test").Step("panic.task").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, err := New(WithStepMiddleware(panicMW))
 	if err != nil {
 		t.Fatal(err)
@@ -1740,10 +1848,13 @@ func TestForEachTaskMiddleware(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("foreach-task-mw").
+	wf, err := NewWorkflow("foreach-task-mw").
 		Step("fe.mw.prepare").
 		ForEach("items", Step("fe.mw.process")).
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, err := New(
 		WithTaskMiddleware(func(tctx *Ctx, taskName string, next func() error) error {
@@ -1789,9 +1900,18 @@ func TestWithCacheSize(t *testing.T) {
 	Task("cache.t2", func(ctx *Ctx) error { return nil })
 	Task("cache.t3", func(ctx *Ctx) error { return nil })
 
-	wf1 := NewWorkflow("cache-wf-1").Step("cache.t1").Commit()
-	wf2 := NewWorkflow("cache-wf-2").Step("cache.t2").Commit()
-	wf3 := NewWorkflow("cache-wf-3").Step("cache.t3").Commit()
+	wf1, err := NewWorkflow("cache-wf-1").Step("cache.t1").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wf2, err := NewWorkflow("cache-wf-2").Step("cache.t2").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wf3, err := NewWorkflow("cache-wf-3").Step("cache.t3").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	engine, err := New(WithCacheSize(2))
 	if err != nil {
@@ -1953,7 +2073,10 @@ func TestMiddlewareOrdering(t *testing.T) {
 	}
 	defer engine.Close()
 
-	wf := NewWorkflow("mw-order").Step("mw.order.task").Commit()
+	wf, err := NewWorkflow("mw-order").Step("mw.order.task").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	result, err := engine.RunSync(context.Background(), wf, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -2015,7 +2138,10 @@ func TestResumeKeyCleanup(t *testing.T) {
 	}
 	defer engine.Close()
 
-	wf := NewWorkflow("resume-key-cleanup").Step("rkc.task").Commit()
+	wf, err := NewWorkflow("resume-key-cleanup").Step("rkc.task").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// First run: suspends
 	result1, err := engine.RunSync(context.Background(), wf, nil)
@@ -2027,7 +2153,10 @@ func TestResumeKeyCleanup(t *testing.T) {
 	}
 
 	// Resume with data
-	wf2 := NewWorkflow("resume-key-cleanup").Step("rkc.task").Commit()
+	wf2, err := NewWorkflow("resume-key-cleanup").Step("rkc.task").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	result2, err := engine.Resume(context.Background(), wf2, result1.RunID, P{"approved": true})
 	if err != nil {
 		t.Fatal(err)
@@ -2088,9 +2217,12 @@ func TestParallelPerRefResume(t *testing.T) {
 	// Workflow: parallel with 3 refs, middle one suspends
 	// Note: Parallel runs all concurrently, so suspend from one branch propagates
 	// We need to test with a Stage (sequential) to demonstrate per-ref skip
-	wf := NewWorkflow("pref-test").
+	wf, err := NewWorkflow("pref-test").
 		Stage("group", Step("pref.a"), Step("pref.b"), Step("pref.c")).
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	result1, err := engine.RunSync(context.Background(), wf, nil)
 	if err != nil {
@@ -2112,9 +2244,12 @@ func TestParallelPerRefResume(t *testing.T) {
 	}
 
 	// Resume: pref.a should be SKIPPED (per-ref completion), pref.b resumes, pref.c runs
-	wf2 := NewWorkflow("pref-test").
+	wf2, err := NewWorkflow("pref-test").
 		Stage("group", Step("pref.a"), Step("pref.b"), Step("pref.c")).
 		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	result2, err := engine.Resume(context.Background(), wf2, result1.RunID, nil)
 	if err != nil {
@@ -2135,5 +2270,389 @@ func TestParallelPerRefResume(t *testing.T) {
 	// pref.c should have run once
 	if atomic.LoadInt32(&taskCCount) != 1 {
 		t.Fatalf("expected taskC to be 1 after resume, got %d", atomic.LoadInt32(&taskCCount))
+	}
+}
+
+// === Task 10: Multiple Suspend-Resume Cycles ===
+
+func TestMultipleSuspendResumeCycles(t *testing.T) {
+	ResetTaskRegistry()
+
+	var step1Count, step2Count, step3Count, step4Count int32
+
+	Task("msr.step1", func(ctx *Ctx) error {
+		atomic.AddInt32(&step1Count, 1)
+		return nil
+	})
+	// step2 suspends unless resume data has "step2_approved"
+	Task("msr.step2", func(ctx *Ctx) error {
+		atomic.AddInt32(&step2Count, 1)
+		if !ResumeData[bool](ctx, "step2_approved") {
+			return Suspend(ctx, P{"at": "step2"})
+		}
+		return nil
+	})
+	// step3 suspends unless resume data has "step3_approved"
+	Task("msr.step3", func(ctx *Ctx) error {
+		atomic.AddInt32(&step3Count, 1)
+		if !ResumeData[bool](ctx, "step3_approved") {
+			return Suspend(ctx, P{"at": "step3"})
+		}
+		return nil
+	})
+	Task("msr.step4", func(ctx *Ctx) error {
+		atomic.AddInt32(&step4Count, 1)
+		Set(ctx, "final", true)
+		return nil
+	})
+
+	buildWf := func() *Workflow {
+		wf, err := NewWorkflow("multi-suspend").
+			Step("msr.step1").
+			Step("msr.step2").
+			Step("msr.step3").
+			Step("msr.step4").
+			Commit()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return wf
+	}
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	// Run 1: suspends at step2 (step2_approved not set)
+	result, err := engine.RunSync(context.Background(), buildWf(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Suspended {
+		t.Fatalf("run1: expected Suspended, got %s", result.Status)
+	}
+
+	// Resume 1: pass step2_approved=true → step2 passes, step3 suspends
+	result, err = engine.Resume(context.Background(), buildWf(), result.RunID, P{"step2_approved": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Suspended {
+		t.Fatalf("resume1: expected Suspended, got %s (error: %v)", result.Status, result.Error)
+	}
+
+	// Resume 2: pass step3_approved=true → step3 passes, step4 runs, workflow completes
+	result, err = engine.Resume(context.Background(), buildWf(), result.RunID, P{"step3_approved": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("resume2: expected Completed, got %s (error: %v)", result.Status, result.Error)
+	}
+
+	// step1: ran once (skipped on resumes)
+	if c := atomic.LoadInt32(&step1Count); c != 1 {
+		t.Fatalf("step1 expected 1 run, got %d", c)
+	}
+	// step2: ran twice (initial suspend + resume1 pass)
+	if c := atomic.LoadInt32(&step2Count); c != 2 {
+		t.Fatalf("step2 expected 2 runs, got %d", c)
+	}
+	// step3: ran twice (resume1 suspend + resume2 pass)
+	if c := atomic.LoadInt32(&step3Count); c != 2 {
+		t.Fatalf("step3 expected 2 runs, got %d", c)
+	}
+	// step4: ran once (only in resume2)
+	if c := atomic.LoadInt32(&step4Count); c != 1 {
+		t.Fatalf("step4 expected 1 run, got %d", c)
+	}
+	if result.Store["final"] != true {
+		t.Fatal("expected final=true in store")
+	}
+}
+
+// === Task 11: Concurrent Mutations from Parallel Steps ===
+
+func TestConcurrentMutationsFromParallel(t *testing.T) {
+	ResetTaskRegistry()
+
+	var mu sync.Mutex
+	var order []string
+
+	Task("cmp.par_a", func(ctx *Ctx) error {
+		mu.Lock()
+		order = append(order, "par_a")
+		mu.Unlock()
+		InsertAfter(ctx, "cmp.dynamic_a")
+		return nil
+	})
+	Task("cmp.par_b", func(ctx *Ctx) error {
+		mu.Lock()
+		order = append(order, "par_b")
+		mu.Unlock()
+		InsertAfter(ctx, "cmp.dynamic_b")
+		return nil
+	})
+	Task("cmp.dynamic_a", func(ctx *Ctx) error {
+		mu.Lock()
+		order = append(order, "dynamic_a")
+		mu.Unlock()
+		return nil
+	})
+	Task("cmp.dynamic_b", func(ctx *Ctx) error {
+		mu.Lock()
+		order = append(order, "dynamic_b")
+		mu.Unlock()
+		return nil
+	})
+	Task("cmp.post", func(ctx *Ctx) error {
+		mu.Lock()
+		order = append(order, "post")
+		mu.Unlock()
+		Set(ctx, "post_ran", true)
+		return nil
+	})
+
+	wf, err := NewWorkflow("conc-mutations").
+		Parallel(Step("cmp.par_a"), Step("cmp.par_b")).
+		Step("cmp.post").
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s (error: %v)", result.Status, result.Error)
+	}
+
+	// Both parallel tasks should have run
+	mu.Lock()
+	hasParA, hasParB, hasDynA, hasDynB, hasPost := false, false, false, false, false
+	for _, s := range order {
+		switch s {
+		case "par_a":
+			hasParA = true
+		case "par_b":
+			hasParB = true
+		case "dynamic_a":
+			hasDynA = true
+		case "dynamic_b":
+			hasDynB = true
+		case "post":
+			hasPost = true
+		}
+	}
+	mu.Unlock()
+
+	if !hasParA || !hasParB {
+		t.Fatalf("expected both parallel tasks to run, got order: %v", order)
+	}
+	if !hasDynA || !hasDynB {
+		t.Fatalf("expected both dynamic mutations to execute, got order: %v", order)
+	}
+	if !hasPost {
+		t.Fatalf("expected post step to run, got order: %v", order)
+	}
+}
+
+// === Task 12: Cancel During Retry Delay ===
+
+func TestRetryCancellation(t *testing.T) {
+	ResetTaskRegistry()
+
+	var attempts int32
+
+	Task("rc.always_fail", func(ctx *Ctx) error {
+		atomic.AddInt32(&attempts, 1)
+		return fmt.Errorf("always fails")
+	}, WithRetry(5), WithRetryDelay(500*time.Millisecond))
+
+	wf, err := NewWorkflow("retry-cancel").Step("rc.always_fail").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	runID, err := engine.Run(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Let first attempt fail and enter retry delay
+	time.Sleep(150 * time.Millisecond)
+
+	// Cancel during retry delay
+	if err := engine.Cancel(context.Background(), runID); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := engine.Wait(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if result.Status != Cancelled && result.Status != Failed {
+		t.Fatalf("expected Cancelled or Failed, got %s", result.Status)
+	}
+
+	// Should not have exhausted all retries
+	finalAttempts := atomic.LoadInt32(&attempts)
+	if finalAttempts >= 6 { // 1 initial + 5 retries = 6 max
+		t.Fatalf("expected fewer than 6 attempts (cancelled during retry), got %d", finalAttempts)
+	}
+}
+
+// === Task 13: Panic Recovery for User Functions ===
+
+func TestMapPanicRecovery(t *testing.T) {
+	ResetTaskRegistry()
+
+	wf, err := NewWorkflow("map-panic").
+		Map(func(ctx *Ctx) {
+			panic("map boom")
+		}).
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Failed {
+		t.Fatalf("expected Failed, got %s", result.Status)
+	}
+	if result.Error == nil {
+		t.Fatal("expected error to be set")
+	}
+}
+
+func TestBranchConditionPanicRecovery(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("bcp.task", func(ctx *Ctx) error { return nil })
+
+	wf, err := NewWorkflow("branch-cond-panic").
+		Branch(
+			When(func(ctx *Ctx) bool { panic("cond boom") }).Step("bcp.task"),
+		).
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Failed {
+		t.Fatalf("expected Failed, got %s", result.Status)
+	}
+	if result.Error == nil {
+		t.Fatal("expected error to be set")
+	}
+}
+
+func TestLoopConditionPanicRecovery(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("lcp.task", func(ctx *Ctx) error { return nil })
+
+	wf, err := NewWorkflow("loop-cond-panic").
+		DoUntil(Step("lcp.task"), func(ctx *Ctx) bool { panic("loop boom") }).
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Failed {
+		t.Fatalf("expected Failed, got %s", result.Status)
+	}
+	if result.Error == nil {
+		t.Fatal("expected error to be set")
+	}
+}
+
+// === Task 14: Sleep Timer Wake Primary Path ===
+
+func TestSleepTimerWakePrimaryPath(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("stw.after_sleep", func(ctx *Ctx) error {
+		Set(ctx, "woken", true)
+		return nil
+	})
+
+	wf, err := NewWorkflow("sleep-wake").
+		Sleep(100 * time.Millisecond).
+		Step("stw.after_sleep").
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Memory persistence uses blocking sleep (inline time.Sleep),
+	// which tests the primary sleep-step-then-continue path.
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	start := time.Now()
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s (error: %v)", result.Status, result.Error)
+	}
+	if result.Store["woken"] != true {
+		t.Fatal("expected woken=true in store")
+	}
+	// Verify that the sleep actually blocked (not skipped)
+	if elapsed < 80*time.Millisecond {
+		t.Fatalf("expected sleep to block ~100ms, but only took %v", elapsed)
 	}
 }

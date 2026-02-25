@@ -132,7 +132,7 @@ func TestStoreSerializationRoundTrip(t *testing.T) {
 }
 
 func TestSpawnServer_StartStop(t *testing.T) {
-	ss, err := newSpawnServer(nil)
+	ss, err := newSpawnServer(nil, "test-secret")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,10 +153,12 @@ func TestSpawn_SingleItem(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("spawn-single").
+	wf, err := NewWorkflow("spawn-single").
 		ForEach("items", Step("spawn.echo"), WithSpawn()).
 		Commit()
-
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, err := New()
 	if err != nil {
 		t.Fatal(err)
@@ -184,10 +186,12 @@ func TestSpawn_ConcurrentItems(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("spawn-concurrent").
+	wf, err := NewWorkflow("spawn-concurrent").
 		ForEach("numbers", Step("spawn.add"), WithConcurrency(3), WithSpawn()).
 		Commit()
-
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, err := New()
 	if err != nil {
 		t.Fatal(err)
@@ -212,10 +216,12 @@ func TestSpawn_ChildError(t *testing.T) {
 		return fmt.Errorf("intentional child crash")
 	})
 
-	wf := NewWorkflow("spawn-crash").
+	wf, err := NewWorkflow("spawn-crash").
 		ForEach("items", Step("spawn.crash"), WithSpawn()).
 		Commit()
-
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, err := New()
 	if err != nil {
 		t.Fatal(err)
@@ -242,10 +248,12 @@ func TestSpawn_ContextCancellation(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("spawn-cancel").
+	wf, err := NewWorkflow("spawn-cancel").
 		ForEach("items", Step("spawn.slow"), WithSpawn()).
 		Commit()
-
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, err := New()
 	if err != nil {
 		t.Fatal(err)
@@ -280,10 +288,12 @@ func TestSpawn_SendIPC(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("spawn-ipc").
+	wf, err := NewWorkflow("spawn-ipc").
 		ForEach("items", Step("spawn.send"), WithSpawn()).
 		Commit()
-
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, err := New()
 	if err != nil {
 		t.Fatal(err)
@@ -313,10 +323,12 @@ func TestSpawn_ForEachItemAccess(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("spawn-foreach-item").
+	wf, err := NewWorkflow("spawn-foreach-item").
 		ForEach("items", Step("spawn.echo"), WithConcurrency(2), WithSpawn()).
 		Commit()
-
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, err := New()
 	if err != nil {
 		t.Fatal(err)
@@ -357,12 +369,14 @@ func TestSpawn_EndToEnd(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("spawn-e2e").
+	wf, err := NewWorkflow("spawn-e2e").
 		Step("spawn.prepare").
 		ForEach("items", Step("spawn.echo"), WithConcurrency(2), WithSpawn()).
 		Step("spawn.finalize").
 		Commit()
-
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, err := New()
 	if err != nil {
 		t.Fatal(err)
@@ -396,10 +410,12 @@ func TestSpawn_EmptyCollection(t *testing.T) {
 		return nil
 	})
 
-	wf := NewWorkflow("spawn-empty").
+	wf, err := NewWorkflow("spawn-empty").
 		ForEach("items", Step("spawn.echo"), WithSpawn()).
 		Commit()
-
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, err := New()
 	if err != nil {
 		t.Fatal(err)
@@ -436,7 +452,7 @@ func TestSpawn_AllFourMiddlewareLevels(t *testing.T) {
 			atomic.AddInt32(&engineMW, 1)
 			return next()
 		}),
-		WithStepMiddleware(func(ctx context.Context, s *step, runID RunID, next func() error) error {
+		WithStepMiddleware(func(ctx context.Context, info StepInfo, runID RunID, next func() error) error {
 			atomic.AddInt32(&stepMW, 1)
 			return next()
 		}),
@@ -455,11 +471,13 @@ func TestSpawn_AllFourMiddlewareLevels(t *testing.T) {
 	defer engine.Close()
 
 	// Workflow: normal task step + ForEach with spawn
-	wf := NewWorkflow("mw-all-four").
+	wf, err := NewWorkflow("mw-all-four").
 		Step("spawn.mw_setup").
 		ForEach("items", Step("spawn.mw_echo"), WithSpawn()).
 		Commit()
-
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -506,10 +524,12 @@ func TestSpawn_ChildRetryRespected(t *testing.T) {
 		return nil
 	}, WithRetry(1))
 
-	wf := NewWorkflow("spawn-retry").
+	wf, err := NewWorkflow("spawn-retry").
 		ForEach("items", Step("spawn.retry_flaky"), WithSpawn()).
 		Commit()
-
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, err := New()
 	if err != nil {
 		t.Fatal(err)

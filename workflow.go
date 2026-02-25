@@ -5,59 +5,71 @@ import (
 	"time"
 )
 
-// stepKind identifies the type of step in a workflow.
-type stepKind int
+// StepKind identifies the type of step in a workflow.
+type StepKind int
 
 const (
-	stepSingle   stepKind = iota // single task execution
-	stepParallel                 // parallel fan-out of multiple tasks
-	stepBranch                   // conditional branching
-	stepForEach                  // iteration over a collection
-	stepMap                      // inline data transformation
-	stepDoUntil                  // repeat-until loop
-	stepDoWhile                  // while-do loop
-	stepSub                      // nested sub-workflow
-	stepSleep                    // timed delay
-	stepStage                    // named group of sequential steps
+	StepSingle   StepKind = iota // single task execution
+	StepParallel                 // parallel fan-out of multiple tasks
+	StepBranch                   // conditional branching
+	StepForEach                  // iteration over a collection
+	StepMap                      // inline data transformation
+	StepDoUntil                  // repeat-until loop
+	StepDoWhile                  // while-do loop
+	StepSub                      // nested sub-workflow
+	StepSleep                    // timed delay
+	StepStage                    // named group of sequential steps
 )
 
 // step is one unit of execution in a workflow.
 type step struct {
 	id       string
-	kind     stepKind
+	kind     StepKind
 	name     string
 	disabled bool     // dynamically disabled via mutations
 	tags     []string // tags for querying and conditional execution
 
-	// stepSingle
+	// StepSingle
 	taskName string
 
-	// stepParallel / stepStage
+	// StepParallel / StepStage
 	refs []StepRef
 
-	// stepBranch
+	// StepBranch
 	cases []BranchCase
 
-	// stepForEach
+	// StepForEach
 	collectionKey string
 	forEachRef    StepRef
 	concurrency   int
 	useSpawn      bool
 
-	// stepMap
+	// StepMap
 	mapFn     func(*Ctx)
 	mapFnName string // named variant for serializable workflows
 
-	// stepDoUntil / stepDoWhile
+	// StepDoUntil / StepDoWhile
 	loopRef      StepRef
 	loopCond     func(*Ctx) bool
 	loopCondName string // named variant for serializable workflows
 
-	// stepSub
+	// StepSub
 	subWorkflow *Workflow
 
-	// stepSleep
+	// StepSleep
 	sleepDuration time.Duration
+}
+
+// info returns a public StepInfo snapshot for middleware consumption.
+func (s *step) info() StepInfo {
+	return StepInfo{
+		ID:       s.id,
+		Name:     s.name,
+		Kind:     s.kind,
+		Tags:     s.tags,
+		Disabled: s.disabled,
+		TaskName: s.taskName,
+	}
 }
 
 // Workflow is the compiled result of a builder chain.
@@ -255,46 +267,47 @@ func WithStepTags(tags ...string) StepOption {
 
 // builderStep is a deferred step captured by the builder before Commit.
 type builderStep struct {
-	kind stepKind
+	kind StepKind
 	name string
 	tags []string
 
-	// stepSingle
+	// StepSingle
 	taskName string
 
-	// stepParallel / stepStage
+	// StepParallel / StepStage
 	refs []StepRef
 
-	// stepBranch
+	// StepBranch
 	cases []BranchCase
 
-	// stepForEach
+	// StepForEach
 	collectionKey string
 	forEachRef    StepRef
 	forEachOpts   []ForEachOption
 
-	// stepMap
+	// StepMap
 	mapFn     func(*Ctx)
 	mapFnName string // named variant for serializable workflows
 
-	// stepDoUntil / stepDoWhile
+	// StepDoUntil / StepDoWhile
 	loopRef      StepRef
 	loopCond     func(*Ctx) bool
 	loopCondName string // named variant for serializable workflows
 
-	// stepSub
+	// StepSub
 	subWorkflow *Workflow
 
-	// stepSleep
+	// StepSleep
 	sleepDuration time.Duration
 }
 
 // WorkflowBuilder constructs a Workflow using a fluent API.
 type WorkflowBuilder struct {
-	id    string
-	name  string
-	cfg   workflowConfig
-	steps []builderStep
+	id        string
+	name      string
+	cfg       workflowConfig
+	steps     []builderStep
+	committed bool
 }
 
 // NewWorkflow starts building a new workflow with the given ID and options.
@@ -315,8 +328,11 @@ func NewWorkflow(id string, opts ...WorkflowOption) *WorkflowBuilder {
 //
 //	wf.Step("charge", gostage.WithStepTags("billing"))
 func (b *WorkflowBuilder) Step(taskName string, opts ...StepOption) *WorkflowBuilder {
+	if b.committed {
+		panic("gostage: cannot modify workflow after Commit()")
+	}
 	bs := builderStep{
-		kind:     stepSingle,
+		kind:     StepSingle,
 		taskName: taskName,
 		name:     taskName,
 	}
@@ -331,8 +347,11 @@ func (b *WorkflowBuilder) Step(taskName string, opts ...StepOption) *WorkflowBui
 //
 //	wf.Stage("validation", gostage.Step("validate.input"), gostage.Step("validate.rules"))
 func (b *WorkflowBuilder) Stage(name string, refs ...StepRef) *WorkflowBuilder {
+	if b.committed {
+		panic("gostage: cannot modify workflow after Commit()")
+	}
 	b.steps = append(b.steps, builderStep{
-		kind: stepStage,
+		kind: StepStage,
 		name: name,
 		refs: refs,
 	})
@@ -343,8 +362,11 @@ func (b *WorkflowBuilder) Stage(name string, refs ...StepRef) *WorkflowBuilder {
 //
 //	wf.Parallel(gostage.Step("charge"), gostage.Step("reserve"), gostage.Step("check"))
 func (b *WorkflowBuilder) Parallel(refs ...StepRef) *WorkflowBuilder {
+	if b.committed {
+		panic("gostage: cannot modify workflow after Commit()")
+	}
 	b.steps = append(b.steps, builderStep{
-		kind: stepParallel,
+		kind: StepParallel,
 		name: "parallel",
 		refs: refs,
 	})
@@ -358,8 +380,11 @@ func (b *WorkflowBuilder) Parallel(refs ...StepRef) *WorkflowBuilder {
 //	    gostage.Default().Step("normal"),
 //	)
 func (b *WorkflowBuilder) Branch(cases ...BranchCase) *WorkflowBuilder {
+	if b.committed {
+		panic("gostage: cannot modify workflow after Commit()")
+	}
 	b.steps = append(b.steps, builderStep{
-		kind:  stepBranch,
+		kind:  StepBranch,
 		name:  "branch",
 		cases: cases,
 	})
@@ -370,8 +395,11 @@ func (b *WorkflowBuilder) Branch(cases ...BranchCase) *WorkflowBuilder {
 //
 //	wf.ForEach("tracks", gostage.Step("download"), gostage.WithConcurrency(4))
 func (b *WorkflowBuilder) ForEach(key string, ref StepRef, opts ...ForEachOption) *WorkflowBuilder {
+	if b.committed {
+		panic("gostage: cannot modify workflow after Commit()")
+	}
 	b.steps = append(b.steps, builderStep{
-		kind:          stepForEach,
+		kind:          StepForEach,
 		name:          "forEach:" + key,
 		collectionKey: key,
 		forEachRef:    ref,
@@ -387,8 +415,11 @@ func (b *WorkflowBuilder) ForEach(key string, ref StepRef, opts ...ForEachOption
 //	    return gostage.Get[string](ctx, "status") == "ready"
 //	})
 func (b *WorkflowBuilder) DoUntil(ref StepRef, cond func(*Ctx) bool) *WorkflowBuilder {
+	if b.committed {
+		panic("gostage: cannot modify workflow after Commit()")
+	}
 	b.steps = append(b.steps, builderStep{
-		kind:     stepDoUntil,
+		kind:     StepDoUntil,
 		name:     "doUntil",
 		loopRef:  ref,
 		loopCond: cond,
@@ -403,8 +434,11 @@ func (b *WorkflowBuilder) DoUntil(ref StepRef, cond func(*Ctx) bool) *WorkflowBu
 //	    return gostage.Get[bool](ctx, "has_more")
 //	})
 func (b *WorkflowBuilder) DoWhile(ref StepRef, cond func(*Ctx) bool) *WorkflowBuilder {
+	if b.committed {
+		panic("gostage: cannot modify workflow after Commit()")
+	}
 	b.steps = append(b.steps, builderStep{
-		kind:     stepDoWhile,
+		kind:     StepDoWhile,
 		name:     "doWhile",
 		loopRef:  ref,
 		loopCond: cond,
@@ -419,8 +453,11 @@ func (b *WorkflowBuilder) DoWhile(ref StepRef, cond func(*Ctx) bool) *WorkflowBu
 //	    gostage.Set(ctx, "records", parseCSV(raw))
 //	})
 func (b *WorkflowBuilder) Map(fn func(*Ctx)) *WorkflowBuilder {
+	if b.committed {
+		panic("gostage: cannot modify workflow after Commit()")
+	}
 	b.steps = append(b.steps, builderStep{
-		kind:  stepMap,
+		kind:  StepMap,
 		name:  "map",
 		mapFn: fn,
 	})
@@ -431,8 +468,11 @@ func (b *WorkflowBuilder) Map(fn func(*Ctx)) *WorkflowBuilder {
 //
 //	wf.Sub(otherWf)
 func (b *WorkflowBuilder) Sub(wf *Workflow) *WorkflowBuilder {
+	if b.committed {
+		panic("gostage: cannot modify workflow after Commit()")
+	}
 	b.steps = append(b.steps, builderStep{
-		kind:        stepSub,
+		kind:        StepSub,
 		name:        "sub:" + wf.ID,
 		subWorkflow: wf,
 	})
@@ -445,8 +485,11 @@ func (b *WorkflowBuilder) Sub(wf *Workflow) *WorkflowBuilder {
 //
 //	wf.Sleep(time.Hour)
 func (b *WorkflowBuilder) Sleep(d time.Duration) *WorkflowBuilder {
+	if b.committed {
+		panic("gostage: cannot modify workflow after Commit()")
+	}
 	b.steps = append(b.steps, builderStep{
-		kind:          stepSleep,
+		kind:          StepSleep,
 		name:          "sleep",
 		sleepDuration: d,
 	})
@@ -479,12 +522,15 @@ func WhenNamed(condName string) *WhenClause {
 //	})
 //	wf.MapNamed("parse-csv")
 func (b *WorkflowBuilder) MapNamed(mapFnName string) *WorkflowBuilder {
+	if b.committed {
+		panic("gostage: cannot modify workflow after Commit()")
+	}
 	fn := lookupMapFn(mapFnName)
 	if fn == nil {
 		panic(fmt.Sprintf("gostage: map function %q not registered", mapFnName))
 	}
 	b.steps = append(b.steps, builderStep{
-		kind:      stepMap,
+		kind:      StepMap,
 		name:      "map",
 		mapFn:     fn,
 		mapFnName: mapFnName,
@@ -500,12 +546,15 @@ func (b *WorkflowBuilder) MapNamed(mapFnName string) *WorkflowBuilder {
 //	})
 //	wf.DoUntilNamed(gostage.Step("poll"), "is-ready")
 func (b *WorkflowBuilder) DoUntilNamed(ref StepRef, condName string) *WorkflowBuilder {
+	if b.committed {
+		panic("gostage: cannot modify workflow after Commit()")
+	}
 	fn := lookupCondition(condName)
 	if fn == nil {
 		panic(fmt.Sprintf("gostage: condition %q not registered", condName))
 	}
 	b.steps = append(b.steps, builderStep{
-		kind:         stepDoUntil,
+		kind:         StepDoUntil,
 		name:         "doUntil",
 		loopRef:      ref,
 		loopCond:     fn,
@@ -522,12 +571,15 @@ func (b *WorkflowBuilder) DoUntilNamed(ref StepRef, condName string) *WorkflowBu
 //	})
 //	wf.DoWhileNamed(gostage.Step("fetch.page"), "has-more")
 func (b *WorkflowBuilder) DoWhileNamed(ref StepRef, condName string) *WorkflowBuilder {
+	if b.committed {
+		panic("gostage: cannot modify workflow after Commit()")
+	}
 	fn := lookupCondition(condName)
 	if fn == nil {
 		panic(fmt.Sprintf("gostage: condition %q not registered", condName))
 	}
 	b.steps = append(b.steps, builderStep{
-		kind:         stepDoWhile,
+		kind:         StepDoWhile,
 		name:         "doWhile",
 		loopRef:      ref,
 		loopCond:     fn,
@@ -537,8 +589,8 @@ func (b *WorkflowBuilder) DoWhileNamed(ref StepRef, condName string) *WorkflowBu
 }
 
 // Commit finalizes the builder and returns the compiled Workflow.
-// Panics if any referenced task is not registered.
-func (b *WorkflowBuilder) Commit() *Workflow {
+// Returns an error if any referenced task is not registered.
+func (b *WorkflowBuilder) Commit() (*Workflow, error) {
 	wf := &Workflow{
 		ID:    b.id,
 		Name:  b.name,
@@ -557,67 +609,80 @@ func (b *WorkflowBuilder) Commit() *Workflow {
 		}
 
 		switch bs.kind {
-		case stepSingle:
+		case StepSingle:
 			s.taskName = bs.taskName
-			validateTaskRef(bs.taskName)
-
-		case stepParallel:
-			s.refs = bs.refs
-			for _, ref := range bs.refs {
-				validateStepRef(ref)
+			if err := validateTaskRef(bs.taskName); err != nil {
+				return nil, err
 			}
 
-		case stepStage:
+		case StepParallel:
 			s.refs = bs.refs
 			for _, ref := range bs.refs {
-				validateStepRef(ref)
+				if err := validateStepRef(ref); err != nil {
+					return nil, err
+				}
 			}
 
-		case stepBranch:
+		case StepStage:
+			s.refs = bs.refs
+			for _, ref := range bs.refs {
+				if err := validateStepRef(ref); err != nil {
+					return nil, err
+				}
+			}
+
+		case StepBranch:
 			s.cases = bs.cases
 			for _, c := range bs.cases {
-				validateStepRef(c.ref)
+				if err := validateStepRef(c.ref); err != nil {
+					return nil, err
+				}
 			}
 
-		case stepForEach:
+		case StepForEach:
 			s.collectionKey = bs.collectionKey
 			s.forEachRef = bs.forEachRef
 			s.concurrency = 1 // default sequential
-			validateStepRef(bs.forEachRef)
+			if err := validateStepRef(bs.forEachRef); err != nil {
+				return nil, err
+			}
 			for _, opt := range bs.forEachOpts {
 				opt(&s)
 			}
 
-		case stepMap:
+		case StepMap:
 			if bs.mapFn == nil && bs.mapFnName == "" {
-				panic("gostage: Map step has nil function — use Map(fn) or MapNamed(name)")
+				return nil, fmt.Errorf("gostage: Map step has nil function — use Map(fn) or MapNamed(name)")
 			}
 			s.mapFn = bs.mapFn
 			s.mapFnName = bs.mapFnName
 
-		case stepDoUntil, stepDoWhile:
+		case StepDoUntil, StepDoWhile:
 			if bs.loopCond == nil && bs.loopCondName == "" {
-				panic("gostage: loop step has nil condition — use DoUntil/DoWhile with a condition or DoUntilNamed/DoWhileNamed")
+				return nil, fmt.Errorf("gostage: loop step has nil condition — use DoUntil/DoWhile with a condition or DoUntilNamed/DoWhileNamed")
 			}
 			s.loopRef = bs.loopRef
 			s.loopCond = bs.loopCond
 			s.loopCondName = bs.loopCondName
-			validateStepRef(bs.loopRef)
+			if err := validateStepRef(bs.loopRef); err != nil {
+				return nil, err
+			}
 
-		case stepSub:
+		case StepSub:
 			if bs.subWorkflow == nil {
-				panic("gostage: Sub step has nil workflow")
+				return nil, fmt.Errorf("gostage: Sub step has nil workflow")
 			}
 			s.subWorkflow = bs.subWorkflow
 
-		case stepSleep:
+		case StepSleep:
 			s.sleepDuration = bs.sleepDuration
 		}
 
 		wf.steps = append(wf.steps, s)
 	}
 
-	return wf
+	b.committed = true
+	return wf, nil
 }
 
 // clone creates an independent copy of the workflow for concurrent execution.
@@ -646,17 +711,18 @@ func (wf *Workflow) clone() *Workflow {
 	return cloned
 }
 
-// validateTaskRef panics if a task name is not registered.
-func validateTaskRef(name string) {
+// validateTaskRef returns an error if a task name is not registered.
+func validateTaskRef(name string) error {
 	if lookupTask(name) == nil {
-		panic(fmt.Sprintf("gostage: task %q not registered", name))
+		return fmt.Errorf("gostage: task %q not registered", name)
 	}
+	return nil
 }
 
-// validateStepRef panics if a StepRef references an unregistered task.
-func validateStepRef(ref StepRef) {
+// validateStepRef returns an error if a StepRef references an unregistered task.
+func validateStepRef(ref StepRef) error {
 	if ref.subWorkflow != nil {
-		return // sub-workflows are already validated
+		return nil // sub-workflows are already validated
 	}
-	validateTaskRef(ref.taskName)
+	return validateTaskRef(ref.taskName)
 }

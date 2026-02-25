@@ -67,11 +67,12 @@ func (e *SuspendError) Error() string {
 	return "suspended"
 }
 
-// SleepError is returned internally when a persistent sleep step executes.
-type SleepError struct {
-	WakeAt time.Time
+// sleepError is returned internally when a persistent sleep step executes.
+// This type is internal to the sleep step and not available to general task functions.
+type sleepError struct {
+	wakeAt time.Time
 }
 
-func (e *SleepError) Error() string {
-	return "sleeping until " + e.WakeAt.Format(time.RFC3339)
+func (e *sleepError) Error() string {
+	return "sleeping until " + e.wakeAt.Format(time.RFC3339)
 }

@@ -357,7 +357,30 @@ func (e *Engine) wakeWorkflow(runID RunID) {
 	}
 
 	e.pool.Submit(func() {
-		ctx := context.Background()
+		// Create cancellable context so woken workflows can be cancelled
+		ctx, cancel := context.WithCancel(context.Background())
+
+		// Register handle BEFORE execution so Cancel() can reach this run
+		handle := &runHandle{
+			cancel: cancel,
+			done:   make(chan *Result, 1),
+		}
+		e.mu.Lock()
+		if _, active := e.runs[runID]; active {
+			e.mu.Unlock()
+			cancel()
+			return // already running
+		}
+		e.runs[runID] = handle
+		e.mu.Unlock()
+
+		// Deferred cleanup
+		defer func() {
+			e.mu.Lock()
+			delete(e.runs, runID)
+			e.mu.Unlock()
+			cancel()
+		}()
 
 		run, err := e.persistence.LoadRun(ctx, runID)
 		if err != nil || run.Status != Sleeping {
@@ -398,16 +421,10 @@ func (e *Engine) wakeWorkflow(runID RunID) {
 		// Re-execute (resuming skips completed steps)
 		result := e.doExecute(ctx, wf, runID, true)
 
-		// If there's a waiting handle, send the result
-		e.mu.Lock()
-		handle, ok := e.runs[runID]
-		e.mu.Unlock()
-
-		if ok && handle.done != nil {
-			select {
-			case handle.done <- result:
-			default:
-			}
+		// Send result to waiting handle
+		select {
+		case handle.done <- result:
+		default:
 		}
 	})
 }
@@ -549,15 +566,15 @@ func (e *Engine) doExecute(ctx context.Context, wf *Workflow, runID RunID, resum
 		result.Status = Suspended
 		result.SuspendData = suspErr.Data
 
-	case errors.As(err, new(*SleepError)):
+	case errors.As(err, new(*sleepError)):
 		result.Status = Sleeping
-		var sleepErr *SleepError
+		var sleepErr *sleepError
 		errors.As(err, &sleepErr)
-		result.SuspendData = map[string]any{"wake_at": sleepErr.WakeAt.Format(time.RFC3339Nano)}
+		result.SuspendData = map[string]any{"wake_at": sleepErr.wakeAt.Format(time.RFC3339Nano)}
 
 		// Non-blocking: schedule with timer scheduler so goroutine can exit
 		if e.scheduler != nil {
-			e.scheduler.Schedule(runID, sleepErr.WakeAt)
+			e.scheduler.Schedule(runID, sleepErr.wakeAt)
 		}
 
 	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
@@ -586,9 +603,9 @@ func (e *Engine) doExecute(ctx context.Context, wf *Workflow, runID RunID, resum
 			}
 		}
 		if result.Status == Sleeping {
-			var sleepErr *SleepError
+			var sleepErr *sleepError
 			if errors.As(err, &sleepErr) {
-				run.WakeAt = sleepErr.WakeAt
+				run.WakeAt = sleepErr.wakeAt
 			}
 		}
 		// Capture dynamic mutations for resume/wake replay

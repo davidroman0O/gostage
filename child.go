@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/metadata"
 )
 
 // IsChild returns true if the current process was spawned by gostage
@@ -75,6 +76,12 @@ func HandleChild() {
 	defer conn.Close()
 
 	client := pb.NewWorkflowIPCClient(conn)
+
+	// Attach shared secret as gRPC metadata for all calls
+	secret := os.Getenv("GOSTAGE_SECRET")
+	if secret != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "x-gostage-secret", secret)
+	}
 
 	// Request our work assignment
 	wfDef, err := client.RequestWorkflowDefinition(ctx, &pb.ReadySignal{ChildId: jobID})
@@ -197,7 +204,7 @@ func HandleChild() {
 			// Don't retry bail/suspend/sleep — propagate immediately
 			var bailErr *BailError
 			var suspendErr *SuspendError
-			var sleepErr *SleepError
+			var sleepErr *sleepError
 			if errors.As(taskErr, &bailErr) || errors.As(taskErr, &suspendErr) || errors.As(taskErr, &sleepErr) {
 				break
 			}
