@@ -47,6 +47,7 @@ func newSQLitePersistence(path string) (*sqlitePersistence, error) {
 // New migrations are appended to the end; existing entries must never be modified.
 var migrations = []func(tx *sql.Tx) error{
 	migrateV1,
+	migrateV2,
 }
 
 func (p *sqlitePersistence) migrate() error {
@@ -110,6 +111,7 @@ func migrateV1(tx *sql.Tx) error {
 		suspend_data TEXT NOT NULL DEFAULT '{}',
 		wake_at      TEXT NOT NULL DEFAULT '',
 		mutations    TEXT NOT NULL DEFAULT '[]',
+		workflow_def TEXT NOT NULL DEFAULT '',
 		created_at   TEXT NOT NULL,
 		updated_at   TEXT NOT NULL
 	);
@@ -135,6 +137,12 @@ func migrateV1(tx *sql.Tx) error {
 	return err
 }
 
+// migrateV2 adds the dyn_counter column for persisting the dynamic step mutation counter.
+func migrateV2(tx *sql.Tx) error {
+	_, err := tx.Exec(`ALTER TABLE runs ADD COLUMN dyn_counter INTEGER NOT NULL DEFAULT 0`)
+	return err
+}
+
 func (p *sqlitePersistence) SaveRun(ctx context.Context, run *RunState) error {
 	stepStatesJSON, err := json.Marshal(run.StepStates)
 	if err != nil {
@@ -156,9 +164,16 @@ func (p *sqlitePersistence) SaveRun(ctx context.Context, run *RunState) error {
 		wakeAtStr = run.WakeAt.Format(time.RFC3339Nano)
 	}
 
+	workflowDefJSON := ""
+	if run.WorkflowDef != nil {
+		if data, err := json.Marshal(run.WorkflowDef); err == nil {
+			workflowDefJSON = string(data)
+		}
+	}
+
 	const query = `
-	INSERT INTO runs (run_id, workflow_id, status, current_step, step_states, bail_reason, suspend_data, wake_at, mutations, created_at, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO runs (run_id, workflow_id, status, current_step, step_states, bail_reason, suspend_data, wake_at, mutations, workflow_def, dyn_counter, created_at, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(run_id) DO UPDATE SET
 		status       = excluded.status,
 		current_step = excluded.current_step,
@@ -167,6 +182,8 @@ func (p *sqlitePersistence) SaveRun(ctx context.Context, run *RunState) error {
 		suspend_data = excluded.suspend_data,
 		wake_at      = excluded.wake_at,
 		mutations    = excluded.mutations,
+		workflow_def = excluded.workflow_def,
+		dyn_counter  = excluded.dyn_counter,
 		updated_at   = excluded.updated_at
 	`
 
@@ -180,6 +197,8 @@ func (p *sqlitePersistence) SaveRun(ctx context.Context, run *RunState) error {
 		string(suspendDataJSON),
 		wakeAtStr,
 		string(mutationsJSON),
+		workflowDefJSON,
+		run.DynCounter,
 		run.CreatedAt.Format(time.RFC3339Nano),
 		run.UpdatedAt.Format(time.RFC3339Nano),
 	)
@@ -188,19 +207,20 @@ func (p *sqlitePersistence) SaveRun(ctx context.Context, run *RunState) error {
 
 func (p *sqlitePersistence) LoadRun(ctx context.Context, runID RunID) (*RunState, error) {
 	const query = `
-	SELECT run_id, workflow_id, status, current_step, step_states, bail_reason, suspend_data, wake_at, mutations, created_at, updated_at
+	SELECT run_id, workflow_id, status, current_step, step_states, bail_reason, suspend_data, wake_at, mutations, workflow_def, dyn_counter, created_at, updated_at
 	FROM runs WHERE run_id = ?
 	`
 
 	var (
-		run             RunState
-		rid, st         string
-		stepStatesJSON  string
-		suspendDataJSON string
-		wakeAtStr       string
-		mutationsJSON   string
-		createdAtStr    string
-		updatedAtStr    string
+		run              RunState
+		rid, st          string
+		stepStatesJSON   string
+		suspendDataJSON  string
+		wakeAtStr        string
+		mutationsJSON    string
+		workflowDefJSON  string
+		createdAtStr     string
+		updatedAtStr     string
 	)
 
 	err := p.db.QueryRowContext(ctx, query, string(runID)).Scan(
@@ -213,6 +233,8 @@ func (p *sqlitePersistence) LoadRun(ctx context.Context, runID RunID) (*RunState
 		&suspendDataJSON,
 		&wakeAtStr,
 		&mutationsJSON,
+		&workflowDefJSON,
+		&run.DynCounter,
 		&createdAtStr,
 		&updatedAtStr,
 	)
@@ -245,6 +267,13 @@ func (p *sqlitePersistence) LoadRun(ctx context.Context, runID RunID) (*RunState
 	if mutationsJSON != "[]" && mutationsJSON != "" {
 		if err := json.Unmarshal([]byte(mutationsJSON), &run.Mutations); err != nil {
 			return nil, fmt.Errorf("unmarshal mutations: %w", err)
+		}
+	}
+
+	if workflowDefJSON != "" {
+		var def WorkflowDef
+		if err := json.Unmarshal([]byte(workflowDefJSON), &def); err == nil {
+			run.WorkflowDef = &def
 		}
 	}
 
@@ -362,8 +391,37 @@ func (p *sqlitePersistence) DeleteStateKey(ctx context.Context, runID RunID, key
 	return err
 }
 
+func (p *sqlitePersistence) DeleteRun(ctx context.Context, runID RunID) error {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	for _, table := range []string{"run_state", "checkpoints", "runs"} {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE run_id = ?", string(runID)); err != nil {
+			return fmt.Errorf("delete from %s: %w", table, err)
+		}
+	}
+	return tx.Commit()
+}
+
+func (p *sqlitePersistence) UpdateCurrentStep(ctx context.Context, runID RunID, stepID string) error {
+	result, err := p.db.ExecContext(ctx,
+		`UPDATE runs SET current_step = ?, updated_at = ? WHERE run_id = ?`,
+		stepID, time.Now().Format(time.RFC3339Nano), string(runID))
+	if err != nil {
+		return fmt.Errorf("update current step: %w", err)
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return &RunNotFoundError{RunID: runID}
+	}
+	return nil
+}
+
 func (p *sqlitePersistence) ListRuns(ctx context.Context, filter RunFilter) ([]*RunState, error) {
-	query := "SELECT run_id, workflow_id, status, current_step, step_states, bail_reason, suspend_data, wake_at, mutations, created_at, updated_at FROM runs WHERE 1=1"
+	query := "SELECT run_id, workflow_id, status, current_step, step_states, bail_reason, suspend_data, wake_at, mutations, workflow_def, dyn_counter, created_at, updated_at FROM runs WHERE 1=1"
 	var args []any
 
 	if filter.WorkflowID != "" {
@@ -391,21 +449,22 @@ func (p *sqlitePersistence) ListRuns(ctx context.Context, filter RunFilter) ([]*
 	var results []*RunState
 	for rows.Next() {
 		var (
-			run             RunState
-			rid, st         string
-			stepStatesJSON  string
-			suspendDataJSON string
-			wakeAtStr       string
-			mutationsJSON   string
-			createdAtStr    string
-			updatedAtStr    string
+			run              RunState
+			rid, st          string
+			stepStatesJSON   string
+			suspendDataJSON  string
+			wakeAtStr        string
+			mutationsJSON    string
+			workflowDefJSON  string
+			createdAtStr     string
+			updatedAtStr     string
 		)
 
 		if err := rows.Scan(
 			&rid, &run.WorkflowID, &st, &run.CurrentStep,
 			&stepStatesJSON, &run.BailReason, &suspendDataJSON,
-			&wakeAtStr, &mutationsJSON,
-			&createdAtStr, &updatedAtStr,
+			&wakeAtStr, &mutationsJSON, &workflowDefJSON,
+			&run.DynCounter, &createdAtStr, &updatedAtStr,
 		); err != nil {
 			return nil, fmt.Errorf("scan run: %w", err)
 		}
@@ -432,6 +491,13 @@ func (p *sqlitePersistence) ListRuns(ctx context.Context, filter RunFilter) ([]*
 		if mutationsJSON != "[]" && mutationsJSON != "" {
 			if err := json.Unmarshal([]byte(mutationsJSON), &run.Mutations); err != nil {
 				return nil, fmt.Errorf("unmarshal mutations: %w", err)
+			}
+		}
+
+		if workflowDefJSON != "" {
+			var def WorkflowDef
+			if err := json.Unmarshal([]byte(workflowDefJSON), &def); err == nil {
+				run.WorkflowDef = &def
 			}
 		}
 

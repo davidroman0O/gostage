@@ -128,8 +128,9 @@ func TestWorkflow_Map(t *testing.T) {
 	ResetTaskRegistry()
 
 	wf, err := NewWorkflow("map").
-		Map(func(ctx *Ctx) {
+		Map(func(ctx *Ctx) error {
 			Set(ctx, "transformed", true)
+			return nil
 		}).
 		Commit()
 	if err != nil {

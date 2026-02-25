@@ -216,7 +216,7 @@ func registerAllTasks() {
 			return err
 		}
 		// IPC message back to parent via gRPC
-		gs.Send(ctx, "spawn.done", gs.P{"item": item, "index": idx})
+		gs.Send(ctx, "spawn.done", gs.Params{"item": item, "index": idx})
 		return nil
 	})
 
@@ -305,7 +305,7 @@ func registerAllTasks() {
 			return nil
 		}
 		ctx.Log.Info("Awaiting approval...")
-		return gs.Suspend(ctx, gs.P{"reason": "needs manager approval"})
+		return gs.Suspend(ctx, gs.Params{"reason": "needs manager approval"})
 	})
 
 	// ── Cancellation-aware task ────────────────────────────────────────
@@ -423,9 +423,9 @@ func registerAllTasks() {
 
 	// ── IPC tasks ──────────────────────────────────────────────────────
 	gs.Task("report.progress", func(ctx *gs.Ctx) error {
-		gs.Send(ctx, "progress", gs.P{"pct": 50})
-		gs.Send(ctx, "progress", gs.P{"pct": 100})
-		gs.Send(ctx, "metric", gs.P{"name": "items_processed", "value": 42})
+		gs.Send(ctx, "progress", gs.Params{"pct": 50})
+		gs.Send(ctx, "progress", gs.Params{"pct": 100})
+		gs.Send(ctx, "metric", gs.Params{"name": "items_processed", "value": 42})
 		return nil
 	})
 
@@ -501,9 +501,10 @@ func registerNamedFunctions() {
 	})
 
 	// Named map function — for serializable Map steps
-	gs.MapFn("normalize-name", func(ctx *gs.Ctx) {
+	gs.MapFn("normalize-name", func(ctx *gs.Ctx) error {
 		raw := gs.GetOr[string](ctx, "name", "")
 		_ = gs.Set(ctx, "name", strings.TrimSpace(titleCase(strings.ToLower(raw))))
+		return nil
 	})
 }
 
@@ -526,7 +527,7 @@ func demoStep(ctx context.Context) {
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"step"}))
 	defer engine.Close()
 
-	result, err := engine.RunSync(ctx, wf, gs.P{"name": "David", "order_id": "ORD-001"})
+	result, err := engine.RunSync(ctx, wf, gs.Params{"name": "David", "order_id": "ORD-001"})
 	printResult(result, err)
 }
 
@@ -556,7 +557,7 @@ func demoParallel(ctx context.Context) {
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"par"}))
 	defer engine.Close()
 
-	result, err := engine.RunSync(ctx, wf, gs.P{"amount": 99.99})
+	result, err := engine.RunSync(ctx, wf, gs.Params{"amount": 99.99})
 	printResult(result, err)
 	fmt.Printf("  Charged=%v Reserved=%v FraudOK=%v\n",
 		result.Store["charged"], result.Store["reserved"], result.Store["fraud_ok"])
@@ -589,11 +590,11 @@ func demoBranch(ctx context.Context) {
 	defer engine.Close()
 
 	fmt.Println("  → priority=high (routes to sub-workflow):")
-	r1, _ := engine.RunSync(ctx, wf, gs.P{"priority": "high"})
+	r1, _ := engine.RunSync(ctx, wf, gs.Params{"priority": "high"})
 	fmt.Printf("    Route: %s\n", r1.Store["route"])
 
 	fmt.Println("  → priority=low (routes to task):")
-	r2, _ := engine.RunSync(ctx, wf, gs.P{"priority": "low"})
+	r2, _ := engine.RunSync(ctx, wf, gs.Params{"priority": "low"})
 	fmt.Printf("    Route: %s\n", r2.Store["route"])
 }
 
@@ -611,7 +612,7 @@ func demoForEach(ctx context.Context) {
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"each"}))
 	defer engine.Close()
 
-	r1, _ := engine.RunSync(ctx, wf1, gs.P{
+	r1, _ := engine.RunSync(ctx, wf1, gs.Params{
 		"tracks": []any{"Bohemian Rhapsody", "Stairway to Heaven", "Hotel California"},
 	})
 	printResult(r1, nil)
@@ -634,7 +635,7 @@ func demoForEach(ctx context.Context) {
 		log.Fatal(err)
 	}
 
-	r2, _ := engine.RunSync(ctx, wf2, gs.P{
+	r2, _ := engine.RunSync(ctx, wf2, gs.Params{
 		"items": []any{"Widget", "Gadget"},
 	})
 	printResult(r2, nil)
@@ -656,7 +657,7 @@ func demoForEach(ctx context.Context) {
 		fmt.Printf("  [parent←child IPC] item=%v completed\n", payload["item"])
 	})
 
-	r3, err := engine.RunSync(ctx, wf3, gs.P{
+	r3, err := engine.RunSync(ctx, wf3, gs.Params{
 		"items": []any{"Alpha", "Beta"},
 	})
 	if err != nil {
@@ -687,7 +688,7 @@ func demoForEach(ctx context.Context) {
 		log.Fatal(err)
 	}
 
-	r4, err := engine.RunSync(ctx, wf4, gs.P{
+	r4, err := engine.RunSync(ctx, wf4, gs.Params{
 		"items": []any{"Gamma", "Delta"},
 	})
 	if err != nil {
@@ -704,7 +705,7 @@ func demoMap(ctx context.Context) {
 	section("5a. Map (inline closure)")
 
 	wf1, err := gs.NewWorkflow("map-closure").
-		Map(func(ctx *gs.Ctx) {
+		Map(func(ctx *gs.Ctx) error {
 			prices := gs.GetOr[[]any](ctx, "prices", nil)
 			total := 0.0
 			for _, p := range prices {
@@ -713,6 +714,7 @@ func demoMap(ctx context.Context) {
 				}
 			}
 			_ = gs.Set(ctx, "total", total)
+			return nil
 		}).
 		Commit()
 	if err != nil {
@@ -722,7 +724,7 @@ func demoMap(ctx context.Context) {
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"map"}))
 	defer engine.Close()
 
-	r1, _ := engine.RunSync(ctx, wf1, gs.P{"prices": []any{19.99, 29.99, 9.99}})
+	r1, _ := engine.RunSync(ctx, wf1, gs.Params{"prices": []any{19.99, 29.99, 9.99}})
 	fmt.Printf("  Total: $%.2f\n", r1.Store["total"])
 
 	section("5b. MapNamed (registered function — serializable)")
@@ -734,7 +736,7 @@ func demoMap(ctx context.Context) {
 		log.Fatal(err)
 	}
 
-	r2, _ := engine.RunSync(ctx, wf2, gs.P{"name": "  jOHN dOE  "})
+	r2, _ := engine.RunSync(ctx, wf2, gs.Params{"name": "  jOHN dOE  "})
 	fmt.Printf("  Normalized: %q\n", r2.Store["name"])
 }
 
@@ -797,7 +799,7 @@ func demoDoWhile(ctx context.Context) {
 	section("7a. DoWhile (closure condition)")
 
 	wf1, err := gs.NewWorkflow("while-closure").
-		Map(func(ctx *gs.Ctx) { _ = gs.Set(ctx, "has_more", true) }).
+		Map(func(ctx *gs.Ctx) error { _ = gs.Set(ctx, "has_more", true); return nil }).
 		DoWhile(gs.Step("fetch.page"), func(ctx *gs.Ctx) bool {
 			return gs.Get[bool](ctx, "has_more")
 		}).
@@ -815,7 +817,7 @@ func demoDoWhile(ctx context.Context) {
 	section("7b. DoWhileNamed (registered condition — serializable)")
 
 	wf2, err := gs.NewWorkflow("while-named").
-		Map(func(ctx *gs.Ctx) { _ = gs.Set(ctx, "has_more", true) }).
+		Map(func(ctx *gs.Ctx) error { _ = gs.Set(ctx, "has_more", true); return nil }).
 		DoWhileNamed(gs.Step("fetch.page"), "has-more-pages").
 		Commit()
 	if err != nil {
@@ -849,7 +851,7 @@ func demoSubWorkflow(ctx context.Context) {
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"sub"}))
 	defer engine.Close()
 
-	r1, _ := engine.RunSync(ctx, outer, gs.P{"order_id": "ORD-SUB", "name": "Alice"})
+	r1, _ := engine.RunSync(ctx, outer, gs.Params{"order_id": "ORD-SUB", "name": "Alice"})
 	printResult(r1, nil)
 	fmt.Printf("  Enriched: %v\n", r1.Store["enriched"])
 
@@ -878,7 +880,7 @@ func demoSubWorkflow(ctx context.Context) {
 		log.Fatal(err)
 	}
 
-	r2, _ := engine.RunSync(ctx, outerDeep, gs.P{"name": "Nested"})
+	r2, _ := engine.RunSync(ctx, outerDeep, gs.Params{"name": "Nested"})
 	printResult(r2, nil)
 	fmt.Printf("  Enriched=%v Deep=%v\n", r2.Store["enriched"], r2.Store["deep"])
 }
@@ -900,7 +902,7 @@ func demoSleep(ctx context.Context) {
 	defer engine.Close()
 
 	start := time.Now()
-	result, _ := engine.RunSync(ctx, wf, gs.P{"name": "Sleeper"})
+	result, _ := engine.RunSync(ctx, wf, gs.Params{"name": "Sleeper"})
 	printResult(result, nil)
 	fmt.Printf("  Elapsed: %s\n", time.Since(start).Round(time.Millisecond))
 }
@@ -933,7 +935,7 @@ func demoStage(ctx context.Context) {
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"stg"}))
 	defer engine.Close()
 
-	result, _ := engine.RunSync(ctx, wf, gs.P{"order_id": "ORD-STG", "amount": 49.99})
+	result, _ := engine.RunSync(ctx, wf, gs.Params{"order_id": "ORD-STG", "amount": 49.99})
 	printResult(result, nil)
 }
 
@@ -956,7 +958,7 @@ func demoBail(ctx context.Context) {
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"bail"}))
 	defer engine.Close()
 
-	result, _ := engine.RunSync(ctx, wf, gs.P{"age": 15})
+	result, _ := engine.RunSync(ctx, wf, gs.Params{"age": 15})
 	fmt.Printf("  Status: %s, Reason: %s\n", result.Status, result.BailReason)
 	fmt.Printf("  Greeted: %v (should be <nil>)\n", result.Store["greeted"])
 }
@@ -979,10 +981,10 @@ func demoSuspendResume(ctx context.Context) {
 	)
 	defer engine.Close()
 
-	r1, _ := engine.RunSync(ctx, wf, gs.P{"name": "Bob"})
+	r1, _ := engine.RunSync(ctx, wf, gs.Params{"name": "Bob"})
 	fmt.Printf("  First run: status=%s, suspend_data=%v\n", r1.Status, r1.SuspendData)
 
-	r2, err := engine.Resume(ctx, wf, r1.RunID, gs.P{"approved": true})
+	r2, err := engine.Resume(ctx, wf, r1.RunID, gs.Params{"approved": true})
 	if err != nil {
 		fmt.Printf("  Resume error: %v\n", err)
 	} else {
@@ -1034,7 +1036,7 @@ func demoInsertAfter(ctx context.Context) {
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"ins"}))
 	defer engine.Close()
 
-	result, _ := engine.RunSync(ctx, wf, gs.P{"add_bonus": true})
+	result, _ := engine.RunSync(ctx, wf, gs.Params{"add_bonus": true})
 	printResult(result, nil)
 	fmt.Printf("  Bonus applied: %v\n", result.Store["bonus_applied"])
 }
@@ -1081,11 +1083,11 @@ func demoTagMutations(ctx context.Context) {
 	defer engine.Close()
 
 	fmt.Println("  → skip_shipping=true:")
-	r1, _ := engine.RunSync(ctx, wf, gs.P{"skip_shipping": true})
+	r1, _ := engine.RunSync(ctx, wf, gs.Params{"skip_shipping": true})
 	printResult(r1, nil)
 
 	fmt.Println("  → skip_shipping=false:")
-	r2, _ := engine.RunSync(ctx, wf, gs.P{"skip_shipping": false})
+	r2, _ := engine.RunSync(ctx, wf, gs.Params{"skip_shipping": false})
 	printResult(r2, nil)
 }
 
@@ -1183,7 +1185,7 @@ func demoAllMiddleware(ctx context.Context) {
 	)
 	defer engine.Close()
 
-	result, _ := engine.RunSync(ctx, wf, gs.P{"name": "Middleware"})
+	result, _ := engine.RunSync(ctx, wf, gs.Params{"name": "Middleware"})
 	printResult(result, nil)
 }
 
@@ -1203,7 +1205,7 @@ func demoPlugin(ctx context.Context) {
 	)
 	defer engine.Close()
 
-	result, _ := engine.RunSync(ctx, wf, gs.P{"name": "Plugin"})
+	result, _ := engine.RunSync(ctx, wf, gs.Params{"name": "Plugin"})
 	printResult(result, nil)
 }
 
@@ -1223,7 +1225,7 @@ func demoAsync(ctx context.Context) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	runID, _ := engine.Run(ctx, wf, gs.P{"name": "Async"})
+	runID, _ := engine.Run(ctx, wf, gs.Params{"name": "Async"})
 	fmt.Printf("  Started: %s\n", runID)
 
 	result, _ := engine.Wait(ctx, runID)
@@ -1283,7 +1285,7 @@ func demoWorkflowOptions(ctx context.Context) {
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"opts"}))
 	defer engine.Close()
 
-	result, _ := engine.RunSync(ctx, wf, gs.P{"order_id": "ORD-OPT", "name": "Callbacks"})
+	result, _ := engine.RunSync(ctx, wf, gs.Params{"order_id": "ORD-OPT", "name": "Callbacks"})
 	printResult(result, nil)
 	fmt.Printf("  Completed (callback): %v\n", completed)
 	fmt.Printf("  Workflow tags: %v\n", wf.Tags)
@@ -1308,7 +1310,7 @@ func demoEngineOptions(ctx context.Context) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	result, _ := engine.RunSync(ctx, wf, gs.P{"name": "EngineOpts"})
+	result, _ := engine.RunSync(ctx, wf, gs.Params{"name": "EngineOpts"})
 	printResult(result, nil)
 }
 
@@ -1326,7 +1328,7 @@ func demoSQLite(ctx context.Context) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	result, _ := engine.RunSync(ctx, wf, gs.P{"name": "SQLite"})
+	result, _ := engine.RunSync(ctx, wf, gs.Params{"name": "SQLite"})
 	printResult(result, nil)
 	fmt.Printf("  Persisted run: %s\n", result.RunID)
 }
@@ -1350,7 +1352,7 @@ func demoAutoRecover(ctx context.Context) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	result, _ := engine.RunSync(ctx, wf, gs.P{"name": "Recover"})
+	result, _ := engine.RunSync(ctx, wf, gs.Params{"name": "Recover"})
 	printResult(result, nil)
 
 	// Explicit Recover call (normally used after restart)
@@ -1402,7 +1404,7 @@ func demoSerialization(ctx context.Context) {
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"ser"}))
 	defer engine.Close()
 
-	result, _ := engine.RunSync(ctx, wf2, gs.P{
+	result, _ := engine.RunSync(ctx, wf2, gs.Params{
 		"order_id": "ORD-SER",
 		"name":     "  john doe  ",
 		"priority": "low",
@@ -1450,7 +1452,7 @@ func demoOrderPipeline(ctx context.Context) {
 	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"pipe"}))
 	defer engine.Close()
 
-	result, _ := engine.RunSync(ctx, wf, gs.P{
+	result, _ := engine.RunSync(ctx, wf, gs.Params{
 		"order_id": fmt.Sprintf("ORD-%04d", rand.Intn(10000)),
 		"total":    149.97,
 		"express":  true,

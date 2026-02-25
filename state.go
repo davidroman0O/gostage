@@ -93,6 +93,20 @@ func (s *runState) setWithLimit(key string, value any) error {
 	return nil
 }
 
+// SetBatch stores multiple values atomically, marking all as dirty.
+// Acquires the lock once for all writes. Used for atomic child state merge.
+func (s *runState) SetBatch(entries map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, v := range entries {
+		s.data[k] = stateEntry{
+			value:    v,
+			typeName: goTypeName(v),
+			dirty:    true,
+		}
+	}
+}
+
 // SetClean stores a value without marking it dirty.
 // Used for loading data from persistence or parent inputs.
 func (s *runState) SetClean(key string, value any) {

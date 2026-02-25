@@ -116,7 +116,7 @@ func WithAutoRecover() EngineOption {
 }
 
 // WithCacheSize limits the workflow cache to n entries.
-// When full, the oldest entry is evicted. 0 means unlimited.
+// When full, the least-recently-used entry is evicted. 0 means unlimited.
 // Default is 1000.
 func WithCacheSize(n int) EngineOption {
 	return func(e *Engine) error {

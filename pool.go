@@ -96,6 +96,28 @@ func (p *workerPool) Shutdown(timeout time.Duration) error {
 	}
 }
 
+// WaitAll blocks until all worker goroutines have exited, up to the given timeout.
+// Call after Shutdown to ensure no workers are still running.
+// Returns true if all workers exited, false if the timeout expired.
+// If timeout <= 0, blocks indefinitely.
+func (p *workerPool) WaitAll(timeout time.Duration) bool {
+	if timeout <= 0 {
+		p.wg.Wait()
+		return true
+	}
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
 // Stop closes the pool without waiting for in-flight work to complete.
 // Pending queued jobs will still be processed but callers don't block.
 func (p *workerPool) Stop() {

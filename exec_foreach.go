@@ -52,7 +52,7 @@ func (e *Engine) executeForEach(ctx context.Context, wf *Workflow, s *step, runI
 
 			// Track per-item completion
 			if persistErr := e.persistence.UpdateStepStatus(ctx, runID, itemKey, Completed); persistErr != nil {
-				e.logger.Warn("persist foreach item status: %v", persistErr)
+				return fmt.Errorf("persist foreach item completed: %w", persistErr)
 			}
 		}
 		return nil
@@ -91,6 +91,16 @@ func (e *Engine) executeForEach(ctx context.Context, wf *Workflow, s *step, runI
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }() // release
+			defer func() {
+				if r := recover(); r != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("foreach item panic: %v", r)
+						cancel()
+					}
+					mu.Unlock()
+				}
+			}()
 
 			if err := e.executeForEachItem(childCtx, wf, s.forEachRef, item, i, runID, resuming); err != nil {
 				mu.Lock()
@@ -104,7 +114,12 @@ func (e *Engine) executeForEach(ctx context.Context, wf *Workflow, s *step, runI
 
 			// Track per-item completion
 			if persistErr := e.persistence.UpdateStepStatus(ctx, runID, itemKey, Completed); persistErr != nil {
-				e.logger.Warn("persist foreach item status: %v", persistErr)
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("persist foreach item completed: %w", persistErr)
+					cancel()
+				}
+				mu.Unlock()
 			}
 		}()
 	}
@@ -116,13 +131,14 @@ func (e *Engine) executeForEach(ctx context.Context, wf *Workflow, s *step, runI
 // executeForEachItem runs a single ForEach iteration with item context.
 func (e *Engine) executeForEachItem(ctx context.Context, wf *Workflow, ref StepRef, item any, index int, runID RunID, resuming bool) error {
 	if ref.subWorkflow != nil {
-		// Propagate item/index through context.Value — safe for concurrent ForEach
-		// because each goroutine gets its own context chain.
+		// Clone the sub-workflow so concurrent ForEach iterations don't share
+		// mutable state (executeSub writes to subWf.state).
+		subWf := ref.subWorkflow.clone()
 		iterCtx := context.WithValue(ctx, forEachCtxKey{}, &forEachCtxData{item: item, index: index})
-		return e.executeSub(iterCtx, wf, ref.subWorkflow, runID, resuming)
+		return e.executeSub(iterCtx, wf, subWf, runID, resuming)
 	}
 
-	td := lookupTask(ref.taskName)
+	td := e.registry.lookupTask(ref.taskName)
 	if td == nil {
 		return fmt.Errorf("task %q not registered", ref.taskName)
 	}

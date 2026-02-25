@@ -32,7 +32,7 @@ func (e *Engine) executeParallel(ctx context.Context, wf *Workflow, refs []StepR
 			return err
 		}
 		if persistErr := e.persistence.UpdateStepStatus(ctx, runID, refKey, Completed); persistErr != nil {
-			e.logger.Warn("persist parallel ref status: %v", persistErr)
+			return fmt.Errorf("persist parallel ref completed: %w", persistErr)
 		}
 		return nil
 	}
@@ -59,6 +59,16 @@ func (e *Engine) executeParallel(ctx context.Context, wf *Workflow, refs []StepR
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("parallel ref panic: %v", r)
+						cancel()
+					}
+					mu.Unlock()
+				}
+			}()
 			if err := e.executeRef(childCtx, wf, ref, runID, resuming); err != nil {
 				mu.Lock()
 				if firstErr == nil {
@@ -69,7 +79,12 @@ func (e *Engine) executeParallel(ctx context.Context, wf *Workflow, refs []StepR
 				return
 			}
 			if persistErr := e.persistence.UpdateStepStatus(ctx, runID, refKeyCopy, Completed); persistErr != nil {
-				e.logger.Warn("persist parallel ref status: %v", persistErr)
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("persist parallel ref completed: %w", persistErr)
+					cancel()
+				}
+				mu.Unlock()
 			}
 		}()
 	}
@@ -103,7 +118,7 @@ func (e *Engine) executeStage(ctx context.Context, wf *Workflow, refs []StepRef,
 			return err
 		}
 		if persistErr := e.persistence.UpdateStepStatus(ctx, runID, refKey, Completed); persistErr != nil {
-			e.logger.Warn("persist stage ref status: %v", persistErr)
+			return fmt.Errorf("persist stage ref completed: %w", persistErr)
 		}
 	}
 	return nil

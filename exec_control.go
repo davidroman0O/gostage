@@ -49,6 +49,10 @@ func (e *Engine) executeDoUntil(ctx context.Context, wf *Workflow, s *step, runI
 		if err := e.executeRef(ctx, wf, s.loopRef, runID, resuming); err != nil {
 			return err
 		}
+		// Flush state between iterations for crash safety
+		if flushErr := wf.state.Flush(ctx); flushErr != nil {
+			return fmt.Errorf("flush state in DoUntil iteration %d: %w", i, flushErr)
+		}
 		condCtx := newCtx(ctx, wf.state, e.logger)
 		condResult, condErr := func() (result bool, err error) {
 			defer func() {
@@ -89,20 +93,23 @@ func (e *Engine) executeDoWhile(ctx context.Context, wf *Workflow, s *step, runI
 		if err := e.executeRef(ctx, wf, s.loopRef, runID, resuming); err != nil {
 			return err
 		}
+		// Flush state between iterations for crash safety
+		if flushErr := wf.state.Flush(ctx); flushErr != nil {
+			return fmt.Errorf("flush state in DoWhile iteration %d: %w", i, flushErr)
+		}
 	}
 	return fmt.Errorf("DoWhile exceeded %d iterations", maxLoopIterations)
 }
 
 // executeMap runs an inline data transformation.
-func (e *Engine) executeMap(ctx context.Context, wf *Workflow, fn func(*Ctx)) (err error) {
+func (e *Engine) executeMap(ctx context.Context, wf *Workflow, fn func(*Ctx) error) (err error) {
 	mapCtx := newCtx(ctx, wf.state, e.logger)
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("map function panic: %v", r)
 		}
 	}()
-	fn(mapCtx)
-	return nil
+	return fn(mapCtx)
 }
 
 // executeSub runs a sub-workflow's steps inline, sharing the parent's state.
@@ -126,7 +133,7 @@ func (e *Engine) executeSleep(ctx context.Context, d time.Duration) error {
 	}
 
 	// With persistence, return sleepError so the engine saves state
-	if _, ok := e.persistence.(*memoryPersistence); !ok {
+	if _, ok := e.persistence.(InMemoryPersistence); !ok {
 		return &sleepError{wakeAt: time.Now().Add(d)}
 	}
 	// Without persistence (memory only), block

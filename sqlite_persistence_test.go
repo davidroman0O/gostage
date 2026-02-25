@@ -2,6 +2,7 @@ package gostage
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -349,13 +350,13 @@ func TestSQLite_SchemaVersioning(t *testing.T) {
 		t.Fatalf("first open failed: %v", err)
 	}
 
-	// Verify version is 1
+	// Verify version matches number of registered migrations
 	var version int
 	if err := p1.db.QueryRow(`SELECT version FROM schema_version`).Scan(&version); err != nil {
 		t.Fatalf("read version: %v", err)
 	}
-	if version != 1 {
-		t.Fatalf("expected version 1, got %d", version)
+	if version != len(migrations) {
+		t.Fatalf("expected version %d, got %d", len(migrations), version)
 	}
 
 	// Verify tables exist by inserting a run
@@ -381,12 +382,12 @@ func TestSQLite_SchemaVersioning(t *testing.T) {
 	}
 	defer p2.Close()
 
-	// Version still 1
+	// Version unchanged after reopen
 	if err := p2.db.QueryRow(`SELECT version FROM schema_version`).Scan(&version); err != nil {
 		t.Fatalf("read version after reopen: %v", err)
 	}
-	if version != 1 {
-		t.Fatalf("expected version 1 after reopen, got %d", version)
+	if version != len(migrations) {
+		t.Fatalf("expected version %d after reopen, got %d", len(migrations), version)
 	}
 
 	// Data still there
@@ -396,6 +397,132 @@ func TestSQLite_SchemaVersioning(t *testing.T) {
 	}
 	if loaded.WorkflowID != "wf-v1" {
 		t.Fatalf("expected wf-v1, got %s", loaded.WorkflowID)
+	}
+}
+
+func TestSQLite_DeleteRun(t *testing.T) {
+	p := newTestSQLite(t)
+	ctx := context.Background()
+
+	now := time.Now()
+	run := &RunState{
+		RunID:      "del-run-1",
+		WorkflowID: "wf-del",
+		Status:     Completed,
+		StepStates: map[string]Status{"step1": Completed},
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if err := p.SaveRun(ctx, run); err != nil {
+		t.Fatalf("SaveRun: %v", err)
+	}
+
+	// Also save state
+	if err := p.SaveState(ctx, "del-run-1", map[string]StateEntry{
+		"key1": {Value: []byte(`"val1"`), TypeName: "string"},
+	}); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+
+	// Delete
+	if err := p.DeleteRun(ctx, "del-run-1"); err != nil {
+		t.Fatalf("DeleteRun: %v", err)
+	}
+
+	// LoadRun should fail
+	_, err := p.LoadRun(ctx, "del-run-1")
+	var notFound *RunNotFoundError
+	if !errors.As(err, &notFound) {
+		t.Fatalf("expected RunNotFoundError, got %v", err)
+	}
+
+	// State should be gone
+	state, err := p.LoadState(ctx, "del-run-1")
+	if err != nil {
+		t.Fatalf("LoadState after delete: %v", err)
+	}
+	if len(state) != 0 {
+		t.Fatalf("expected empty state after delete, got %d entries", len(state))
+	}
+}
+
+func TestSQLite_ListRunsCombinedFilters(t *testing.T) {
+	p := newTestSQLite(t)
+	ctx := context.Background()
+
+	now := time.Now()
+	runs := []struct {
+		id     string
+		wfID   string
+		status Status
+	}{
+		{"r1", "wf-1", Completed},
+		{"r2", "wf-1", Failed},
+		{"r3", "wf-2", Completed},
+		{"r4", "wf-2", Failed},
+	}
+
+	for _, r := range runs {
+		if err := p.SaveRun(ctx, &RunState{
+			RunID:      RunID(r.id),
+			WorkflowID: r.wfID,
+			Status:     r.status,
+			StepStates: map[string]Status{},
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}); err != nil {
+			t.Fatalf("SaveRun %s: %v", r.id, err)
+		}
+	}
+
+	// Combined filter: wf-1 AND Failed
+	results, err := p.ListRuns(ctx, RunFilter{WorkflowID: "wf-1", Status: Failed})
+	if err != nil {
+		t.Fatalf("ListRuns: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if string(results[0].RunID) != "r2" {
+		t.Fatalf("expected run r2, got %s", results[0].RunID)
+	}
+}
+
+func TestSQLite_UpdateCurrentStep(t *testing.T) {
+	p := newTestSQLite(t)
+	ctx := context.Background()
+
+	now := time.Now()
+	if err := p.SaveRun(ctx, &RunState{
+		RunID:      "ucs-run",
+		WorkflowID: "ucs-wf",
+		Status:     Running,
+		StepStates: map[string]Status{},
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Update current step
+	if err := p.UpdateCurrentStep(ctx, "ucs-run", "step-2"); err != nil {
+		t.Fatalf("UpdateCurrentStep: %v", err)
+	}
+
+	// Verify
+	run, err := p.LoadRun(ctx, "ucs-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.CurrentStep != "step-2" {
+		t.Fatalf("expected step-2, got %s", run.CurrentStep)
+	}
+
+	// Non-existent run
+	err = p.UpdateCurrentStep(ctx, "no-such-run", "step-1")
+	var notFound *RunNotFoundError
+	if !errors.As(err, &notFound) {
+		t.Fatalf("expected RunNotFoundError for missing run, got %v", err)
 	}
 }
 

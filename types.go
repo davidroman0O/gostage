@@ -5,11 +5,11 @@ import (
 	"time"
 )
 
-// P is a convenience alias for map[string]any.
+// Params is a convenience alias for map[string]any.
 // It's used for passing parameters, initial store data, and results.
 //
-//	engine.RunSync(ctx, wf, gostage.P{"order_id": "ORD-123"})
-type P = map[string]any
+//	engine.RunSync(ctx, wf, gostage.Params{"order_id": "ORD-123"})
+type Params = map[string]any
 
 // RunID uniquely identifies a workflow execution run.
 type RunID string
@@ -80,6 +80,21 @@ func (e *sleepError) Error() string {
 	return "sleeping until " + e.wakeAt.Format(time.RFC3339)
 }
 
+// ResultGet extracts a typed value from a Result's store map.
+// Returns the value and true if the key exists and can be coerced to T.
+// Returns the zero value and false if the key is missing or the type is incompatible.
+func ResultGet[T any](r *Result, key string) (T, bool) {
+	var zero T
+	if r == nil || r.Store == nil {
+		return zero, false
+	}
+	val, ok := r.Store[key]
+	if !ok {
+		return zero, false
+	}
+	return coerce[T](val)
+}
+
 // Sentinel errors for programmatic error checking via errors.Is.
 var (
 	ErrEngineClosed     = errors.New("engine is closed")
@@ -89,6 +104,5 @@ var (
 	ErrRunAlreadyActive = errors.New("run is already active")
 	ErrNilWorkflow      = errors.New("workflow is nil")
 	ErrEmptyName        = errors.New("name must not be empty")
-	ErrNilHandler         = errors.New("handler must not be nil")
 	ErrStateLimitExceeded = errors.New("state entry limit exceeded")
 )

@@ -44,9 +44,12 @@ func (e *Engine) executeTaskFn(taskCtx *Ctx, taskName string, fn func(*Ctx) erro
 func resolveRetryConfig(td *taskDef, wf *Workflow) (int, time.Duration) {
 	retries := td.retries
 	retryDelay := td.retryDelay
-	if retries == 0 && wf.cfg.defaultRetries > 0 {
+	if retries < 0 && wf.cfg.defaultRetries > 0 {
 		retries = wf.cfg.defaultRetries
 		retryDelay = wf.cfg.defaultRetryDelay
+	}
+	if retries < 0 {
+		retries = 0
 	}
 	return retries, retryDelay
 }

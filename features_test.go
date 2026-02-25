@@ -31,7 +31,7 @@ func TestStepLevelResume(t *testing.T) {
 	Task("resume.step2", func(ctx *Ctx) error {
 		atomic.AddInt32(&step2Count, 1)
 		if !IsResuming(ctx) {
-			return Suspend(ctx, P{"reason": "need approval"})
+			return Suspend(ctx, Params{"reason": "need approval"})
 		}
 		Set(ctx, "step2_done", true)
 		return nil
@@ -67,7 +67,7 @@ func TestStepLevelResume(t *testing.T) {
 	}
 
 	// Resume: step1 should be skipped (already completed), step2 re-executes with resume path
-	result, err = engine.Resume(context.Background(), wf, result.RunID, P{"approved": true})
+	result, err = engine.Resume(context.Background(), wf, result.RunID, Params{"approved": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestForEachPerItemResume(t *testing.T) {
 		count := atomic.AddInt32(&itemRunCount, 1)
 		// Suspend at item "b" on first run (when count is 2, meaning a=1, b=2)
 		if item == "b" && !IsResuming(ctx) {
-			return Suspend(ctx, P{"waiting": item})
+			return Suspend(ctx, Params{"waiting": item})
 		}
 		Set(ctx, fmt.Sprintf("processed_%d", idx), item)
 		_ = count
@@ -145,7 +145,7 @@ func TestForEachPerItemResume(t *testing.T) {
 	atomic.StoreInt32(&itemRunCount, 0)
 
 	// Resume: "a" should be skipped (completed), "b" re-runs (with resume), "c" runs fresh
-	result, err = engine.Resume(context.Background(), wf, result.RunID, P{})
+	result, err = engine.Resume(context.Background(), wf, result.RunID, Params{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +371,7 @@ func TestOnMessage(t *testing.T) {
 	var received sync.Map
 
 	Task("ipc.sender", func(ctx *Ctx) error {
-		return Send(ctx, "progress", P{"pct": 50})
+		return Send(ctx, "progress", Params{"pct": 50})
 	})
 
 	wf, err := NewWorkflow("on-message").Step("ipc.sender").Commit()
@@ -414,8 +414,8 @@ func TestOnMessageWildcard(t *testing.T) {
 	var msgCount int32
 
 	Task("ipc.multi", func(ctx *Ctx) error {
-		Send(ctx, "type_a", P{"x": 1})
-		Send(ctx, "type_b", P{"x": 2})
+		Send(ctx, "type_a", Params{"x": 1})
+		Send(ctx, "type_b", Params{"x": 2})
 		return nil
 	})
 
@@ -852,7 +852,7 @@ func TestMutationInsertSurvivesResume(t *testing.T) {
 	})
 	Task("mut.suspender", func(ctx *Ctx) error {
 		if !IsResuming(ctx) {
-			return Suspend(ctx, P{"reason": "wait"})
+			return Suspend(ctx, Params{"reason": "wait"})
 		}
 		Set(ctx, "resumed", true)
 		return nil
@@ -889,7 +889,7 @@ func TestMutationInsertSurvivesResume(t *testing.T) {
 	}
 
 	// Resume: injected step should still be present and run
-	result, err = engine.Resume(ctx, wf, result.RunID, P{"go": true})
+	result, err = engine.Resume(ctx, wf, result.RunID, Params{"go": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -917,7 +917,7 @@ func TestMutationDisableSurvivesResume(t *testing.T) {
 	})
 	Task("mut.suspender2", func(ctx *Ctx) error {
 		if !IsResuming(ctx) {
-			return Suspend(ctx, P{"reason": "wait"})
+			return Suspend(ctx, Params{"reason": "wait"})
 		}
 		Set(ctx, "resumed2", true)
 		return nil
@@ -959,7 +959,7 @@ func TestMutationDisableSurvivesResume(t *testing.T) {
 	}
 
 	// Resume: "skipped" should still be disabled
-	result, err = engine.Resume(ctx, wf, result.RunID, P{"go": true})
+	result, err = engine.Resume(ctx, wf, result.RunID, Params{"go": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1097,7 +1097,7 @@ func TestFunctionRegistry(t *testing.T) {
 	}
 
 	// Register a map function
-	MapFn("test-map", func(ctx *Ctx) {})
+	MapFn("test-map", func(ctx *Ctx) error { return nil })
 	if fn := lookupMapFn("test-map"); fn == nil {
 		t.Fatal("expected to find registered map function")
 	}
@@ -1122,7 +1122,7 @@ func TestFunctionRegistry(t *testing.T) {
 				t.Fatal("expected panic on duplicate map function")
 			}
 		}()
-		MapFn("test-map", func(ctx *Ctx) {})
+		MapFn("test-map", func(ctx *Ctx) error { return nil })
 	}()
 
 	// Reset clears everything
@@ -1142,7 +1142,7 @@ func TestNamedBuilderMethods(t *testing.T) {
 
 	Task("nb.task", func(ctx *Ctx) error { return nil })
 	Condition("nb.cond", func(ctx *Ctx) bool { return true })
-	MapFn("nb.transform", func(ctx *Ctx) {})
+	MapFn("nb.transform", func(ctx *Ctx) error { return nil })
 
 	// WhenNamed
 	bc := WhenNamed("nb.cond").Step("nb.task")
@@ -1211,7 +1211,7 @@ func TestDefinitionAllStepKinds(t *testing.T) {
 	Task("all.loop", func(ctx *Ctx) error { return nil })
 	Condition("all.is-ready", func(ctx *Ctx) bool { return true })
 	Condition("all.has-more", func(ctx *Ctx) bool { return false })
-	MapFn("all.transform", func(ctx *Ctx) {})
+	MapFn("all.transform", func(ctx *Ctx) error { return nil })
 
 	// Build a sub-workflow for StepSub
 	subWf, err := NewWorkflow("all-sub").Step("all.task3").Commit()
@@ -1370,7 +1370,7 @@ func TestDefinitionAnonymousError(t *testing.T) {
 
 	// Anonymous map function → error
 	wfMap, err := NewWorkflow("anon-map").
-		Map(func(ctx *Ctx) {}).
+		Map(func(ctx *Ctx) error { return nil }).
 		Commit()
 	if err != nil {
 		t.Fatal(err)
@@ -1654,7 +1654,7 @@ func TestIntegration_MiddlewareAndIPC(t *testing.T) {
 	var mu sync.Mutex
 
 	Task("int.ipc", func(ctx *Ctx) error {
-		Send(ctx, "status", P{"msg": "running"})
+		Send(ctx, "status", Params{"msg": "running"})
 		return nil
 	})
 
@@ -2136,7 +2136,7 @@ func TestResumeKeyCleanup(t *testing.T) {
 			return nil
 		}
 		Set(ctx, "data", "value")
-		return Suspend(ctx, P{"reason": "need approval"})
+		return Suspend(ctx, Params{"reason": "need approval"})
 	})
 
 	engine, err := New()
@@ -2164,7 +2164,7 @@ func TestResumeKeyCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result2, err := engine.Resume(context.Background(), wf2, result1.RunID, P{"approved": true})
+	result2, err := engine.Resume(context.Background(), wf2, result1.RunID, Params{"approved": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2203,7 +2203,7 @@ func TestParallelPerRefResume(t *testing.T) {
 	Task("pref.b", func(ctx *Ctx) error {
 		atomic.AddInt32(&taskBCount, 1)
 		if !IsResuming(ctx) {
-			return Suspend(ctx, P{"reason": "wait"})
+			return Suspend(ctx, Params{"reason": "wait"})
 		}
 		Set(ctx, "b_done", true)
 		return nil
@@ -2295,7 +2295,7 @@ func TestMultipleSuspendResumeCycles(t *testing.T) {
 	Task("msr.step2", func(ctx *Ctx) error {
 		atomic.AddInt32(&step2Count, 1)
 		if !ResumeData[bool](ctx, "step2_approved") {
-			return Suspend(ctx, P{"at": "step2"})
+			return Suspend(ctx, Params{"at": "step2"})
 		}
 		return nil
 	})
@@ -2303,7 +2303,7 @@ func TestMultipleSuspendResumeCycles(t *testing.T) {
 	Task("msr.step3", func(ctx *Ctx) error {
 		atomic.AddInt32(&step3Count, 1)
 		if !ResumeData[bool](ctx, "step3_approved") {
-			return Suspend(ctx, P{"at": "step3"})
+			return Suspend(ctx, Params{"at": "step3"})
 		}
 		return nil
 	})
@@ -2342,7 +2342,7 @@ func TestMultipleSuspendResumeCycles(t *testing.T) {
 	}
 
 	// Resume 1: pass step2_approved=true → step2 passes, step3 suspends
-	result, err = engine.Resume(context.Background(), buildWf(), result.RunID, P{"step2_approved": true})
+	result, err = engine.Resume(context.Background(), buildWf(), result.RunID, Params{"step2_approved": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2351,7 +2351,7 @@ func TestMultipleSuspendResumeCycles(t *testing.T) {
 	}
 
 	// Resume 2: pass step3_approved=true → step3 passes, step4 runs, workflow completes
-	result, err = engine.Resume(context.Background(), buildWf(), result.RunID, P{"step3_approved": true})
+	result, err = engine.Resume(context.Background(), buildWf(), result.RunID, Params{"step3_approved": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2532,7 +2532,7 @@ func TestMapPanicRecovery(t *testing.T) {
 	ResetTaskRegistry()
 
 	wf, err := NewWorkflow("map-panic").
-		Map(func(ctx *Ctx) {
+		Map(func(ctx *Ctx) error {
 			panic("map boom")
 		}).
 		Commit()
@@ -2555,6 +2555,39 @@ func TestMapPanicRecovery(t *testing.T) {
 	}
 	if result.Error == nil {
 		t.Fatal("expected error to be set")
+	}
+}
+
+func TestMapErrorPropagation(t *testing.T) {
+	ResetTaskRegistry()
+
+	wf, err := NewWorkflow("map-error").
+		Map(func(ctx *Ctx) error {
+			return fmt.Errorf("transform failed: bad data")
+		}).
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Failed {
+		t.Fatalf("expected Failed, got %s", result.Status)
+	}
+	if result.Error == nil {
+		t.Fatal("expected error to be set")
+	}
+	if !strings.Contains(result.Error.Error(), "transform failed") {
+		t.Fatalf("expected 'transform failed' in error, got: %v", result.Error)
 	}
 }
 
@@ -2909,7 +2942,7 @@ func TestTypedErrors(t *testing.T) {
 		if IsResuming(ctx) {
 			return nil
 		}
-		return Suspend(ctx, P{"need": "input"})
+		return Suspend(ctx, Params{"need": "input"})
 	})
 
 	wf, err := NewWorkflow("typed-errors").
@@ -2954,7 +2987,7 @@ func TestTypedErrors(t *testing.T) {
 	}
 
 	// Resume correctly so the run completes
-	_, err = engine.Resume(context.Background(), wf, result.RunID, P{"approved": true})
+	_, err = engine.Resume(context.Background(), wf, result.RunID, Params{"approved": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3207,4 +3240,481 @@ func TestPerTaskTimeout(t *testing.T) {
 			t.Fatalf("expected Completed, got %s (error: %v)", result.Status, result.Error)
 		}
 	})
+}
+
+// === Decision 008: Test Coverage Gaps ===
+
+func TestCacheLRUEviction(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("d8.lru_noop", func(ctx *Ctx) error { return nil })
+
+	wf1, _ := NewWorkflow("lru-wf-1").Step("d8.lru_noop").Commit()
+	wf2, _ := NewWorkflow("lru-wf-2").Step("d8.lru_noop").Commit()
+	wf3, _ := NewWorkflow("lru-wf-3").Step("d8.lru_noop").Commit()
+
+	engine, err := New(WithCacheSize(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+
+	// Run wf1, wf2 → cache: [wf1, wf2]
+	if _, err := engine.RunSync(ctx, wf1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.RunSync(ctx, wf2, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run wf1 again → promotes wf1, cache: [wf2, wf1]
+	if _, err := engine.RunSync(ctx, wf1, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run wf3 → evicts wf2 (LRU), cache: [wf1, wf3]
+	if _, err := engine.RunSync(ctx, wf3, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// wf1 should still be cached (was promoted)
+	if engine.lookupCachedWorkflow("lru-wf-1") == nil {
+		t.Fatal("wf1 should still be in cache after LRU promotion")
+	}
+	// wf2 should be evicted (LRU victim)
+	if engine.lookupCachedWorkflow("lru-wf-2") != nil {
+		t.Fatal("wf2 should have been evicted as LRU")
+	}
+	// wf3 should be cached
+	if engine.lookupCachedWorkflow("lru-wf-3") == nil {
+		t.Fatal("wf3 should be in cache")
+	}
+}
+
+func TestWaitAfterCompletion(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("d8.wait_done", func(ctx *Ctx) error {
+		Set(ctx, "done", true)
+		return nil
+	})
+
+	wf, _ := NewWorkflow("wait-done").Step("d8.wait_done").Commit()
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	// RunSync completes synchronously — run is never in e.runs
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+
+	// Wait should hit the persistence fallback path
+	waitResult, err := engine.Wait(context.Background(), result.RunID)
+	if err != nil {
+		t.Fatalf("Wait after completion failed: %v", err)
+	}
+	if waitResult.Status != Completed {
+		t.Fatalf("expected Completed from Wait, got %s", waitResult.Status)
+	}
+}
+
+func TestConcurrentResumeRace(t *testing.T) {
+	ResetTaskRegistry()
+
+	ch := make(chan struct{})
+	Task("d8.block_resume", func(ctx *Ctx) error {
+		if IsResuming(ctx) {
+			<-ch // block until released
+			return nil
+		}
+		return Suspend(ctx, Params{"reason": "wait"})
+	})
+
+	wf, _ := NewWorkflow("conc-resume").Step("d8.block_resume").Commit()
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+
+	// First run → Suspended
+	result, _ := engine.RunSync(ctx, wf, nil)
+	if result.Status != Suspended {
+		t.Fatalf("expected Suspended, got %s", result.Status)
+	}
+
+	wf2, _ := NewWorkflow("conc-resume").Step("d8.block_resume").Commit()
+	wf3, _ := NewWorkflow("conc-resume").Step("d8.block_resume").Commit()
+
+	// Start first Resume in a goroutine (will block on ch)
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := engine.Resume(ctx, wf2, result.RunID, nil)
+		errCh <- err
+	}()
+
+	// Give the first Resume a moment to acquire the slot
+	time.Sleep(50 * time.Millisecond)
+
+	// Second Resume should get ErrRunAlreadyActive
+	_, err = engine.Resume(ctx, wf3, result.RunID, nil)
+	if !errors.Is(err, ErrRunAlreadyActive) {
+		t.Fatalf("expected ErrRunAlreadyActive, got %v", err)
+	}
+
+	// Unblock the first Resume
+	close(ch)
+	if err := <-errCh; err != nil {
+		t.Fatalf("first Resume failed: %v", err)
+	}
+}
+
+func TestResumeStepCountMismatch(t *testing.T) {
+	ResetTaskRegistry()
+
+	callCount := 0
+	Task("d8.step_a2", func(ctx *Ctx) error {
+		callCount++
+		Set(ctx, "a", true)
+		return nil
+	})
+	Task("d8.step_b2", func(ctx *Ctx) error {
+		Set(ctx, "b", true)
+		return nil
+	})
+	Task("d8.step_c2", func(ctx *Ctx) error {
+		if IsResuming(ctx) {
+			return nil
+		}
+		return Suspend(ctx, Params{"reason": "wait"})
+	})
+
+	// 3-step workflow: a → b → c (suspends)
+	// After RunSync, steps a and b are completed (2 completed steps)
+	wf, _ := NewWorkflow("step-mismatch").
+		Step("d8.step_a2").
+		Step("d8.step_b2").
+		Step("d8.step_c2").
+		Commit()
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+
+	result, _ := engine.RunSync(ctx, wf, nil)
+	if result.Status != Suspended {
+		t.Fatalf("expected Suspended, got %s", result.Status)
+	}
+
+	// Resume with a 1-step workflow (fewer steps than the 2 completed) → should fail
+	shortWf, _ := NewWorkflow("step-mismatch").Step("d8.step_c2").Commit()
+	_, err = engine.Resume(ctx, shortWf, result.RunID, nil)
+	if !errors.Is(err, ErrWorkflowMismatch) {
+		t.Fatalf("expected ErrWorkflowMismatch, got %v", err)
+	}
+
+	// Resume with the full 3-step workflow → should succeed
+	wf3, _ := NewWorkflow("step-mismatch").
+		Step("d8.step_a2").
+		Step("d8.step_b2").
+		Step("d8.step_c2").
+		Commit()
+	resumed, err := engine.Resume(ctx, wf3, result.RunID, nil)
+	if err != nil {
+		t.Fatalf("Resume with matching workflow failed: %v", err)
+	}
+	if resumed.Status != Completed {
+		t.Fatalf("expected Completed, got %s (error: %v)", resumed.Status, resumed.Error)
+	}
+}
+
+func TestEngine_DeleteRun(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("d8.del_task", func(ctx *Ctx) error {
+		Set(ctx, "value", "hello")
+		return nil
+	})
+
+	wf, _ := NewWorkflow("del-run").Step("d8.del_task").Commit()
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+
+	result, err := engine.RunSync(ctx, wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+
+	// Delete the run
+	if err := engine.DeleteRun(ctx, result.RunID); err != nil {
+		t.Fatalf("DeleteRun failed: %v", err)
+	}
+
+	// LoadRun should return RunNotFoundError
+	_, err = engine.persistence.LoadRun(ctx, result.RunID)
+	var notFound *RunNotFoundError
+	if !errors.As(err, &notFound) {
+		t.Fatalf("expected RunNotFoundError after delete, got %v", err)
+	}
+}
+
+func TestDeleteRunWaitsForCompletion(t *testing.T) {
+	ResetTaskRegistry()
+
+	blockCh := make(chan struct{})
+	startedCh := make(chan struct{})
+
+	Task("d9.blocking_task", func(ctx *Ctx) error {
+		close(startedCh)  // signal that the task has started
+		<-blockCh         // block until test unblocks us
+		Set(ctx, "done", true)
+		return nil
+	})
+
+	wf, _ := NewWorkflow("delete-wait").Step("d9.blocking_task").Commit()
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+
+	// Start async run
+	runID, err := engine.Run(ctx, wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for the task to start executing
+	<-startedCh
+
+	// Call DeleteRun in a goroutine — it should block until the task completes
+	deleteDone := make(chan error, 1)
+	go func() {
+		deleteDone <- engine.DeleteRun(ctx, runID)
+	}()
+
+	// Give DeleteRun a moment to start waiting
+	select {
+	case <-deleteDone:
+		t.Fatal("DeleteRun returned before task completed — should have waited")
+	case <-time.After(50 * time.Millisecond):
+		// Good — DeleteRun is blocking as expected
+	}
+
+	// Unblock the task
+	close(blockCh)
+
+	// Now DeleteRun should complete
+	select {
+	case err := <-deleteDone:
+		if err != nil {
+			t.Fatalf("DeleteRun failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("DeleteRun did not complete after task finished")
+	}
+
+	// Verify persistence is clean
+	_, err = engine.persistence.LoadRun(ctx, runID)
+	var nf *RunNotFoundError
+	if !errors.As(err, &nf) {
+		t.Fatalf("expected RunNotFoundError after delete, got %v", err)
+	}
+}
+
+func TestSleepPinProtectsCache(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("d9.step_a", func(ctx *Ctx) error {
+		Set(ctx, "step_a", true)
+		return nil
+	})
+	Task("d9.step_b", func(ctx *Ctx) error {
+		Set(ctx, "step_b", true)
+		return nil
+	})
+	Task("d9.step_c", func(ctx *Ctx) error {
+		Set(ctx, "step_c", true)
+		return nil
+	})
+
+	// wf1 sleeps — with cacheSize=1, running wf2 would evict wf1 without pinning
+	wf1, err := NewWorkflow("pin-wf1").
+		Step("d9.step_a").
+		Sleep(200 * time.Millisecond).
+		Step("d9.step_b").
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wf2, err := NewWorkflow("pin-wf2").
+		Step("d9.step_c").
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := t.TempDir() + "/pin-test.db"
+	engine, err := New(
+		WithSQLite(dbPath),
+		WithCacheSize(1),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+
+	// RunSync wf1 — returns Sleeping after step_a (timer-based sleep with SQLite)
+	result1, err := engine.RunSync(ctx, wf1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result1.Status != Sleeping {
+		t.Fatalf("expected Sleeping, got %s (error: %v)", result1.Status, result1.Error)
+	}
+
+	// RunSync wf2 — without pinning, this would evict wf1 from the size-1 cache
+	result2, err := engine.RunSync(ctx, wf2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result2.Status != Completed {
+		t.Fatalf("wf2: expected Completed, got %s", result2.Status)
+	}
+
+	// Wait for wf1's timer to fire and complete execution
+	deadline := time.After(3 * time.Second)
+	for {
+		run, loadErr := engine.persistence.LoadRun(ctx, result1.RunID)
+		if loadErr == nil && (run.Status == Completed || run.Status == Failed) {
+			if run.Status != Completed {
+				t.Fatalf("wf1 after wake: expected Completed, got %s", run.Status)
+			}
+			return // success
+		}
+		select {
+		case <-deadline:
+			// Check final status
+			run, loadErr := engine.persistence.LoadRun(ctx, result1.RunID)
+			if loadErr != nil {
+				t.Fatalf("timeout: could not load run: %v", loadErr)
+			}
+			t.Fatalf("timeout: wf1 status is %s (expected Completed)", run.Status)
+		case <-time.After(50 * time.Millisecond):
+			// poll again
+		}
+	}
+}
+
+// === Decision 010: Final Quality Pass ===
+
+// TestSleepRecoverAcrossRestart verifies that a sleeping workflow can be recovered
+// by a NEW engine instance using the persisted workflow definition (no in-memory cache).
+func TestSleepRecoverAcrossRestart(t *testing.T) {
+	ResetTaskRegistry()
+
+	var postSleepRan int32
+	Task("d10.post_sleep", func(ctx *Ctx) error {
+		atomic.AddInt32(&postSleepRan, 1)
+		Set(ctx, "recovered", true)
+		return nil
+	})
+
+	wf, err := NewWorkflow("sleep-recover-restart").
+		Sleep(100 * time.Millisecond).
+		Step("d10.post_sleep").
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := t.TempDir() + "/recover-restart.db"
+	ctx := context.Background()
+
+	// Engine 1: start the workflow, it enters Sleeping
+	engine1, err := New(WithSQLite(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result1, err := engine1.RunSync(ctx, wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result1.Status != Sleeping {
+		t.Fatalf("expected Sleeping, got %s (error: %v)", result1.Status, result1.Error)
+	}
+	runID := result1.RunID
+
+	// Close engine 1 — cache is gone
+	engine1.Close()
+
+	// Wait for sleep duration to pass
+	time.Sleep(150 * time.Millisecond)
+
+	// Engine 2: new instance with same DB, no in-memory cache
+	engine2, err := New(WithSQLite(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine2.Close()
+
+	// Recover should rebuild workflow from persisted definition and wake it
+	if err := engine2.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Poll until the post-sleep step completes
+	deadline := time.After(3 * time.Second)
+	for {
+		if atomic.LoadInt32(&postSleepRan) == 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timeout waiting for recovered sleeping run to complete")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	// Verify run completed
+	run, err := engine2.persistence.LoadRun(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != Completed {
+		t.Fatalf("expected Completed, got %s", run.Status)
+	}
 }

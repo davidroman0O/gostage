@@ -171,7 +171,10 @@ func (ss *spawnServer) SendMessage(ctx context.Context, msg *pb.IPCMessage) (*pb
 			job, ok := ss.jobs[jobID]
 			ss.mu.Unlock()
 			if ok {
-				job.resultCh <- &spawnResult{storeData: payload.StoreData}
+				select {
+				case job.resultCh <- &spawnResult{storeData: payload.StoreData}:
+				default:
+				}
 			}
 		}
 
@@ -182,7 +185,10 @@ func (ss *spawnServer) SendMessage(ctx context.Context, msg *pb.IPCMessage) (*pb
 				job, ok := ss.jobs[jobID]
 				ss.mu.Unlock()
 				if ok {
-					job.resultCh <- &spawnResult{err: payload.ErrorMessage}
+					select {
+					case job.resultCh <- &spawnResult{err: payload.ErrorMessage}:
+					default:
+					}
 				}
 			}
 		}
@@ -342,21 +348,30 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 				return
 			}
 
-			// Merge child's store results back — only non-internal keys
+			// Merge child's store results back atomically — only non-internal keys
 			if result != nil && result.storeData != nil {
 				merged, mergeErr := deserializeStoreData(result.storeData)
 				if mergeErr == nil {
+					filtered := make(map[string]any)
 					for k, v := range merged {
 						if !strings.HasPrefix(k, "__") {
-							wf.state.Set(k, v)
+							filtered[k] = v
 						}
+					}
+					if len(filtered) > 0 {
+						wf.state.SetBatch(filtered)
 					}
 				}
 			}
 
 			// Track per-item completion for resume support
 			if persistErr := e.persistence.UpdateStepStatus(ctx, runID, itemStepKey, Completed); persistErr != nil {
-				e.logger.Warn("persist spawn item status: %v", persistErr)
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("persist spawn item completed: %w", persistErr)
+					cancel()
+				}
+				mu.Unlock()
 			}
 		}(job, i, itemKey)
 	}

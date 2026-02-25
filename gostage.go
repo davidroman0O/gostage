@@ -11,5 +11,5 @@
 //
 //	wf, _ := gostage.NewWorkflow("hello").Step("greet").Commit()
 //	engine, _ := gostage.New()
-//	result, _ := engine.RunSync(ctx, wf, gostage.P{"name": "Alice"})
+//	result, _ := engine.RunSync(ctx, wf, gostage.Params{"name": "Alice"})
 package gostage

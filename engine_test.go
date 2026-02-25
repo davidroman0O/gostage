@@ -29,7 +29,7 @@ func TestEngine_RunSync_Simple(t *testing.T) {
 	}
 	defer engine.Close()
 
-	result, err := engine.RunSync(context.Background(), wf, P{"name": "Alice"})
+	result, err := engine.RunSync(context.Background(), wf, Params{"name": "Alice"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestEngine_RunSync_Bail(t *testing.T) {
 	engine, _ := New()
 	defer engine.Close()
 
-	result, _ := engine.RunSync(context.Background(), wf, P{"age": 16})
+	result, _ := engine.RunSync(context.Background(), wf, Params{"age": 16})
 	if result.Status != Bailed {
 		t.Fatalf("expected Bailed, got %s", result.Status)
 	}
@@ -115,7 +115,7 @@ func TestEngine_RunSync_Suspend(t *testing.T) {
 		if IsResuming(ctx) {
 			return nil
 		}
-		return Suspend(ctx, P{"reason": "needs approval"})
+		return Suspend(ctx, Params{"reason": "needs approval"})
 	})
 
 	wf, err := NewWorkflow("suspend").Step("e.approve").Commit()
@@ -324,7 +324,7 @@ func TestEngine_ForEach_Sequential(t *testing.T) {
 	engine, _ := New()
 	defer engine.Close()
 
-	result, _ := engine.RunSync(context.Background(), wf, P{
+	result, _ := engine.RunSync(context.Background(), wf, Params{
 		"items": []string{"a", "b", "c"},
 	})
 
@@ -368,7 +368,7 @@ func TestEngine_ForEach_Concurrent(t *testing.T) {
 	engine, _ := New()
 	defer engine.Close()
 
-	result, _ := engine.RunSync(context.Background(), wf, P{
+	result, _ := engine.RunSync(context.Background(), wf, Params{
 		"items": []string{"a", "b", "c", "d", "e", "f"},
 	})
 
@@ -412,7 +412,7 @@ func TestEngine_Branch_MatchFirst(t *testing.T) {
 	engine, _ := New()
 	defer engine.Close()
 
-	result, _ := engine.RunSync(context.Background(), wf, P{"priority": "high"})
+	result, _ := engine.RunSync(context.Background(), wf, Params{"priority": "high"})
 	if result.Store["path"] != "urgent" {
 		t.Fatalf("expected 'urgent', got %v", result.Store["path"])
 	}
@@ -445,7 +445,7 @@ func TestEngine_Branch_Default(t *testing.T) {
 	engine, _ := New()
 	defer engine.Close()
 
-	result, _ := engine.RunSync(context.Background(), wf, P{"priority": "low"})
+	result, _ := engine.RunSync(context.Background(), wf, Params{"priority": "low"})
 	if result.Store["path"] != "normal" {
 		t.Fatalf("expected 'normal', got %v", result.Store["path"])
 	}
@@ -493,8 +493,9 @@ func TestEngine_DoWhile(t *testing.T) {
 	})
 
 	wf, err := NewWorkflow("while").
-		Map(func(ctx *Ctx) {
+		Map(func(ctx *Ctx) error {
 			Set(ctx, "has_more", true) // seed the condition
+			return nil
 		}).
 		DoWhile(Step("e.fetch"), func(ctx *Ctx) bool {
 			return Get[bool](ctx, "has_more")
@@ -526,8 +527,9 @@ func TestEngine_Map(t *testing.T) {
 	})
 
 	wf, err := NewWorkflow("map").
-		Map(func(ctx *Ctx) {
+		Map(func(ctx *Ctx) error {
 			Set(ctx, "records", []string{"a", "b", "c"})
+			return nil
 		}).
 		Step("e.use_data").
 		Commit()
@@ -800,7 +802,7 @@ func TestEngine_Resume(t *testing.T) {
 			Set(ctx, "approved", true)
 			return nil
 		}
-		return Suspend(ctx, P{"reason": "needs approval"})
+		return Suspend(ctx, Params{"reason": "needs approval"})
 	})
 
 	wf, err := NewWorkflow("resume").Step("e.approve_order").Commit()
@@ -811,7 +813,7 @@ func TestEngine_Resume(t *testing.T) {
 	defer engine.Close()
 
 	// First run → Suspended
-	result, _ := engine.RunSync(context.Background(), wf, P{"order_id": "ORD-1"})
+	result, _ := engine.RunSync(context.Background(), wf, Params{"order_id": "ORD-1"})
 	if result.Status != Suspended {
 		t.Fatalf("expected Suspended, got %s", result.Status)
 	}
@@ -821,7 +823,7 @@ func TestEngine_Resume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resumed, err := engine.Resume(context.Background(), wf2, result.RunID, P{"approved": true})
+	resumed, err := engine.Resume(context.Background(), wf2, result.RunID, Params{"approved": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -852,7 +854,7 @@ func TestEngine_WithSQLite_Integration(t *testing.T) {
 	}
 	defer engine.Close()
 
-	result, err := engine.RunSync(context.Background(), wf, P{"input": "test"})
+	result, err := engine.RunSync(context.Background(), wf, Params{"input": "test"})
 	if err != nil {
 		t.Fatalf("RunSync failed: %v", err)
 	}
@@ -903,7 +905,7 @@ func TestEngine_ForEach_Empty(t *testing.T) {
 	engine, _ := New()
 	defer engine.Close()
 
-	result, _ := engine.RunSync(context.Background(), wf, P{"items": []string{}})
+	result, _ := engine.RunSync(context.Background(), wf, Params{"items": []string{}})
 	if result.Status != Completed {
 		t.Fatalf("expected Completed, got %s", result.Status)
 	}
@@ -989,7 +991,7 @@ func TestEngine_DeleteKeySurvivesResume(t *testing.T) {
 		// First execution: set both keys, then suspend
 		Set(ctx, "keep", "preserved")
 		Set(ctx, "remove", "should-disappear")
-		return Suspend(ctx, P{"reason": "test"})
+		return Suspend(ctx, Params{"reason": "test"})
 	})
 
 	dir := t.TempDir()
@@ -1050,5 +1052,362 @@ func TestEngine_DeleteKeySurvivesResume(t *testing.T) {
 	// "resumed" should confirm the resume path ran
 	if result2.Store["resumed"] != true {
 		t.Fatal("expected 'resumed' to be true")
+	}
+}
+
+func TestRetryExplicitZeroHonored(t *testing.T) {
+	ResetTaskRegistry()
+
+	var attempts int32
+	Task("retry.explicit-zero", func(ctx *Ctx) error {
+		atomic.AddInt32(&attempts, 1)
+		return fmt.Errorf("always fails")
+	}, WithRetry(0)) // explicit zero: no retries
+
+	wf, err := NewWorkflow("retry-zero-test", WithDefaultRetry(3, 10*time.Millisecond)).
+		Step("retry.explicit-zero").
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Failed {
+		t.Fatalf("expected Failed, got %s", result.Status)
+	}
+	// With explicit WithRetry(0), the task should execute exactly once,
+	// NOT inherit the workflow default of 3 retries.
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Fatalf("expected 1 attempt (explicit zero retries), got %d", got)
+	}
+}
+
+func TestForEachConcurrentSubWorkflow(t *testing.T) {
+	ResetTaskRegistry()
+
+	var counter int32
+	Task("foreach.sub.step1", func(ctx *Ctx) error {
+		atomic.AddInt32(&counter, 1)
+		Set(ctx, "step1_done", true)
+		return nil
+	})
+	Task("foreach.sub.step2", func(ctx *Ctx) error {
+		atomic.AddInt32(&counter, 1)
+		return nil
+	})
+
+	subWf, err := NewWorkflow("sub-wf").
+		Step("foreach.sub.step1").
+		Step("foreach.sub.step2").
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wf, err := NewWorkflow("foreach-concurrent-sub").
+		ForEach("items", Sub(subWf), WithConcurrency(4)).
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	items := []string{"a", "b", "c", "d"}
+	result, err := engine.RunSync(context.Background(), wf, Params{"items": items})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s (error: %v)", result.Status, result.Error)
+	}
+	// 4 items * 2 steps = 8 task executions
+	if got := atomic.LoadInt32(&counter); got != 8 {
+		t.Fatalf("expected 8 task executions, got %d", got)
+	}
+}
+
+func TestRunSyncRejectsAfterClose(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("runsync.noop", func(ctx *Ctx) error {
+		return nil
+	})
+
+	wf, err := NewWorkflow("runsync-closed").Step("runsync.noop").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.Close()
+
+	_, err = engine.RunSync(context.Background(), wf, nil)
+	if !errors.Is(err, ErrEngineClosed) {
+		t.Fatalf("expected ErrEngineClosed, got %v", err)
+	}
+}
+
+func TestRunSyncCancellable(t *testing.T) {
+	ResetTaskRegistry()
+
+	started := make(chan struct{})
+	Task("runsync.block", func(ctx *Ctx) error {
+		close(started)
+		<-ctx.goCtx.Done()
+		return ctx.goCtx.Err()
+	})
+
+	wf, err := NewWorkflow("runsync-cancel").Step("runsync.block").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	done := make(chan *Result, 1)
+	var runID RunID
+	go func() {
+		result, _ := engine.RunSync(context.Background(), wf, nil)
+		done <- result
+	}()
+
+	// Wait for task to start
+	<-started
+
+	// Find the run and cancel it
+	time.Sleep(10 * time.Millisecond) // let registration complete
+	engine.mu.Lock()
+	for id := range engine.runs {
+		runID = id
+		break
+	}
+	engine.mu.Unlock()
+
+	err = engine.Cancel(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case result := <-done:
+		if result.Status != Failed && result.Status != Cancelled {
+			t.Fatalf("expected Failed or Cancelled, got %s", result.Status)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunSync did not complete after Cancel")
+	}
+}
+
+// TestEngine_LoopIterationLimit verifies DoUntil returns an error when
+// the condition never becomes true, instead of looping infinitely.
+func TestEngine_LoopIterationLimit(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("loop.noop", func(ctx *Ctx) error { return nil })
+
+	wf, err := NewWorkflow("loop-limit").
+		DoUntil(Step("loop.noop"), func(ctx *Ctx) bool {
+			return false // never true — should hit maxLoopIterations
+		}).Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatalf("unexpected RunSync error: %v", err)
+	}
+	if result.Status != Failed {
+		t.Fatalf("expected Failed status, got %s", result.Status)
+	}
+}
+
+// TestEngine_ForEachConcurrentFailure verifies that a concurrent ForEach
+// propagates errors from failing items and cancels remaining work.
+func TestEngine_ForEachConcurrentFailure(t *testing.T) {
+	ResetTaskRegistry()
+
+	var completed atomic.Int32
+	Task("fe.work", func(ctx *Ctx) error {
+		idx := Item[int](ctx)
+		if idx == 2 {
+			return fmt.Errorf("item %d fails", idx)
+		}
+		time.Sleep(50 * time.Millisecond) // give failing item time to cancel
+		completed.Add(1)
+		return nil
+	})
+
+	wf, err := NewWorkflow("fe-fail").
+		ForEach("items", Step("fe.work"), WithConcurrency(4)).
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, Params{
+		"items": []int{0, 1, 2, 3, 4},
+	})
+	if err != nil {
+		t.Fatalf("unexpected RunSync error: %v", err)
+	}
+	if result.Status != Failed {
+		t.Fatalf("expected Failed, got %s", result.Status)
+	}
+}
+
+// TestEngine_ParallelRefPanic verifies that a panic in a parallel goroutine
+// is caught and propagated as an error instead of crashing the process.
+func TestEngine_ParallelRefPanic(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("par.ok", func(ctx *Ctx) error {
+		time.Sleep(50 * time.Millisecond)
+		return nil
+	})
+	Task("par.panic", func(ctx *Ctx) error {
+		panic("boom from parallel ref")
+	})
+
+	wf, err := NewWorkflow("par-panic").
+		Parallel(Step("par.ok"), Step("par.panic")).
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatalf("unexpected RunSync error: %v", err)
+	}
+	if result.Status != Failed {
+		t.Fatalf("expected Failed, got %s", result.Status)
+	}
+}
+
+// TestEngine_MiddlewareShortCircuit verifies that step middleware can
+// short-circuit execution by not calling next().
+func TestEngine_MiddlewareShortCircuit(t *testing.T) {
+	ResetTaskRegistry()
+
+	var taskRan atomic.Bool
+	Task("mw.skipped", func(ctx *Ctx) error {
+		taskRan.Store(true)
+		return nil
+	})
+
+	wf, err := NewWorkflow("mw-skip").
+		Step("mw.skipped").
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New(
+		WithStepMiddleware(func(ctx context.Context, info StepInfo, runID RunID, next func() error) error {
+			// Intentionally do NOT call next() — short-circuit
+			return nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+	if taskRan.Load() {
+		t.Fatal("task should not have executed — middleware short-circuited")
+	}
+}
+
+// TestEngine_ForEachConcurrentState verifies that concurrent ForEach items
+// can write to shared state without triggering the race detector.
+func TestEngine_ForEachConcurrentState(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("fe.write", func(ctx *Ctx) error {
+		idx := Item[int](ctx)
+		Set(ctx, fmt.Sprintf("result_%d", idx), idx*10)
+		return nil
+	})
+
+	wf, err := NewWorkflow("fe-state").
+		ForEach("items", Step("fe.write"), WithConcurrency(4)).
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, Params{
+		"items": []int{0, 1, 2, 3, 4, 5, 6, 7},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+
+	// Verify all items wrote their results
+	for i := 0; i < 8; i++ {
+		key := fmt.Sprintf("result_%d", i)
+		val, ok := result.Store[key]
+		if !ok {
+			t.Fatalf("missing key %q", key)
+		}
+		if val != i*10 {
+			t.Fatalf("%q = %v, want %d", key, val, i*10)
+		}
 	}
 }

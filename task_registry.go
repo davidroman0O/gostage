@@ -1,10 +1,6 @@
 package gostage
 
-import (
-	"fmt"
-	"sync"
-	"time"
-)
+import "time"
 
 // TaskFunc is the function signature for task implementations.
 //
@@ -26,54 +22,24 @@ type taskDef struct {
 	description string
 }
 
-var (
-	taskRegistryMu sync.RWMutex
-	taskRegistry   = make(map[string]*taskDef)
-)
-
-// Task registers a named task function in the global registry.
+// Task registers a named task function in the default registry.
 // Panics if a task with the same name is already registered.
 //
 //	gostage.Task("greet", func(ctx *gostage.Ctx) error {
 //	    return nil
 //	}, gostage.WithRetry(3), gostage.WithRetryDelay(time.Second))
 func Task(name string, fn TaskFunc, opts ...TaskOption) {
-	if name == "" {
-		panic("gostage.Task: " + ErrEmptyName.Error())
-	}
-
-	taskRegistryMu.Lock()
-	defer taskRegistryMu.Unlock()
-
-	if _, exists := taskRegistry[name]; exists {
-		panic(fmt.Sprintf("gostage: task %q already registered", name))
-	}
-
-	td := &taskDef{
-		name: name,
-		fn:   fn,
-	}
-	for _, opt := range opts {
-		opt(td)
-	}
-	taskRegistry[name] = td
+	defaultRegistry.RegisterTask(name, fn, opts...)
 }
 
-// lookupTask returns the task definition for the given name, or nil if not found.
+// lookupTask returns the task definition from the default registry.
 func lookupTask(name string) *taskDef {
-	taskRegistryMu.RLock()
-	defer taskRegistryMu.RUnlock()
-	return taskRegistry[name]
+	return defaultRegistry.lookupTask(name)
 }
 
 // ResetTaskRegistry clears all registered tasks and function registries. Used in tests.
 func ResetTaskRegistry() {
-	taskRegistryMu.Lock()
-	defer taskRegistryMu.Unlock()
-	taskRegistry = make(map[string]*taskDef)
-
-	// Also clear function registries (conditions, map functions)
-	ResetFunctionRegistries()
+	defaultRegistry.Reset()
 }
 
 // TaskOption configures a task definition.
@@ -127,17 +93,5 @@ func WithDescription(desc string) TaskOption {
 
 // ListTasksByTag returns names of all tasks that have the given tag.
 func ListTasksByTag(tag string) []string {
-	taskRegistryMu.RLock()
-	defer taskRegistryMu.RUnlock()
-
-	var names []string
-	for name, td := range taskRegistry {
-		for _, t := range td.tags {
-			if t == tag {
-				names = append(names, name)
-				break
-			}
-		}
-	}
-	return names
+	return defaultRegistry.listTasksByTag(tag)
 }

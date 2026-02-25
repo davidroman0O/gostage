@@ -183,8 +183,8 @@ func Bail(ctx *Ctx, reason string) error {
 // Suspend pauses the workflow, persists state, and waits for external input.
 // The data map is stored and available when the workflow is resumed.
 //
-//	return gostage.Suspend(ctx, gostage.P{"reason": "needs approval"})
-func Suspend(ctx *Ctx, data P) error {
+//	return gostage.Suspend(ctx, gostage.Params{"reason": "needs approval"})
+func Suspend(ctx *Ctx, data Params) error {
 	return &SuspendError{Data: data}
 }
 
@@ -317,7 +317,7 @@ func EnableStep(ctx *Ctx, stepID string) {
 // In child processes, the message goes over gRPC to the parent.
 // In the parent process, the message routes through the engine's handler system.
 //
-//	gostage.Send(ctx, "progress", gostage.P{"pct": 50})
+//	gostage.Send(ctx, "progress", gostage.Params{"pct": 50})
 func Send(ctx *Ctx, msgType string, payload any) error {
 	if ctx.sendFn != nil {
 		return ctx.sendFn(msgType, payload)

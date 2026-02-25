@@ -100,19 +100,22 @@ func (e *Engine) executeWorkflow(ctx context.Context, wf *Workflow, runID RunID,
 
 			// Update step status to Failed
 			if persistErr := e.persistence.UpdateStepStatus(ctx, runID, s.id, Failed); persistErr != nil {
-				e.logger.Warn("persist step failed status: %v", persistErr)
+				e.logger.Error("persist step failed status: %v", persistErr)
 			}
 			return fmt.Errorf("step %q failed: %w", s.name, err)
 		}
 
-		// Per-step flush: write dirty state entries to persistence
+		// Per-step flush: write dirty state entries to persistence.
+		// If the flush fails, the step must not be marked Completed — its state
+		// writes would be lost on resume.
 		if flushErr := wf.state.Flush(ctx); flushErr != nil {
-			e.logger.Warn("flush state after step %q: %v", s.name, flushErr)
+			return fmt.Errorf("flush state after step %q: %w", s.name, flushErr)
 		}
 
-		// Step completed successfully
+		// Step completed successfully — persist the completion status.
+		// If this fails, the step would re-execute on resume (safe but wasteful).
 		if persistErr := e.persistence.UpdateStepStatus(ctx, runID, s.id, Completed); persistErr != nil {
-			e.logger.Warn("persist step completed status: %v", persistErr)
+			return fmt.Errorf("persist step %q completed: %w", s.name, persistErr)
 		}
 
 		// Lifecycle callback
@@ -197,7 +200,7 @@ func (e *Engine) executeRef(ctx context.Context, wf *Workflow, ref StepRef, runI
 
 // executeSingle runs a single task with retry logic.
 func (e *Engine) executeSingle(ctx context.Context, wf *Workflow, taskName string, runID RunID, resuming bool) error {
-	td := lookupTask(taskName)
+	td := e.registry.lookupTask(taskName)
 	if td == nil {
 		return fmt.Errorf("task %q not registered", taskName)
 	}
@@ -215,13 +218,7 @@ func (e *Engine) executeSingle(ctx context.Context, wf *Workflow, taskName strin
 
 // updateCurrentStep updates the current step tracking in the run state.
 func (e *Engine) updateCurrentStep(ctx context.Context, runID RunID, stepID string) {
-	run, err := e.persistence.LoadRun(ctx, runID)
-	if err != nil {
-		e.logger.Warn("load run for step tracking: %v", err)
-		return
-	}
-	run.CurrentStep = stepID
-	if err := e.persistence.SaveRun(ctx, run); err != nil {
-		e.logger.Warn("save current step tracking: %v", err)
+	if err := e.persistence.UpdateCurrentStep(ctx, runID, stepID); err != nil {
+		e.logger.Error("update current step tracking: %v", err)
 	}
 }

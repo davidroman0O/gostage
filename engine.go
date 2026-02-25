@@ -27,8 +27,9 @@ type Engine struct {
 	// workflowCache stores workflows by ID for timer-based recovery.
 	workflowCacheMu sync.RWMutex
 	workflowCache   map[string]*Workflow
-	cacheOrder      []string // insertion order for eviction
-	cacheSize       int      // max cached workflows; 0 = unlimited
+	cacheOrder      []string       // insertion order for eviction
+	cacheSize       int            // max cached workflows; 0 = unlimited
+	pinnedWorkflows map[string]int // workflow ID → count of sleeping runs (protected from eviction)
 
 	// messageHandlers stores IPC message handler callbacks.
 	messageHandlersMu sync.RWMutex
@@ -43,6 +44,9 @@ type Engine struct {
 	taskMiddleware   []TaskMiddleware
 	childMiddleware  []ChildMiddleware
 
+	// registry holds task, condition, and map function registrations.
+	registry *Registry
+
 	// autoRecover enables crash recovery on startup.
 	autoRecover bool
 
@@ -55,8 +59,9 @@ type Engine struct {
 
 // runHandle tracks an in-flight workflow execution.
 type runHandle struct {
-	cancel context.CancelFunc
-	done   chan *Result
+	cancel   context.CancelFunc
+	done     chan *Result
+	finished chan struct{} // closed when all persistence writes are done
 }
 
 const defaultCacheSize = 1000
@@ -72,11 +77,13 @@ func New(opts ...EngineOption) (*Engine, error) {
 	e := &Engine{
 		persistence:     newMemoryPersistence(),
 		logger:          NewDefaultLogger(),
+		registry:        defaultRegistry,
 		runs:            make(map[RunID]*runHandle),
 		closeCh:         make(chan struct{}),
 		workflowCache:   make(map[string]*Workflow),
 		messageHandlers: make(map[string][]MessageHandler),
 		cacheSize:       defaultCacheSize,
+		pinnedWorkflows: make(map[string]int),
 	}
 
 	for _, opt := range opts {
@@ -103,27 +110,58 @@ func New(opts ...EngineOption) (*Engine, error) {
 
 // RunSync executes a workflow synchronously and returns the result.
 //
-//	result, err := engine.RunSync(ctx, wf, gostage.P{"order_id": "ORD-123"})
-func (e *Engine) RunSync(ctx context.Context, wf *Workflow, params P) (*Result, error) {
+//	result, err := engine.RunSync(ctx, wf, gostage.Params{"order_id": "ORD-123"})
+func (e *Engine) RunSync(ctx context.Context, wf *Workflow, params Params) (*Result, error) {
+	// Guard: reject if engine is closed
+	select {
+	case <-e.closeCh:
+		return nil, ErrEngineClosed
+	default:
+	}
+
 	if wf == nil {
 		return nil, ErrNilWorkflow
 	}
 	runID := RunID(uuid.New().String())
 
 	// Apply timeout if configured
+	runCtx := ctx
+	var timeoutCancel context.CancelFunc
 	if e.timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, e.timeout)
-		defer cancel()
+		runCtx, timeoutCancel = context.WithTimeout(ctx, e.timeout)
 	}
 
-	return e.executeRun(ctx, wf, runID, params)
+	// Create cancellable context for lifecycle management
+	runCtx, cancel := context.WithCancel(runCtx)
+
+	// Register with run tracking so Cancel/Close can reach us
+	handle := &runHandle{
+		cancel:   cancel,
+		done:     make(chan *Result, 1),
+		finished: make(chan struct{}),
+	}
+	e.mu.Lock()
+	e.runs[runID] = handle
+	e.mu.Unlock()
+
+	defer func() {
+		close(handle.finished)
+		e.mu.Lock()
+		delete(e.runs, runID)
+		e.mu.Unlock()
+		cancel()
+		if timeoutCancel != nil {
+			timeoutCancel()
+		}
+	}()
+
+	return e.executeRun(runCtx, wf, runID, params)
 }
 
 // Run starts a workflow execution asynchronously and returns the run ID.
 //
-//	runID, err := engine.Run(ctx, wf, gostage.P{"order_id": "ORD-123"})
-func (e *Engine) Run(ctx context.Context, wf *Workflow, params P) (RunID, error) {
+//	runID, err := engine.Run(ctx, wf, gostage.Params{"order_id": "ORD-123"})
+func (e *Engine) Run(ctx context.Context, wf *Workflow, params Params) (RunID, error) {
 	// Guard: reject if engine is closed
 	select {
 	case <-e.closeCh:
@@ -140,8 +178,9 @@ func (e *Engine) Run(ctx context.Context, wf *Workflow, params P) (RunID, error)
 	runCtx, cancel := context.WithCancel(ctx)
 
 	handle := &runHandle{
-		cancel: cancel,
-		done:   make(chan *Result, 1),
+		cancel:   cancel,
+		done:     make(chan *Result, 1),
+		finished: make(chan struct{}),
 	}
 
 	e.mu.Lock()
@@ -149,6 +188,12 @@ func (e *Engine) Run(ctx context.Context, wf *Workflow, params P) (RunID, error)
 	e.mu.Unlock()
 
 	if !e.pool.Submit(func() {
+		defer func() {
+			close(handle.finished)
+			e.mu.Lock()
+			delete(e.runs, runID)
+			e.mu.Unlock()
+		}()
 		result, _ := e.executeRun(runCtx, wf, runID, params)
 		if result == nil {
 			result = &Result{RunID: runID, Status: Failed, Error: fmt.Errorf("execution returned nil result")}
@@ -157,9 +202,6 @@ func (e *Engine) Run(ctx context.Context, wf *Workflow, params P) (RunID, error)
 		case handle.done <- result:
 		default:
 		}
-		e.mu.Lock()
-		delete(e.runs, runID)
-		e.mu.Unlock()
 	}) {
 		e.mu.Lock()
 		delete(e.runs, runID)
@@ -183,7 +225,7 @@ func (e *Engine) Wait(ctx context.Context, runID RunID) (*Result, error) {
 		// Run may have already completed via RunSync, check persistence
 		run, err := e.persistence.LoadRun(ctx, runID)
 		if err != nil {
-			return nil, fmt.Errorf("run %s not found", runID)
+			return nil, &RunNotFoundError{RunID: runID}
 		}
 		return &Result{
 			RunID:      run.RunID,
@@ -218,15 +260,55 @@ func (e *Engine) Cancel(ctx context.Context, runID RunID) error {
 		return err
 	}
 
+	// If the run was sleeping, cancel its timer and unpin the workflow
+	if run.Status == Sleeping {
+		e.scheduler.Cancel(runID)
+		e.workflowCacheMu.Lock()
+		if e.pinnedWorkflows[run.WorkflowID] > 0 {
+			e.pinnedWorkflows[run.WorkflowID]--
+		}
+		e.workflowCacheMu.Unlock()
+	}
+
 	run.Status = Cancelled
 	run.UpdatedAt = time.Now()
 	return e.persistence.SaveRun(ctx, run)
 }
 
+// DeleteRun removes a run and all its associated state from persistence.
+// If the run is currently active, it is cancelled and DeleteRun waits for
+// all in-flight persistence writes to complete before deleting.
+func (e *Engine) DeleteRun(ctx context.Context, runID RunID) error {
+	e.mu.Lock()
+	handle, active := e.runs[runID]
+	e.mu.Unlock()
+	if active {
+		handle.cancel()
+		// Wait for in-flight execution to finish all persistence writes
+		select {
+		case <-handle.finished:
+		case <-ctx.Done():
+			// Caller doesn't want to wait — proceed with deletion anyway
+		}
+	}
+	// Cancel any scheduled wake timer for sleeping runs
+	e.scheduler.Cancel(runID)
+	// Unpin workflow if this was a sleeping run
+	run, loadErr := e.persistence.LoadRun(ctx, runID)
+	if loadErr == nil && run.Status == Sleeping {
+		e.workflowCacheMu.Lock()
+		if e.pinnedWorkflows[run.WorkflowID] > 0 {
+			e.pinnedWorkflows[run.WorkflowID]--
+		}
+		e.workflowCacheMu.Unlock()
+	}
+	return e.persistence.DeleteRun(ctx, runID)
+}
+
 // Resume resumes a suspended workflow with the provided data.
 //
-//	result, err := engine.Resume(ctx, runID, gostage.P{"approved": true})
-func (e *Engine) Resume(ctx context.Context, wf *Workflow, runID RunID, data P) (*Result, error) {
+//	result, err := engine.Resume(ctx, runID, gostage.Params{"approved": true})
+func (e *Engine) Resume(ctx context.Context, wf *Workflow, runID RunID, data Params) (*Result, error) {
 	// Guard: reject if engine is closed
 	select {
 	case <-e.closeCh:
@@ -248,14 +330,16 @@ func (e *Engine) Resume(ctx context.Context, wf *Workflow, runID RunID, data P) 
 		return nil, fmt.Errorf("%w: %s", ErrRunAlreadyActive, runID)
 	}
 	handle := &runHandle{
-		cancel: runCancel,
-		done:   make(chan *Result, 1),
+		cancel:   runCancel,
+		done:     make(chan *Result, 1),
+		finished: make(chan struct{}),
 	}
 	e.runs[runID] = handle
 	e.mu.Unlock()
 
 	// Clean up slot when done
 	defer func() {
+		close(handle.finished)
 		e.mu.Lock()
 		delete(e.runs, runID)
 		e.mu.Unlock()
@@ -274,6 +358,18 @@ func (e *Engine) Resume(ctx context.Context, wf *Workflow, runID RunID, data P) 
 		return nil, fmt.Errorf("%w: expected %s, got %s", ErrWorkflowMismatch, run.WorkflowID, wf.ID)
 	}
 
+	// Verify the workflow has at least as many steps as the run has completed.
+	completedCount := 0
+	for _, status := range run.StepStates {
+		if status == Completed {
+			completedCount++
+		}
+	}
+	if len(wf.steps) < completedCount {
+		return nil, fmt.Errorf("%w: workflow has %d steps but run completed %d",
+			ErrWorkflowMismatch, len(wf.steps), completedCount)
+	}
+
 	wf = wf.clone()
 
 	// Restore state from persistence
@@ -283,9 +379,10 @@ func (e *Engine) Resume(ctx context.Context, wf *Workflow, runID RunID, data P) 
 		return nil, fmt.Errorf("load state for resume: %w", err)
 	}
 
-	// Replay dynamic mutations from the suspended run
+	// Restore dynamic step counter and replay mutations from the suspended run
+	wf.dynCounter = run.DynCounter
 	if len(run.Mutations) > 0 {
-		replayMutations(wf, run.Mutations)
+		replayMutations(wf, run.Mutations, e.registry)
 	}
 
 	// Inject resume data
@@ -328,10 +425,24 @@ func (e *Engine) dispatchMessage(msgType string, payload map[string]any) {
 	e.messageHandlersMu.RUnlock()
 
 	for _, h := range handlers {
-		h(msgType, payload)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					e.logger.Error("message handler panicked for %q: %v", msgType, r)
+				}
+			}()
+			h(msgType, payload)
+		}()
 	}
 	for _, h := range wildcardHandlers {
-		h(msgType, payload)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					e.logger.Error("wildcard message handler panicked for %q: %v", msgType, r)
+				}
+			}()
+			h(msgType, payload)
+		}()
 	}
 }
 
@@ -360,6 +471,12 @@ func (e *Engine) Close() error {
 		if e.pool != nil {
 			if err := e.pool.Shutdown(e.shutdownTimeout); err != nil {
 				e.logger.Warn("pool shutdown: %v", err)
+				// Shutdown timed out — workers may still be doing final bgCtx
+				// persistence writes. Wait a bounded grace period for those to finish
+				// before closing the persistence layer.
+				if !e.pool.WaitAll(time.Second) {
+					e.logger.Warn("some workers did not finish within grace period")
+				}
 			}
 		}
 
@@ -370,16 +487,37 @@ func (e *Engine) Close() error {
 }
 
 // cacheWorkflow stores a workflow in the engine's cache for timer-based recovery.
+// Uses LRU eviction: accessed entries are promoted to the end of cacheOrder.
 func (e *Engine) cacheWorkflow(wf *Workflow) {
 	e.workflowCacheMu.Lock()
 	defer e.workflowCacheMu.Unlock()
 
-	if _, exists := e.workflowCache[wf.ID]; !exists {
-		// Evict oldest if at capacity
+	if _, exists := e.workflowCache[wf.ID]; exists {
+		// LRU: move to end of order
+		for i, id := range e.cacheOrder {
+			if id == wf.ID {
+				e.cacheOrder = append(e.cacheOrder[:i], e.cacheOrder[i+1:]...)
+				break
+			}
+		}
+		e.cacheOrder = append(e.cacheOrder, wf.ID)
+	} else {
+		// New entry: evict LRU if at capacity (skip pinned entries)
 		if e.cacheSize > 0 && len(e.workflowCache) >= e.cacheSize {
-			oldest := e.cacheOrder[0]
-			delete(e.workflowCache, oldest)
-			e.cacheOrder = e.cacheOrder[1:]
+			evicted := false
+			for i := 0; i < len(e.cacheOrder); i++ {
+				if e.pinnedWorkflows[e.cacheOrder[i]] == 0 {
+					delete(e.workflowCache, e.cacheOrder[i])
+					e.cacheOrder = append(e.cacheOrder[:i], e.cacheOrder[i+1:]...)
+					evicted = true
+					break
+				}
+			}
+			if !evicted {
+				// All entries are pinned — allow cache to grow beyond limit.
+				// This is safer than losing a sleeping workflow.
+				e.logger.Warn("workflow cache exceeds limit: all %d entries are pinned by sleeping runs", len(e.workflowCache))
+			}
 		}
 		e.cacheOrder = append(e.cacheOrder, wf.ID)
 	}
@@ -408,8 +546,9 @@ func (e *Engine) wakeWorkflow(runID RunID) {
 
 		// Register handle BEFORE execution so Cancel() can reach this run
 		handle := &runHandle{
-			cancel: cancel,
-			done:   make(chan *Result, 1),
+			cancel:   cancel,
+			done:     make(chan *Result, 1),
+			finished: make(chan struct{}),
 		}
 		e.mu.Lock()
 		if _, active := e.runs[runID]; active {
@@ -422,6 +561,7 @@ func (e *Engine) wakeWorkflow(runID RunID) {
 
 		// Deferred cleanup
 		defer func() {
+			close(handle.finished)
 			e.mu.Lock()
 			delete(e.runs, runID)
 			e.mu.Unlock()
@@ -434,13 +574,28 @@ func (e *Engine) wakeWorkflow(runID RunID) {
 		}
 
 		cached := e.lookupCachedWorkflow(run.WorkflowID)
+		if cached == nil && run.WorkflowDef != nil {
+			// Cache miss — try to rebuild from persisted definition
+			if rebuilt, rebuildErr := NewWorkflowFromDefWithRegistry(run.WorkflowDef, e.registry); rebuildErr == nil {
+				cached = rebuilt
+				e.cacheWorkflow(rebuilt)
+			} else {
+				e.logger.Warn("rebuild workflow from definition: %v", rebuildErr)
+			}
+		}
 		if cached == nil {
-			// Workflow not in cache — mark as failed
+			// Workflow not in cache and can't be rebuilt — mark as failed
 			run.Status = Failed
 			run.UpdatedAt = time.Now()
 			if err := e.persistence.SaveRun(ctx, run); err != nil {
-				e.logger.Warn("persist failed wake (no cache): %v", err)
+				e.logger.Error("persist failed wake (no cache): %v", err)
 			}
+			// Unpin (defensive — should not happen if pinning is working correctly)
+			e.workflowCacheMu.Lock()
+			if e.pinnedWorkflows[run.WorkflowID] > 0 {
+				e.pinnedWorkflows[run.WorkflowID]--
+			}
+			e.workflowCacheMu.Unlock()
 			return
 		}
 
@@ -454,25 +609,57 @@ func (e *Engine) wakeWorkflow(runID RunID) {
 			run.Status = Failed
 			run.UpdatedAt = time.Now()
 			if saveErr := e.persistence.SaveRun(ctx, run); saveErr != nil {
-				e.logger.Warn("persist failed wake (state load): %v", saveErr)
+				e.logger.Error("persist failed wake (state load): %v", saveErr)
 			}
 			return
 		}
 
-		// Replay dynamic mutations from the sleeping run
+		// Restore dynamic step counter and replay mutations from the sleeping run
+		wf.dynCounter = run.DynCounter
 		if len(run.Mutations) > 0 {
-			replayMutations(wf, run.Mutations)
+			replayMutations(wf, run.Mutations, e.registry)
+		}
+
+		// Mark the sleep step as completed so the executor skips it on resume.
+		// The sleep step returned sleepError before being marked Completed,
+		// so without this the executor would re-execute the sleep and loop forever.
+		if run.CurrentStep != "" {
+			if err := e.persistence.UpdateStepStatus(ctx, runID, run.CurrentStep, Completed); err != nil {
+				// CRITICAL: without this, the sleep step re-executes on every wake, looping forever.
+				e.logger.Error("persist wake step completed: %v", err)
+				run.Status = Failed
+				run.UpdatedAt = time.Now()
+				if saveErr := e.persistence.SaveRun(ctx, run); saveErr != nil {
+					e.logger.Error("persist failed wake (step complete): %v", saveErr)
+				}
+				return
+			}
+			// Also update local copy — SaveRun below overwrites step_states,
+			// so without this the UpdateStepStatus write is lost.
+			if run.StepStates == nil {
+				run.StepStates = make(map[string]Status)
+			}
+			run.StepStates[run.CurrentStep] = Completed
 		}
 
 		// Update status to Running
 		run.Status = Running
 		run.UpdatedAt = time.Now()
 		if err := e.persistence.SaveRun(ctx, run); err != nil {
-			e.logger.Warn("persist wake status update: %v", err)
+			// Cannot proceed without marking the run as Running — abort.
+			e.logger.Error("persist wake status update: %v", err)
+			return
 		}
 
 		// Re-execute (resuming skips completed steps)
 		result := e.doExecute(ctx, wf, runID, true)
+
+		// Unpin workflow — this sleeping run is done
+		e.workflowCacheMu.Lock()
+		if e.pinnedWorkflows[run.WorkflowID] > 0 {
+			e.pinnedWorkflows[run.WorkflowID]--
+		}
+		e.workflowCacheMu.Unlock()
 
 		// Send result to waiting handle
 		select {
@@ -499,7 +686,7 @@ func (e *Engine) Recover(ctx context.Context) error {
 		run.Status = Failed
 		run.UpdatedAt = time.Now()
 		if err := e.persistence.SaveRun(ctx, run); err != nil {
-			e.logger.Warn("persist recovery (mark failed): %v", err)
+			e.logger.Error("persist recovery (mark failed): %v", err)
 		}
 	}
 
@@ -516,9 +703,19 @@ func (e *Engine) Recover(ctx context.Context) error {
 			run.Status = Failed
 			run.UpdatedAt = time.Now()
 			if err := e.persistence.SaveRun(ctx, run); err != nil {
-				e.logger.Warn("persist recovery (no wake time): %v", err)
+				e.logger.Error("persist recovery (no wake time): %v", err)
 			}
 			continue
+		}
+
+		// Pre-populate cache from persisted definition so wakeWorkflow
+		// can find the workflow without relying on in-memory cache.
+		if e.lookupCachedWorkflow(run.WorkflowID) == nil && run.WorkflowDef != nil {
+			if rebuilt, rebuildErr := NewWorkflowFromDefWithRegistry(run.WorkflowDef, e.registry); rebuildErr == nil {
+				e.cacheWorkflow(rebuilt)
+			} else {
+				e.logger.Warn("rebuild workflow from definition during recovery: %v", rebuildErr)
+			}
 		}
 
 		if !run.WakeAt.After(now) {
@@ -535,9 +732,17 @@ func (e *Engine) Recover(ctx context.Context) error {
 
 // executeRun is the core execution path shared by RunSync and Run.
 // It clones the workflow so each run has independent mutable state.
-func (e *Engine) executeRun(ctx context.Context, wf *Workflow, runID RunID, params P) (*Result, error) {
+func (e *Engine) executeRun(ctx context.Context, wf *Workflow, runID RunID, params Params) (*Result, error) {
 	// Cache the original (immutable template) for timer-based recovery
 	e.cacheWorkflow(wf)
+
+	// Attempt to serialize workflow definition for persistence-based recovery.
+	// Anonymous-closure workflows will fail serialization — that's fine,
+	// the cache is the primary recovery path for those.
+	var wfDef *WorkflowDef
+	if def, err := WorkflowToDefinition(wf); err == nil {
+		wfDef = def
+	}
 
 	// Clone so this run has its own state, mutation queue, and step state
 	wf = wf.clone()
@@ -553,12 +758,13 @@ func (e *Engine) executeRun(ctx context.Context, wf *Workflow, runID RunID, para
 
 	now := time.Now()
 	run := &RunState{
-		RunID:      runID,
-		WorkflowID: wf.ID,
-		Status:     Running,
-		StepStates: make(map[string]Status),
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		RunID:       runID,
+		WorkflowID:  wf.ID,
+		Status:      Running,
+		StepStates:  make(map[string]Status),
+		WorkflowDef: wfDef,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 
 	if err := e.persistence.SaveRun(ctx, run); err != nil {
@@ -637,6 +843,11 @@ func (e *Engine) doExecute(ctx context.Context, wf *Workflow, runID RunID, resum
 			e.scheduler.Schedule(runID, sleepErr.wakeAt)
 		}
 
+		// Pin workflow in cache so eviction doesn't kill sleeping runs
+		e.workflowCacheMu.Lock()
+		e.pinnedWorkflows[wf.ID]++
+		e.workflowCacheMu.Unlock()
+
 	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
 		result.Status = Cancelled
 		result.Error = err
@@ -668,18 +879,19 @@ func (e *Engine) doExecute(ctx context.Context, wf *Workflow, runID RunID, resum
 				run.WakeAt = sleepErr.wakeAt
 			}
 		}
-		// Capture dynamic mutations for resume/wake replay
+		// Capture dynamic mutations and counter for resume/wake replay
 		if result.Status == Suspended || result.Status == Sleeping {
 			run.Mutations = captureDynamicState(wf)
+			run.DynCounter = wf.dynCounter
 		}
 		if saveErr := e.persistence.SaveRun(bgCtx, run); saveErr != nil {
-			e.logger.Warn("persist final run state: %v", saveErr)
+			e.logger.Error("persist final run state: %v", saveErr)
 		}
 	}
 
 	// Final flush: write any remaining dirty state to persistence
 	if flushErr := wf.state.Flush(bgCtx); flushErr != nil {
-		e.logger.Warn("flush final state: %v", flushErr)
+		e.logger.Error("flush final state: %v", flushErr)
 	}
 
 	// Clean up persisted state for terminal runs — the final state is captured in Result.Store
@@ -691,4 +903,26 @@ func (e *Engine) doExecute(ctx context.Context, wf *Workflow, runID RunID, resum
 	}
 
 	return result
+}
+
+// ListRuns returns runs matching the given filter criteria.
+// Delegates to the persistence layer's filter-based query.
+func (e *Engine) ListRuns(ctx context.Context, filter RunFilter) ([]*RunState, error) {
+	select {
+	case <-e.closeCh:
+		return nil, ErrEngineClosed
+	default:
+	}
+	return e.persistence.ListRuns(ctx, filter)
+}
+
+// GetRun returns the current state of a run without blocking.
+// Unlike Wait, this returns immediately regardless of run status.
+func (e *Engine) GetRun(ctx context.Context, runID RunID) (*RunState, error) {
+	select {
+	case <-e.closeCh:
+		return nil, ErrEngineClosed
+	default:
+	}
+	return e.persistence.LoadRun(ctx, runID)
 }

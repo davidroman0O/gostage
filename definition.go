@@ -8,7 +8,7 @@ import (
 
 // --- Step kind name mapping ---
 
-var StepKindNames = map[StepKind]string{
+var stepKindNames = map[StepKind]string{
 	StepSingle:   "single",
 	StepParallel: "parallel",
 	StepBranch:   "branch",
@@ -21,7 +21,7 @@ var StepKindNames = map[StepKind]string{
 	StepStage:    "stage",
 }
 
-var StepKindFromName = map[string]StepKind{
+var stepKindFromName = map[string]StepKind{
 	"single":   StepSingle,
 	"parallel": StepParallel,
 	"branch":   StepBranch,
@@ -32,6 +32,18 @@ var StepKindFromName = map[string]StepKind{
 	"sub":      StepSub,
 	"sleep":    StepSleep,
 	"stage":    StepStage,
+}
+
+// StepKindToString returns the string name for a step kind constant.
+func StepKindToString(kind StepKind) (string, bool) {
+	name, ok := stepKindNames[kind]
+	return name, ok
+}
+
+// StepKindFromString returns the step kind constant for a string name.
+func StepKindFromString(name string) (StepKind, bool) {
+	kind, ok := stepKindFromName[name]
+	return kind, ok
 }
 
 // --- Serializable definition types ---
@@ -107,7 +119,7 @@ func WorkflowToDefinition(wf *Workflow) (*WorkflowDef, error) {
 	}
 
 	for _, s := range wf.steps {
-		kindName, ok := StepKindNames[s.kind]
+		kindName, ok := stepKindNames[s.kind]
 		if !ok {
 			return nil, fmt.Errorf("step %q: unknown kind %d", s.name, s.kind)
 		}
@@ -215,14 +227,20 @@ func refToRefDef(ref StepRef) (RefDef, error) {
 const maxWorkflowDepth = 64
 
 // NewWorkflowFromDef rebuilds a Workflow from a serialized definition.
-// Tasks are resolved via the task registry, conditions via the condition registry,
+// Tasks are resolved via the default registry, conditions via the condition registry,
 // and map functions via the map function registry. Returns an error if any
 // required function is not registered.
 func NewWorkflowFromDef(def *WorkflowDef) (*Workflow, error) {
-	return newWorkflowFromDef(def, maxWorkflowDepth)
+	return newWorkflowFromDef(def, maxWorkflowDepth, defaultRegistry)
 }
 
-func newWorkflowFromDef(def *WorkflowDef, depth int) (*Workflow, error) {
+// NewWorkflowFromDefWithRegistry rebuilds a Workflow using the specified registry
+// for task, condition, and map function lookups.
+func NewWorkflowFromDefWithRegistry(def *WorkflowDef, reg *Registry) (*Workflow, error) {
+	return newWorkflowFromDef(def, maxWorkflowDepth, reg)
+}
+
+func newWorkflowFromDef(def *WorkflowDef, depth int, reg *Registry) (*Workflow, error) {
 	if depth <= 0 {
 		return nil, fmt.Errorf("workflow nesting exceeds maximum depth (%d)", maxWorkflowDepth)
 	}
@@ -238,7 +256,7 @@ func newWorkflowFromDef(def *WorkflowDef, depth int) (*Workflow, error) {
 	}
 
 	for i, sd := range def.Steps {
-		kind, ok := StepKindFromName[sd.Kind]
+		kind, ok := stepKindFromName[sd.Kind]
 		if !ok {
 			return nil, fmt.Errorf("step %q: unknown kind %q", sd.Name, sd.Kind)
 		}
@@ -252,13 +270,13 @@ func newWorkflowFromDef(def *WorkflowDef, depth int) (*Workflow, error) {
 
 		switch kind {
 		case StepSingle:
-			if lookupTask(sd.TaskName) == nil {
+			if reg.lookupTask(sd.TaskName) == nil {
 				return nil, fmt.Errorf("task %q not registered", sd.TaskName)
 			}
 			s.taskName = sd.TaskName
 
 		case StepParallel, StepStage:
-			refs, err := refDefsToRefs(sd.Refs, depth)
+			refs, err := refDefsToRefs(sd.Refs, depth, reg)
 			if err != nil {
 				return nil, fmt.Errorf("step %q: %w", sd.Name, err)
 			}
@@ -270,14 +288,14 @@ func newWorkflowFromDef(def *WorkflowDef, depth int) (*Workflow, error) {
 					isDefault: cd.IsDefault,
 				}
 				if !cd.IsDefault {
-					fn := lookupCondition(cd.ConditionName)
+					fn := reg.lookupCondition(cd.ConditionName)
 					if fn == nil {
 						return nil, fmt.Errorf("condition %q not registered", cd.ConditionName)
 					}
 					bc.condition = fn
 					bc.condName = cd.ConditionName
 				}
-				ref, err := refDefToRef(cd.Ref, depth)
+				ref, err := refDefToRef(cd.Ref, depth, reg)
 				if err != nil {
 					return nil, fmt.Errorf("step %q case: %w", sd.Name, err)
 				}
@@ -290,7 +308,7 @@ func newWorkflowFromDef(def *WorkflowDef, depth int) (*Workflow, error) {
 			s.concurrency = sd.Concurrency
 			s.useSpawn = sd.UseSpawn
 			if sd.ForEachRef != nil {
-				ref, err := refDefToRef(*sd.ForEachRef, depth)
+				ref, err := refDefToRef(*sd.ForEachRef, depth, reg)
 				if err != nil {
 					return nil, fmt.Errorf("step %q forEach ref: %w", sd.Name, err)
 				}
@@ -298,7 +316,7 @@ func newWorkflowFromDef(def *WorkflowDef, depth int) (*Workflow, error) {
 			}
 
 		case StepMap:
-			fn := lookupMapFn(sd.MapFnName)
+			fn := reg.lookupMapFn(sd.MapFnName)
 			if fn == nil {
 				return nil, fmt.Errorf("map function %q not registered", sd.MapFnName)
 			}
@@ -306,14 +324,14 @@ func newWorkflowFromDef(def *WorkflowDef, depth int) (*Workflow, error) {
 			s.mapFnName = sd.MapFnName
 
 		case StepDoUntil, StepDoWhile:
-			fn := lookupCondition(sd.LoopCondName)
+			fn := reg.lookupCondition(sd.LoopCondName)
 			if fn == nil {
 				return nil, fmt.Errorf("condition %q not registered", sd.LoopCondName)
 			}
 			s.loopCond = fn
 			s.loopCondName = sd.LoopCondName
 			if sd.LoopRef != nil {
-				ref, err := refDefToRef(*sd.LoopRef, depth)
+				ref, err := refDefToRef(*sd.LoopRef, depth, reg)
 				if err != nil {
 					return nil, fmt.Errorf("step %q loop ref: %w", sd.Name, err)
 				}
@@ -322,7 +340,7 @@ func newWorkflowFromDef(def *WorkflowDef, depth int) (*Workflow, error) {
 
 		case StepSub:
 			if sd.SubWorkflow != nil {
-				subWf, err := newWorkflowFromDef(sd.SubWorkflow, depth-1)
+				subWf, err := newWorkflowFromDef(sd.SubWorkflow, depth-1, reg)
 				if err != nil {
 					return nil, fmt.Errorf("step %q sub: %w", sd.Name, err)
 				}
@@ -344,25 +362,25 @@ func newWorkflowFromDef(def *WorkflowDef, depth int) (*Workflow, error) {
 }
 
 // refDefToRef converts a RefDef to a StepRef by looking up registered tasks.
-func refDefToRef(rd RefDef, depth int) (StepRef, error) {
+func refDefToRef(rd RefDef, depth int, reg *Registry) (StepRef, error) {
 	if rd.SubWorkflow != nil {
-		subWf, err := newWorkflowFromDef(rd.SubWorkflow, depth-1)
+		subWf, err := newWorkflowFromDef(rd.SubWorkflow, depth-1, reg)
 		if err != nil {
 			return StepRef{}, err
 		}
 		return StepRef{subWorkflow: subWf}, nil
 	}
-	if lookupTask(rd.TaskName) == nil {
+	if reg.lookupTask(rd.TaskName) == nil {
 		return StepRef{}, fmt.Errorf("task %q not registered", rd.TaskName)
 	}
 	return StepRef{taskName: rd.TaskName}, nil
 }
 
 // refDefsToRefs converts a slice of RefDef to StepRefs.
-func refDefsToRefs(rds []RefDef, depth int) ([]StepRef, error) {
+func refDefsToRefs(rds []RefDef, depth int, reg *Registry) ([]StepRef, error) {
 	refs := make([]StepRef, 0, len(rds))
 	for _, rd := range rds {
-		ref, err := refDefToRef(rd, depth)
+		ref, err := refDefToRef(rd, depth, reg)
 		if err != nil {
 			return nil, err
 		}

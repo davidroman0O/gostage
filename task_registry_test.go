@@ -1,6 +1,8 @@
 package gostage
 
 import (
+	"context"
+	"sync"
 	"testing"
 	"time"
 )
@@ -70,5 +72,84 @@ func TestTask_ResetRegistry(t *testing.T) {
 	ResetTaskRegistry()
 	if lookupTask("tr.temp") != nil {
 		t.Fatal("expected nil after reset")
+	}
+}
+
+// TestEngine_RegistryIsolation verifies two engines with separate registries
+// can run concurrently without cross-contamination.
+func TestEngine_RegistryIsolation(t *testing.T) {
+	ResetTaskRegistry()
+
+	// Register a placeholder in the default registry so the builder validates.
+	// Each engine's registry will override with its own implementation at runtime.
+	Task("iso.task", func(ctx *Ctx) error {
+		Set(ctx, "source", "default")
+		return nil
+	})
+
+	regA := NewRegistry()
+	regA.RegisterTask("iso.task", func(ctx *Ctx) error {
+		Set(ctx, "source", "engine-A")
+		return nil
+	})
+
+	regB := NewRegistry()
+	regB.RegisterTask("iso.task", func(ctx *Ctx) error {
+		Set(ctx, "source", "engine-B")
+		return nil
+	})
+
+	wfA, err := NewWorkflow("wf-a").Step("iso.task").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wfB, err := NewWorkflow("wf-b").Step("iso.task").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engineA, err := New(WithRegistry(regA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engineA.Close()
+
+	engineB, err := New(WithRegistry(regB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engineB.Close()
+
+	// Run concurrently
+	var wg sync.WaitGroup
+	var resultA, resultB *Result
+	var errA, errB error
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		resultA, errA = engineA.RunSync(context.Background(), wfA, nil)
+	}()
+	go func() {
+		defer wg.Done()
+		resultB, errB = engineB.RunSync(context.Background(), wfB, nil)
+	}()
+	wg.Wait()
+
+	if errA != nil {
+		t.Fatalf("engine A: %v", errA)
+	}
+	if errB != nil {
+		t.Fatalf("engine B: %v", errB)
+	}
+
+	sourceA, _ := ResultGet[string](resultA, "source")
+	sourceB, _ := ResultGet[string](resultB, "source")
+
+	if sourceA != "engine-A" {
+		t.Fatalf("engine A produced %q, want %q", sourceA, "engine-A")
+	}
+	if sourceB != "engine-B" {
+		t.Fatalf("engine B produced %q, want %q", sourceB, "engine-B")
 	}
 }

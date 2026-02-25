@@ -2,6 +2,7 @@ package gostage
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"time"
 )
@@ -32,11 +33,27 @@ type Persistence interface {
 	// DeleteStateKey removes a single state entry for a run.
 	DeleteStateKey(ctx context.Context, runID RunID, key string) error
 
+	// DeleteRun removes a run and all its associated state.
+	DeleteRun(ctx context.Context, runID RunID) error
+
+	// UpdateCurrentStep updates only the current step identifier for a run.
+	UpdateCurrentStep(ctx context.Context, runID RunID, stepID string) error
+
 	// ListRuns returns runs matching the given filter.
 	ListRuns(ctx context.Context, filter RunFilter) ([]*RunState, error)
 
 	// Close releases any resources held by the persistence layer.
 	Close() error
+}
+
+// InMemoryPersistence is a marker interface for persistence implementations
+// that do not survive process restarts. When the engine detects an in-memory
+// backend, sleep steps block the goroutine instead of scheduling a timer-based
+// wake — since there is nothing durable to persist, the scheduler cannot
+// restore the workflow after a restart.
+type InMemoryPersistence interface {
+	Persistence
+	isInMemory()
 }
 
 // RunState represents the persisted state of a workflow execution.
@@ -50,6 +67,8 @@ type RunState struct {
 	SuspendData map[string]any    `json:"suspend_data,omitempty"`
 	WakeAt      time.Time         `json:"wake_at,omitempty"`
 	Mutations   []Mutation        `json:"mutations,omitempty"`
+	DynCounter  int               `json:"dyn_counter,omitempty"`
+	WorkflowDef *WorkflowDef     `json:"workflow_def,omitempty"`
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
 }
@@ -157,6 +176,28 @@ func (m *memoryPersistence) DeleteStateKey(_ context.Context, runID RunID, key s
 	return nil
 }
 
+func (m *memoryPersistence) DeleteRun(_ context.Context, runID RunID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.runs, runID)
+	delete(m.states, runID)
+	return nil
+}
+
+func (m *memoryPersistence) UpdateCurrentStep(_ context.Context, runID RunID, stepID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	run, ok := m.runs[runID]
+	if !ok {
+		return &RunNotFoundError{RunID: runID}
+	}
+	run.CurrentStep = stepID
+	run.UpdatedAt = time.Now()
+	return nil
+}
+
+func (m *memoryPersistence) isInMemory() {}
+
 func (m *memoryPersistence) ListRuns(_ context.Context, filter RunFilter) ([]*RunState, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -203,6 +244,16 @@ func copyRunState(run *RunState) *RunState {
 		}
 	}
 
+	if run.WorkflowDef != nil {
+		data, err := json.Marshal(run.WorkflowDef)
+		if err == nil {
+			var defCopy WorkflowDef
+			if json.Unmarshal(data, &defCopy) == nil {
+				cp.WorkflowDef = &defCopy
+			}
+		}
+	}
+
 	return &cp
 }
 
@@ -217,4 +268,8 @@ type RunNotFoundError struct {
 
 func (e *RunNotFoundError) Error() string {
 	return "run not found: " + string(e.RunID)
+}
+
+func (e *RunNotFoundError) Is(target error) bool {
+	return target == ErrRunNotFound
 }

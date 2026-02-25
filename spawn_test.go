@@ -47,7 +47,7 @@ func registerSpawnTestTasks() {
 
 	Task("spawn.send", func(ctx *Ctx) error {
 		item := Item[string](ctx)
-		Send(ctx, "progress", P{"track": item, "pct": 100})
+		Send(ctx, "progress", Params{"track": item, "pct": 100})
 		Set(ctx, "sent", true)
 		return nil
 	})
@@ -168,7 +168,7 @@ func TestSpawn_SingleItem(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	result, err := engine.RunSync(ctx, wf, P{"items": []string{"hello"}})
+	result, err := engine.RunSync(ctx, wf, Params{"items": []string{"hello"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestSpawn_ConcurrentItems(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	result, err := engine.RunSync(ctx, wf, P{"numbers": []float64{1, 2, 3, 4}})
+	result, err := engine.RunSync(ctx, wf, Params{"numbers": []float64{1, 2, 3, 4}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestSpawn_ChildError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	result, err := engine.RunSync(ctx, wf, P{"items": []string{"fail"}})
+	result, err := engine.RunSync(ctx, wf, Params{"items": []string{"fail"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func TestSpawn_ContextCancellation(t *testing.T) {
 		cancel()
 	}()
 
-	result, err := engine.RunSync(ctx, wf, P{"items": []string{"a", "b", "c", "d", "e", "f", "g", "h"}})
+	result, err := engine.RunSync(ctx, wf, Params{"items": []string{"a", "b", "c", "d", "e", "f", "g", "h"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +283,7 @@ func TestSpawn_SendIPC(t *testing.T) {
 	ResetTaskRegistry()
 	Task("spawn.send", func(ctx *Ctx) error {
 		item := Item[string](ctx)
-		Send(ctx, "progress", P{"track": item, "pct": 100})
+		Send(ctx, "progress", Params{"track": item, "pct": 100})
 		Set(ctx, "sent", true)
 		return nil
 	})
@@ -303,7 +303,7 @@ func TestSpawn_SendIPC(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	result, err := engine.RunSync(ctx, wf, P{"items": []string{"track1"}})
+	result, err := engine.RunSync(ctx, wf, Params{"items": []string{"track1"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +338,7 @@ func TestSpawn_ForEachItemAccess(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	result, err := engine.RunSync(ctx, wf, P{"items": []string{"alpha", "beta", "gamma"}})
+	result, err := engine.RunSync(ctx, wf, Params{"items": []string{"alpha", "beta", "gamma"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +386,7 @@ func TestSpawn_EndToEnd(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	result, err := engine.RunSync(ctx, wf, P{})
+	result, err := engine.RunSync(ctx, wf, Params{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +423,7 @@ func TestSpawn_EmptyCollection(t *testing.T) {
 	defer engine.Close()
 
 	ctx := context.Background()
-	result, err := engine.RunSync(ctx, wf, P{"items": []string{}})
+	result, err := engine.RunSync(ctx, wf, Params{"items": []string{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +481,7 @@ func TestSpawn_AllFourMiddlewareLevels(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	result, err := engine.RunSync(ctx, wf, P{"items": []string{"a", "b"}})
+	result, err := engine.RunSync(ctx, wf, Params{"items": []string{"a", "b"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,7 +539,7 @@ func TestSpawn_ChildRetryRespected(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	result, err := engine.RunSync(ctx, wf, P{
+	result, err := engine.RunSync(ctx, wf, Params{
 		"items":       []string{"x"},
 		"marker_path": markerPath,
 	})

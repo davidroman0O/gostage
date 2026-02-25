@@ -92,11 +92,11 @@ func captureDynamicState(wf *Workflow) []Mutation {
 // replayMutations applies persisted mutations to a freshly cloned workflow.
 // This restores dynamic modifications (inserted steps, disabled steps)
 // that were captured before a suspend or sleep.
-func replayMutations(wf *Workflow, mutations []Mutation) {
+func replayMutations(wf *Workflow, mutations []Mutation, reg *Registry) {
 	for _, m := range mutations {
 		switch m.Kind {
 		case MutInsertAfter:
-			td := lookupTask(m.TaskName)
+			td := reg.lookupTask(m.TaskName)
 			if td == nil {
 				continue
 			}

@@ -187,6 +187,9 @@ func HandleChild() {
 		// Retry loop mirroring executeSingle — reads the task definition's
 		// retry count and delay so WithRetry is respected in child processes.
 		retries := td.retries
+		if retries < 0 {
+			retries = 0
+		}
 		retryDelay := td.retryDelay
 
 		retryLoop:

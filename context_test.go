@@ -48,7 +48,7 @@ func TestCtx_Suspend(t *testing.T) {
 	s := newRunState("test", nil)
 	ctx := newCtx(context.Background(), s, NewDefaultLogger())
 
-	err := Suspend(ctx, P{"reason": "approval"})
+	err := Suspend(ctx, Params{"reason": "approval"})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -118,7 +118,7 @@ func TestCtx_Send_NoOp(t *testing.T) {
 	ctx := newCtx(context.Background(), s, NewDefaultLogger())
 
 	// No sendFn configured — should be no-op
-	err := Send(ctx, "progress", P{"pct": 50})
+	err := Send(ctx, "progress", Params{"pct": 50})
 	if err != nil {
 		t.Fatal(err)
 	}

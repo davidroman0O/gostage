@@ -45,7 +45,7 @@ type step struct {
 	useSpawn      bool
 
 	// StepMap
-	mapFn     func(*Ctx)
+	mapFn     func(*Ctx) error
 	mapFnName string // named variant for serializable workflows
 
 	// StepDoUntil / StepDoWhile
@@ -286,7 +286,7 @@ type builderStep struct {
 	forEachOpts   []ForEachOption
 
 	// StepMap
-	mapFn     func(*Ctx)
+	mapFn     func(*Ctx) error
 	mapFnName string // named variant for serializable workflows
 
 	// StepDoUntil / StepDoWhile
@@ -451,11 +451,12 @@ func (b *WorkflowBuilder) DoWhile(ref StepRef, cond func(*Ctx) bool) *WorkflowBu
 
 // Map adds an inline data transformation step.
 //
-//	wf.Map(func(ctx *gostage.Ctx) {
+//	wf.Map(func(ctx *gostage.Ctx) error {
 //	    raw := gostage.Get[[]byte](ctx, "raw")
 //	    gostage.Set(ctx, "records", parseCSV(raw))
+//	    return nil
 //	})
-func (b *WorkflowBuilder) Map(fn func(*Ctx)) *WorkflowBuilder {
+func (b *WorkflowBuilder) Map(fn func(*Ctx) error) *WorkflowBuilder {
 	if b.committed {
 		panic("gostage: cannot modify workflow after Commit()")
 	}
@@ -519,9 +520,10 @@ func WhenNamed(condName string) *WhenClause {
 // MapNamed adds a serializable data transformation step using a registered map function.
 // The function must be registered with MapFn() before building the workflow.
 //
-//	gostage.MapFn("parse-csv", func(ctx *gostage.Ctx) {
+//	gostage.MapFn("parse-csv", func(ctx *gostage.Ctx) error {
 //	    raw := gostage.Get[[]byte](ctx, "raw")
 //	    gostage.Set(ctx, "records", parseCSV(raw))
+//	    return nil
 //	})
 //	wf.MapNamed("parse-csv")
 func (b *WorkflowBuilder) MapNamed(mapFnName string) *WorkflowBuilder {
@@ -695,7 +697,7 @@ func (wf *Workflow) clone() *Workflow {
 	cloned := &Workflow{
 		ID:         wf.ID,
 		Name:       wf.Name,
-		Tags:       wf.Tags,
+		Tags:       append([]string(nil), wf.Tags...),
 		state:      wf.state.Clone(),
 		cfg:        wf.cfg,
 		mutations:  newMutationQueue(),
