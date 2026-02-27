@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -414,6 +415,29 @@ func (e *Engine) OnMessage(msgType string, handler MessageHandler) {
 	e.messageHandlersMu.Lock()
 	defer e.messageHandlersMu.Unlock()
 	e.messageHandlers[msgType] = append(e.messageHandlers[msgType], handler)
+}
+
+// OffMessage removes a handler for IPC messages of the given type.
+// If the handler is not found, it is a no-op.
+func (e *Engine) OffMessage(msgType string, handler MessageHandler) {
+	if handler == nil {
+		return
+	}
+	e.messageHandlersMu.Lock()
+	defer e.messageHandlersMu.Unlock()
+
+	handlers, ok := e.messageHandlers[msgType]
+	if !ok {
+		return
+	}
+
+	for i, h := range handlers {
+		if reflect.ValueOf(h).Pointer() == reflect.ValueOf(handler).Pointer() {
+			// Remove handler at index i
+			e.messageHandlers[msgType] = append(handlers[:i], handlers[i+1:]...)
+			return
+		}
+	}
 }
 
 // dispatchMessage routes an IPC message to all registered handlers.

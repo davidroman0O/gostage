@@ -281,6 +281,7 @@ func connectToParent(ctx context.Context, addr string) (*grpc.ClientConn, error)
 
 		conn, err = grpc.NewClient(addr,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithTimeout(10*time.Second),
 			grpc.WithKeepaliveParams(keepalive.ClientParameters{
 				Time:                10 * time.Second,
 				Timeout:             5 * time.Second,
