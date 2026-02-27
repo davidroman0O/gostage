@@ -28,7 +28,7 @@ func (e *Engine) executeParallel(ctx context.Context, wf *Workflow, refs []StepR
 		if resuming && stepStates != nil && stepStates[refKey] == Completed {
 			return nil
 		}
-		if err := e.executeRef(ctx, wf, refs[0], runID, resuming); err != nil {
+		if err := e.executeRef(ctx, wf, refs[0], runID, resuming, refKey); err != nil {
 			return err
 		}
 		if persistErr := e.persistence.UpdateStepStatus(ctx, runID, refKey, Completed); persistErr != nil {
@@ -69,7 +69,7 @@ func (e *Engine) executeParallel(ctx context.Context, wf *Workflow, refs []StepR
 					mu.Unlock()
 				}
 			}()
-			if err := e.executeRef(childCtx, wf, ref, runID, resuming); err != nil {
+			if err := e.executeRef(childCtx, wf, ref, runID, resuming, refKeyCopy); err != nil {
 				mu.Lock()
 				if firstErr == nil {
 					firstErr = err
@@ -114,7 +114,7 @@ func (e *Engine) executeStage(ctx context.Context, wf *Workflow, refs []StepRef,
 			continue
 		}
 
-		if err := e.executeRef(ctx, wf, ref, runID, resuming); err != nil {
+		if err := e.executeRef(ctx, wf, ref, runID, resuming, refKey); err != nil {
 			return err
 		}
 		if persistErr := e.persistence.UpdateStepStatus(ctx, runID, refKey, Completed); persistErr != nil {

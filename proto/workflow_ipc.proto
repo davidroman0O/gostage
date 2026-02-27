@@ -34,6 +34,8 @@ message IPCMessage {
     StorePutPayload store_put = 11;
     WorkflowResultPayload workflow_result = 14;
     FinalStorePayload final_store = 15;
+    IPCPayload ipc_payload = 16;
+    BailPayload bail_payload = 17;
   }
 
   string message_id = 20;
@@ -45,15 +47,28 @@ message IPCMessage {
 enum MessageType {
   MESSAGE_TYPE_UNSPECIFIED = 0;
   MESSAGE_TYPE_STORE_PUT = 2;
+  MESSAGE_TYPE_IPC = 3;
   MESSAGE_TYPE_WORKFLOW_RESULT = 5;
   MESSAGE_TYPE_FINAL_STORE = 6;
+  MESSAGE_TYPE_BAIL = 7;
 }
 
-// StorePutPayload carries key-value data or IPC messages from child Send() calls.
+// StorePutPayload carries key-value store update data.
 message StorePutPayload {
   string key = 1;
   bytes value = 2;
   string value_type = 3;
+}
+
+// IPCPayload carries in-task Send() messages from child to parent.
+message IPCPayload {
+  string msg_type = 1;
+  bytes payload_json = 2;
+}
+
+// BailPayload signals intentional early exit from a child task.
+message BailPayload {
+  string reason = 1;
 }
 
 // WorkflowResultPayload carries error results from child processes.

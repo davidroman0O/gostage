@@ -81,6 +81,8 @@ type RunFilter struct {
 	Status Status
 	// Limit caps the number of results. 0 means no limit.
 	Limit int
+	// Offset skips the first N results. Used with Limit for pagination.
+	Offset int
 }
 
 // memoryPersistence is an in-memory implementation of Persistence.
@@ -201,7 +203,7 @@ func (m *memoryPersistence) isInMemory() {}
 func (m *memoryPersistence) ListRuns(_ context.Context, filter RunFilter) ([]*RunState, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	var results []*RunState
+	var filtered []*RunState
 	for _, run := range m.runs {
 		if filter.WorkflowID != "" && run.WorkflowID != filter.WorkflowID {
 			continue
@@ -209,12 +211,21 @@ func (m *memoryPersistence) ListRuns(_ context.Context, filter RunFilter) ([]*Ru
 		if filter.Status != "" && run.Status != filter.Status {
 			continue
 		}
-		results = append(results, copyRunState(run))
-		if filter.Limit > 0 && len(results) >= filter.Limit {
-			break
-		}
+		filtered = append(filtered, copyRunState(run))
 	}
-	return results, nil
+	// Apply offset and limit.
+	start := filter.Offset
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(filtered) {
+		return nil, nil
+	}
+	filtered = filtered[start:]
+	if filter.Limit > 0 && len(filtered) > filter.Limit {
+		filtered = filtered[:filter.Limit]
+	}
+	return filtered, nil
 }
 
 // copyRunState returns a shallow copy of run with its mutable fields deep-copied

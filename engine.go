@@ -1,12 +1,13 @@
 package gostage
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -26,15 +27,18 @@ type Engine struct {
 	closeOnce sync.Once
 
 	// workflowCache stores workflows by ID for timer-based recovery.
-	workflowCacheMu sync.RWMutex
-	workflowCache   map[string]*Workflow
-	cacheOrder      []string       // insertion order for eviction
-	cacheSize       int            // max cached workflows; 0 = unlimited
-	pinnedWorkflows map[string]int // workflow ID → count of sleeping runs (protected from eviction)
+	workflowCacheMu   sync.RWMutex
+	workflowCache     map[string]*Workflow
+	workflowCacheList *list.List              // front = MRU; back = LRU
+	workflowCacheNode map[string]*list.Element // wf.ID → list node for O(1) promotion
+	cacheSize         int                      // max cached workflows; 0 = unlimited
+	pinnedWorkflows   map[string]int           // workflow ID → count of sleeping runs (protected from eviction)
 
 	// messageHandlers stores IPC message handler callbacks.
-	messageHandlersMu sync.RWMutex
-	messageHandlers   map[string][]MessageHandler
+	messageHandlersMu      sync.RWMutex
+	messageHandlers        map[string][]handlerEntry // msgType → entries
+	messageHandlerIndex    map[HandlerID]string      // id → msgType for O(1) OffMessage
+	messageHandlerCounter  atomic.Int64
 
 	// scheduler manages timed wakeups for sleeping workflows.
 	scheduler *timerScheduler
@@ -56,6 +60,17 @@ type Engine struct {
 
 	// shutdownTimeout is how long Close() waits for workers, 0 = indefinite.
 	shutdownTimeout time.Duration
+
+	// noPool and noScheduler skip creating the worker pool and timer scheduler.
+	// Used by HandleChild to avoid idle goroutines in short-lived child processes.
+	noPool      bool
+	noScheduler bool
+}
+
+// handlerEntry pairs a stable ID with a message handler function.
+type handlerEntry struct {
+	id      HandlerID
+	handler MessageHandler
 }
 
 // runHandle tracks an in-flight workflow execution.
@@ -81,8 +96,11 @@ func New(opts ...EngineOption) (*Engine, error) {
 		registry:        defaultRegistry,
 		runs:            make(map[RunID]*runHandle),
 		closeCh:         make(chan struct{}),
-		workflowCache:   make(map[string]*Workflow),
-		messageHandlers: make(map[string][]MessageHandler),
+		workflowCache:     make(map[string]*Workflow),
+		workflowCacheList: list.New(),
+		workflowCacheNode: make(map[string]*list.Element),
+		messageHandlers:     make(map[string][]handlerEntry),
+		messageHandlerIndex: make(map[HandlerID]string),
 		cacheSize:       defaultCacheSize,
 		pinnedWorkflows: make(map[string]int),
 	}
@@ -93,11 +111,17 @@ func New(opts ...EngineOption) (*Engine, error) {
 		}
 	}
 
-	// Start worker pool (default size if not configured)
-	e.pool = newWorkerPool(e.poolSize)
+	// Start worker pool (default size if not configured).
+	// Skipped for child processes that never submit async jobs.
+	if !e.noPool {
+		e.pool = newWorkerPool(e.poolSize)
+	}
 
-	// Start timer scheduler for non-blocking sleep
-	e.scheduler = newTimerScheduler(e.wakeWorkflow)
+	// Start timer scheduler for non-blocking sleep.
+	// Skipped for child processes that use in-memory persistence and never sleep.
+	if !e.noScheduler {
+		e.scheduler = newTimerScheduler(e.wakeWorkflow)
+	}
 
 	// Auto-recover if configured
 	if e.autoRecover {
@@ -187,6 +211,14 @@ func (e *Engine) Run(ctx context.Context, wf *Workflow, params Params) (RunID, e
 	e.mu.Lock()
 	e.runs[runID] = handle
 	e.mu.Unlock()
+
+	if e.pool == nil {
+		e.mu.Lock()
+		delete(e.runs, runID)
+		e.mu.Unlock()
+		cancel()
+		return "", ErrEngineClosed
+	}
 
 	if !e.pool.Submit(func() {
 		defer func() {
@@ -408,33 +440,38 @@ func (e *Engine) Resume(ctx context.Context, wf *Workflow, runID RunID, data Par
 // OnMessage registers a handler for IPC messages of the given type.
 // Handlers fire when a child process sends a message via Send(),
 // or when Send() is called in the parent process (local routing).
-func (e *Engine) OnMessage(msgType string, handler MessageHandler) {
+// Returns a HandlerID that can be passed to OffMessage to deregister.
+func (e *Engine) OnMessage(msgType string, handler MessageHandler) HandlerID {
 	if handler == nil {
-		return
+		return 0
 	}
+	id := HandlerID(e.messageHandlerCounter.Add(1))
 	e.messageHandlersMu.Lock()
 	defer e.messageHandlersMu.Unlock()
-	e.messageHandlers[msgType] = append(e.messageHandlers[msgType], handler)
+	e.messageHandlers[msgType] = append(e.messageHandlers[msgType], handlerEntry{id: id, handler: handler})
+	e.messageHandlerIndex[id] = msgType
+	return id
 }
 
-// OffMessage removes a handler for IPC messages of the given type.
-// If the handler is not found, it is a no-op.
-func (e *Engine) OffMessage(msgType string, handler MessageHandler) {
-	if handler == nil {
+// OffMessage removes a previously registered handler by its HandlerID.
+// If the ID is not found, it is a no-op.
+func (e *Engine) OffMessage(id HandlerID) {
+	if id == 0 {
 		return
 	}
 	e.messageHandlersMu.Lock()
 	defer e.messageHandlersMu.Unlock()
 
-	handlers, ok := e.messageHandlers[msgType]
+	msgType, ok := e.messageHandlerIndex[id]
 	if !ok {
 		return
 	}
+	delete(e.messageHandlerIndex, id)
 
-	for i, h := range handlers {
-		if reflect.ValueOf(h).Pointer() == reflect.ValueOf(handler).Pointer() {
-			// Remove handler at index i
-			e.messageHandlers[msgType] = append(handlers[:i], handlers[i+1:]...)
+	entries := e.messageHandlers[msgType]
+	for i, entry := range entries {
+		if entry.id == id {
+			e.messageHandlers[msgType] = append(entries[:i], entries[i+1:]...)
 			return
 		}
 	}
@@ -443,29 +480,31 @@ func (e *Engine) OffMessage(msgType string, handler MessageHandler) {
 // dispatchMessage routes an IPC message to all registered handlers.
 func (e *Engine) dispatchMessage(msgType string, payload map[string]any) {
 	e.messageHandlersMu.RLock()
-	handlers := e.messageHandlers[msgType]
+	entries := e.messageHandlers[msgType]
 	// Also fire wildcard handlers (registered with "*")
-	wildcardHandlers := e.messageHandlers["*"]
+	wildcardEntries := e.messageHandlers["*"]
 	e.messageHandlersMu.RUnlock()
 
-	for _, h := range handlers {
+	for _, entry := range entries {
+		fn := entry.handler
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
 					e.logger.Error("message handler panicked for %q: %v", msgType, r)
 				}
 			}()
-			h(msgType, payload)
+			fn(msgType, payload)
 		}()
 	}
-	for _, h := range wildcardHandlers {
+	for _, entry := range wildcardEntries {
+		fn := entry.handler
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
 					e.logger.Error("wildcard message handler panicked for %q: %v", msgType, r)
 				}
 			}()
-			h(msgType, payload)
+			fn(msgType, payload)
 		}()
 	}
 }
@@ -511,28 +550,25 @@ func (e *Engine) Close() error {
 }
 
 // cacheWorkflow stores a workflow in the engine's cache for timer-based recovery.
-// Uses LRU eviction: accessed entries are promoted to the end of cacheOrder.
+// Uses O(1) LRU eviction via a doubly-linked list + map node index.
+// Front of the list = most recently used; back = least recently used.
 func (e *Engine) cacheWorkflow(wf *Workflow) {
 	e.workflowCacheMu.Lock()
 	defer e.workflowCacheMu.Unlock()
 
-	if _, exists := e.workflowCache[wf.ID]; exists {
-		// LRU: move to end of order
-		for i, id := range e.cacheOrder {
-			if id == wf.ID {
-				e.cacheOrder = append(e.cacheOrder[:i], e.cacheOrder[i+1:]...)
-				break
-			}
-		}
-		e.cacheOrder = append(e.cacheOrder, wf.ID)
+	if node, exists := e.workflowCacheNode[wf.ID]; exists {
+		// Cache hit: promote to front (O(1)).
+		e.workflowCacheList.MoveToFront(node)
 	} else {
-		// New entry: evict LRU if at capacity (skip pinned entries)
+		// New entry: evict LRU if at capacity (skip pinned entries).
 		if e.cacheSize > 0 && len(e.workflowCache) >= e.cacheSize {
 			evicted := false
-			for i := 0; i < len(e.cacheOrder); i++ {
-				if e.pinnedWorkflows[e.cacheOrder[i]] == 0 {
-					delete(e.workflowCache, e.cacheOrder[i])
-					e.cacheOrder = append(e.cacheOrder[:i], e.cacheOrder[i+1:]...)
+			for el := e.workflowCacheList.Back(); el != nil; el = el.Prev() {
+				id := el.Value.(string)
+				if e.pinnedWorkflows[id] == 0 {
+					e.workflowCacheList.Remove(el)
+					delete(e.workflowCacheNode, id)
+					delete(e.workflowCache, id)
 					evicted = true
 					break
 				}
@@ -543,7 +579,8 @@ func (e *Engine) cacheWorkflow(wf *Workflow) {
 				e.logger.Warn("workflow cache exceeds limit: all %d entries are pinned by sleeping runs", len(e.workflowCache))
 			}
 		}
-		e.cacheOrder = append(e.cacheOrder, wf.ID)
+		node := e.workflowCacheList.PushFront(wf.ID)
+		e.workflowCacheNode[wf.ID] = node
 	}
 	e.workflowCache[wf.ID] = wf
 }
@@ -562,6 +599,11 @@ func (e *Engine) wakeWorkflow(runID RunID) {
 	case <-e.closeCh:
 		return
 	default:
+	}
+
+	if e.pool == nil {
+		e.logger.Warn("failed to wake workflow %s: no worker pool", runID)
+		return
 	}
 
 	if !e.pool.Submit(func() {
@@ -658,12 +700,6 @@ func (e *Engine) wakeWorkflow(runID RunID) {
 				}
 				return
 			}
-			// Also update local copy — SaveRun below overwrites step_states,
-			// so without this the UpdateStepStatus write is lost.
-			if run.StepStates == nil {
-				run.StepStates = make(map[string]Status)
-			}
-			run.StepStates[run.CurrentStep] = Completed
 		}
 
 		// Update status to Running

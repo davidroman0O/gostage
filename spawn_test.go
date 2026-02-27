@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,11 +14,21 @@ import (
 
 // TestMain handles dual-mode execution: normal test runner OR child process.
 // When the test binary is spawned by gostage as a child, it enters HandleChild.
+// A task middleware is always registered so TestHandleChild_WithTaskMiddleware
+// can verify that HandleChild(opts...) correctly applies engine options without
+// needing a side-channel environment variable.
 func TestMain(m *testing.M) {
 	if IsChild() {
 		ResetTaskRegistry()
 		registerSpawnTestTasks()
-		HandleChild()
+		HandleChild(
+			WithTaskMiddleware(func(tctx *Ctx, taskName string, next func() error) error {
+				// Write a marker so TestHandleChild_WithTaskMiddleware can verify
+				// that opts passed to HandleChild are applied in the child engine.
+				Set(tctx, "child_mw_ran", true)
+				return next()
+			}),
+		)
 		// HandleChild calls os.Exit — unreachable
 		return
 	}
@@ -78,6 +90,20 @@ func registerSpawnTestTasks() {
 	// spawn.mw_echo: simple task for middleware testing
 	Task("spawn.mw_echo", func(ctx *Ctx) error {
 		Set(ctx, "mw_child_ran", true)
+		return nil
+	})
+
+	// spawn.bail: calls Bail() to test bail propagation from spawned child
+	Task("spawn.bail", func(ctx *Ctx) error {
+		return Bail(ctx, "child bail reason")
+	})
+
+	// spawn.grandchild.work: leaf task for multi-level spawn tests
+	Task("spawn.grandchild.work", func(ctx *Ctx) error {
+		item := Item[string](ctx)
+		idx := ItemIndex(ctx)
+		Set(ctx, fmt.Sprintf("gc_result_%d", idx), item)
+		Send(ctx, "grandchild.done", Params{"item": item, "index": idx})
 		return nil
 	})
 }
@@ -553,5 +579,258 @@ func TestSpawn_ChildRetryRespected(t *testing.T) {
 	// The child should have retried and set "retried" = true
 	if result.Store["retried"] != true {
 		t.Fatal("expected 'retried' to be true — child retry was not respected")
+	}
+}
+
+func TestSpawn_MultiLevel_StoreRoundTrip(t *testing.T) {
+	ResetTaskRegistry()
+
+	// Register all tasks needed: parent sees "spawn.grandchild.work" in registry
+	// (the same binary handles child and grandchild via HandleChild).
+	Task("spawn.grandchild.work", func(ctx *Ctx) error {
+		item := Item[string](ctx)
+		idx := ItemIndex(ctx)
+		Set(ctx, fmt.Sprintf("gc_result_%d", idx), item)
+		Send(ctx, "grandchild.done", Params{"item": item, "index": idx})
+		return nil
+	})
+
+	// Inner workflow: runs inside the child process, spawns grandchildren.
+	// Each child process receives this as a sub-workflow via DefinitionJSON.
+	inner, err := NewWorkflow("ml-inner").
+		ForEach("subitems", Step("spawn.grandchild.work"), WithConcurrency(1), WithSpawn()).
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Outer workflow: spawns child processes each running inner.
+	outer, err := NewWorkflow("ml-outer").
+		ForEach("items", Sub(inner), WithConcurrency(1), WithSpawn()).
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	// Track IPC messages forwarded from grandchildren through children to parent.
+	var gcMessages []string
+	var gcMu sync.Mutex
+	engine.OnMessage("grandchild.done", func(msgType string, payload map[string]any) {
+		gcMu.Lock()
+		gcMessages = append(gcMessages, fmt.Sprintf("%v", payload["item"]))
+		gcMu.Unlock()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	result, err := engine.RunSync(ctx, outer, Params{
+		"items":    []string{"parent1"},
+		"subitems": []string{"gc1", "gc2"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s (error: %v)", result.Status, result.Error)
+	}
+
+	// Grandchild store values must have merged back through child to parent.
+	if result.Store["gc_result_0"] == nil {
+		t.Fatal("expected gc_result_0 in parent store (grandchild store merge)")
+	}
+
+	// IPC messages from grandchildren must have forwarded to parent.
+	gcMu.Lock()
+	msgCount := len(gcMessages)
+	gcMu.Unlock()
+	if msgCount == 0 {
+		t.Fatal("expected IPC messages forwarded from grandchild to parent via two gRPC hops")
+	}
+}
+
+func TestSpawn_BailFromChild(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("spawn.bail", func(ctx *Ctx) error {
+		return Bail(ctx, "child bail reason")
+	})
+
+	wf, err := NewWorkflow("spawn-bail").
+		ForEach("items", Step("spawn.bail"), WithSpawn()).
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := engine.RunSync(ctx, wf, Params{"items": []string{"x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Bailed {
+		t.Fatalf("expected Bailed, got %s (error: %v)", result.Status, result.Error)
+	}
+	if result.BailReason != "child bail reason" {
+		t.Fatalf("expected bail reason 'child bail reason', got %q", result.BailReason)
+	}
+}
+
+func TestSpawn_PanicInSpawnGoroutine(t *testing.T) {
+	ResetTaskRegistry()
+
+	// Register a simple echo task for the child (needs to be registered for HandleChild)
+	Task("spawn.echo", func(ctx *Ctx) error {
+		item := Item[string](ctx)
+		idx := ItemIndex(ctx)
+		Set(ctx, fmt.Sprintf("result_%d", idx), item)
+		Set(ctx, "child_ran", true)
+		return nil
+	})
+
+	wf, err := NewWorkflow("spawn-panic-mw").
+		ForEach("items", Step("spawn.echo"), WithConcurrency(2), WithSpawn()).
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Child middleware that panics — this panic occurs inside the goroutine
+	// and must be recovered by the goroutine-level defer recover().
+	engine, err := New(
+		WithChildMiddleware(func(ctx context.Context, job *SpawnJob, next func() error) error {
+			panic("intentional child middleware panic")
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := engine.RunSync(ctx, wf, Params{"items": []string{"a", "b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Should fail (panic recovered as error), not crash the process
+	if result.Status != Failed {
+		t.Fatalf("expected Failed (panic recovered), got %s", result.Status)
+	}
+	if result.Error == nil {
+		t.Fatal("expected error from panic recovery")
+	}
+}
+
+func TestSpawnDepth_EnvPropagation(t *testing.T) {
+	// buildChildEnv should increment GOSTAGE_SPAWN_DEPTH by 1.
+	t.Setenv("GOSTAGE_SPAWN_DEPTH", "2")
+	env := buildChildEnv("secret", "token")
+
+	var foundDepth string
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "GOSTAGE_SPAWN_DEPTH=") {
+			foundDepth = strings.TrimPrefix(entry, "GOSTAGE_SPAWN_DEPTH=")
+			break
+		}
+	}
+	if foundDepth != "3" {
+		t.Fatalf("expected GOSTAGE_SPAWN_DEPTH=3, got %q", foundDepth)
+	}
+}
+
+func TestSpawnDepth_LimitEnforced(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("spawn.echo", func(ctx *Ctx) error {
+		item := Item[string](ctx)
+		idx := ItemIndex(ctx)
+		Set(ctx, fmt.Sprintf("result_%d", idx), item)
+		Set(ctx, "child_ran", true)
+		return nil
+	})
+
+	wf, err := NewWorkflow("spawn-depth-limit").
+		ForEach("items", Step("spawn.echo"), WithSpawn()).
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	// Set max depth to 0 so even the first child exceeds the limit.
+	t.Setenv("GOSTAGE_MAX_SPAWN_DEPTH", "0")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := engine.RunSync(ctx, wf, Params{"items": []string{"x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Child exits with code 1 due to depth check, parent receives a failure.
+	if result.Status != Failed {
+		t.Fatalf("expected Failed (depth limit exceeded), got %s", result.Status)
+	}
+}
+
+func TestHandleChild_WithTaskMiddleware(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("spawn.echo", func(ctx *Ctx) error {
+		item := Item[string](ctx)
+		idx := ItemIndex(ctx)
+		Set(ctx, fmt.Sprintf("result_%d", idx), item)
+		Set(ctx, "child_ran", true)
+		return nil
+	})
+
+	wf, err := NewWorkflow("child-mw-test").
+		ForEach("items", Step("spawn.echo"), WithSpawn()).
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The task middleware is registered unconditionally in TestMain via
+	// HandleChild(WithTaskMiddleware(...)), so no env var signal is needed.
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := engine.RunSync(ctx, wf, Params{"items": []string{"hello"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s (error: %v)", result.Status, result.Error)
+	}
+	// The child task middleware should have set "child_mw_ran" = true in the child's
+	// store, which merges back to the parent.
+	if result.Store["child_mw_ran"] != true {
+		t.Fatal("expected child_mw_ran=true, indicating task middleware fired in child process")
 	}
 }

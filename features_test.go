@@ -3718,3 +3718,571 @@ func TestSleepRecoverAcrossRestart(t *testing.T) {
 		t.Fatalf("expected Completed, got %s", run.Status)
 	}
 }
+
+// === SQLite schema — no checkpoints table (Issue 10) ===
+
+func TestSQLite_NoCheckpointsTable(t *testing.T) {
+	engine, err := New(WithSQLite(t.TempDir() + "/nochk.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	// Query sqlite_master for a table named "checkpoints".
+	var name string
+	row := engine.persistence.(*sqlitePersistence).db.QueryRowContext(
+		context.Background(),
+		`SELECT name FROM sqlite_master WHERE type='table' AND name='checkpoints'`,
+	)
+	err = row.Scan(&name)
+	if err == nil {
+		t.Fatal("checkpoints table must not exist in new databases")
+	}
+	// sql.ErrNoRows is the expected outcome.
+}
+
+// === IPC uses dedicated MESSAGE_TYPE_IPC (Issue 11) ===
+
+func TestIPC_UsesCorrectProtoType(t *testing.T) {
+	// Verify that Send() from a parent-process task routes through dispatchMessage
+	// without needing __ipc__ sentinel — the local path in Send() calls
+	// engine.dispatchMessage directly. In child processes, the new proto type is used.
+	// This test exercises the local (parent-process) IPC routing.
+	ResetTaskRegistry()
+
+	var received bool
+	Task("ipc.proto.task", func(ctx *Ctx) error {
+		return Send(ctx, "ipc_proto_evt", Params{"ok": true})
+	})
+
+	wf, err := NewWorkflow("ipc-proto-test").Step("ipc.proto.task").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	engine.OnMessage("ipc_proto_evt", func(msgType string, payload map[string]any) {
+		if payload["ok"] == true {
+			received = true
+		}
+	})
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+	if !received {
+		t.Fatal("IPC message was not received by handler")
+	}
+}
+
+// === ListRuns pagination with Offset (Issue 14) ===
+
+func TestListRuns_Pagination(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("page.noop", func(ctx *Ctx) error { return nil })
+
+	engine, err := New(WithSQLite(t.TempDir() + "/page.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	wf, err := NewWorkflow("page-wf").Step("page.noop").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+
+	// Create 7 runs sequentially (order matters for created_at DESC).
+	for i := 0; i < 7; i++ {
+		_, runErr := engine.RunSync(ctx, wf, nil)
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+	}
+
+	// Page 1: runs 1-3 (newest)
+	page1, err := engine.ListRuns(ctx, RunFilter{Limit: 3, Offset: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page1) != 3 {
+		t.Fatalf("page 1: expected 3, got %d", len(page1))
+	}
+
+	// Page 2: runs 4-6
+	page2, err := engine.ListRuns(ctx, RunFilter{Limit: 3, Offset: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page2) != 3 {
+		t.Fatalf("page 2: expected 3, got %d", len(page2))
+	}
+
+	// Page 3: run 7 (oldest)
+	page3, err := engine.ListRuns(ctx, RunFilter{Limit: 3, Offset: 6})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page3) != 1 {
+		t.Fatalf("page 3: expected 1, got %d", len(page3))
+	}
+
+	// All run IDs must be distinct across pages.
+	seen := make(map[RunID]bool)
+	for _, pages := range [][]*RunState{page1, page2, page3} {
+		for _, run := range pages {
+			if seen[run.RunID] {
+				t.Fatalf("run %s appeared in multiple pages", run.RunID)
+			}
+			seen[run.RunID] = true
+		}
+	}
+	if len(seen) != 7 {
+		t.Fatalf("expected 7 unique runs across all pages, got %d", len(seen))
+	}
+}
+
+// === LRU Cache Promotion Order (Issue 8) ===
+
+func TestCacheLRU_PromotionOrder(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("lru.noop", func(ctx *Ctx) error { return nil })
+
+	wfA, _ := NewWorkflow("lru-promo-a").Step("lru.noop").Commit()
+	wfB, _ := NewWorkflow("lru-promo-b").Step("lru.noop").Commit()
+	wfC, _ := NewWorkflow("lru-promo-c").Step("lru.noop").Commit()
+	wfD, _ := NewWorkflow("lru-promo-d").Step("lru.noop").Commit()
+
+	// Cache size = 2
+	engine, err := New(WithCacheSize(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+
+	// Run A, B → cache: [A, B]
+	engine.RunSync(ctx, wfA, nil)
+	engine.RunSync(ctx, wfB, nil)
+
+	// Promote A by running it again → cache: [B, A] where A is MRU
+	engine.RunSync(ctx, wfA, nil)
+
+	// Run C → evicts LRU which is B (not A), cache: [A, C]
+	engine.RunSync(ctx, wfC, nil)
+
+	engine.workflowCacheMu.RLock()
+	hasA := engine.workflowCache["lru-promo-a"] != nil
+	hasB := engine.workflowCache["lru-promo-b"] != nil
+	hasC := engine.workflowCache["lru-promo-c"] != nil
+	engine.workflowCacheMu.RUnlock()
+
+	if !hasA {
+		t.Fatal("A should still be cached (was promoted before C evicted B)")
+	}
+	if hasB {
+		t.Fatal("B should have been evicted as LRU")
+	}
+	if !hasC {
+		t.Fatal("C should be in cache")
+	}
+
+	// Run D → evicts LRU which is A, cache: [C, D]
+	engine.RunSync(ctx, wfD, nil)
+
+	engine.workflowCacheMu.RLock()
+	hasA = engine.workflowCache["lru-promo-a"] != nil
+	engine.workflowCacheMu.RUnlock()
+
+	if hasA {
+		t.Fatal("A should now be evicted (became LRU after C was used)")
+	}
+}
+
+// === OnMessage / OffMessage with HandlerID (Issue 5) ===
+
+func TestOnMessageReturnsID(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("hid.sender", func(ctx *Ctx) error {
+		return Send(ctx, "evt", Params{"x": 1})
+	})
+
+	wf, err := NewWorkflow("handler-id").Step("hid.sender").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	var aFired, bFired int32
+
+	idA := engine.OnMessage("evt", func(msgType string, payload map[string]any) {
+		atomic.AddInt32(&aFired, 1)
+	})
+	idB := engine.OnMessage("evt", func(msgType string, payload map[string]any) {
+		atomic.AddInt32(&bFired, 1)
+	})
+
+	if idA == 0 || idB == 0 {
+		t.Fatal("OnMessage must return non-zero HandlerID")
+	}
+	if idA == idB {
+		t.Fatal("each OnMessage call must return a distinct HandlerID")
+	}
+
+	// Deregister handler A.
+	engine.OffMessage(idA)
+
+	engine.RunSync(context.Background(), wf, nil)
+
+	if atomic.LoadInt32(&aFired) != 0 {
+		t.Fatal("deregistered handler A must not fire")
+	}
+	if atomic.LoadInt32(&bFired) != 1 {
+		t.Fatalf("handler B must fire once, fired %d times", atomic.LoadInt32(&bFired))
+	}
+}
+
+func TestOffMessage_Anonymous(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("anon.sender", func(ctx *Ctx) error {
+		return Send(ctx, "evt2", Params{"v": 2})
+	})
+
+	wf, err := NewWorkflow("offmsg-anon").Step("anon.sender").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	var fired int32
+
+	// Register an anonymous inline handler and deregister it immediately.
+	id := engine.OnMessage("evt2", func(msgType string, payload map[string]any) {
+		atomic.AddInt32(&fired, 1)
+	})
+	engine.OffMessage(id)
+
+	engine.RunSync(context.Background(), wf, nil)
+
+	if atomic.LoadInt32(&fired) != 0 {
+		t.Fatal("deregistered inline handler must not fire")
+	}
+}
+
+// === Sub-workflow per-step resume tracking (Issue 3) ===
+
+func TestSubWorkflow_PerStepResume(t *testing.T) {
+	ResetTaskRegistry()
+
+	var step1Count, step2Count, step3Count int32
+
+	Task("sub3.step1", func(ctx *Ctx) error {
+		atomic.AddInt32(&step1Count, 1)
+		Set(ctx, "sub_step1", true)
+		return nil
+	})
+	Task("sub3.step2", func(ctx *Ctx) error {
+		atomic.AddInt32(&step2Count, 1)
+		if !IsResuming(ctx) {
+			return Suspend(ctx, Params{"at": "sub_step2"})
+		}
+		Set(ctx, "sub_step2", true)
+		return nil
+	})
+	Task("sub3.step3", func(ctx *Ctx) error {
+		atomic.AddInt32(&step3Count, 1)
+		Set(ctx, "sub_step3", true)
+		return nil
+	})
+
+	inner, err := NewWorkflow("sub3-inner").
+		Step("sub3.step1").
+		Step("sub3.step2").
+		Step("sub3.step3").
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outer, err := NewWorkflow("sub3-outer").
+		Sub(inner).
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New(WithSQLite(t.TempDir() + "/sub3.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+
+	// First run: step1 completes, step2 suspends.
+	result, err := engine.RunSync(ctx, outer, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Suspended {
+		t.Fatalf("expected Suspended, got %s (error: %v)", result.Status, result.Error)
+	}
+
+	// On resume, step1 must be skipped (still at count 1).
+	outer2, err := NewWorkflow("sub3-outer").
+		Sub(inner).
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err = engine.Resume(ctx, outer2, result.RunID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s (error: %v)", result.Status, result.Error)
+	}
+
+	// step1 must have run exactly once — skipped on resume.
+	if atomic.LoadInt32(&step1Count) != 1 {
+		t.Fatalf("step1 should run once (skipped on resume), ran %d times", step1Count)
+	}
+	// step2 runs twice (first run + resume).
+	if atomic.LoadInt32(&step2Count) != 2 {
+		t.Fatalf("step2 should run twice, ran %d times", step2Count)
+	}
+	// step3 runs once (only on resume).
+	if atomic.LoadInt32(&step3Count) != 1 {
+		t.Fatalf("step3 should run once, ran %d times", step3Count)
+	}
+}
+
+func TestSubWorkflow_PerStepFlush(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("subf.step1", func(ctx *Ctx) error {
+		return Set(ctx, "subf_key", "from_step1")
+	})
+	Task("subf.step2", func(ctx *Ctx) error {
+		// This step reads the value written by step1.
+		// If step1's state was not flushed, it would still be in memory.
+		// We verify the key exists here; the real flush guarantee is verified
+		// by the resume test above (step1's state survives a crash).
+		val := Get[string](ctx, "subf_key")
+		if val != "from_step1" {
+			return fmt.Errorf("expected subf_key='from_step1', got %q", val)
+		}
+		return Set(ctx, "subf_step2_ran", true)
+	})
+
+	inner, err := NewWorkflow("subf-inner").
+		Step("subf.step1").
+		Step("subf.step2").
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer, err := NewWorkflow("subf-outer").Sub(inner).Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New(WithSQLite(t.TempDir() + "/subf.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), outer, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s (error: %v)", result.Status, result.Error)
+	}
+	if result.Store["subf_step2_ran"] != true {
+		t.Fatal("step2 should have run and seen step1's state")
+	}
+}
+
+// TestSubWorkflow_ForEachResumeNoCollision verifies that per-sub-step tracking
+// IDs are scoped to the ForEach item, so item 0 completing its sub-steps does
+// not cause item 1's sub-steps to appear already-completed on resume.
+func TestSubWorkflow_ForEachResumeNoCollision(t *testing.T) {
+	ResetTaskRegistry()
+
+	var step1Runs, step2Runs atomic.Int32
+
+	Task("nocol.step1", func(ctx *Ctx) error {
+		step1Runs.Add(1)
+		return Set(ctx, "step1_done", true)
+	})
+	Task("nocol.step2", func(ctx *Ctx) error {
+		step2Runs.Add(1)
+		if !IsResuming(ctx) {
+			return Suspend(ctx, Params{"at": "step2"})
+		}
+		return Set(ctx, "step2_done", true)
+	})
+
+	inner, err := NewWorkflow("nocol-inner").
+		Step("nocol.step1").
+		Step("nocol.step2").
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// ForEach with 2 items, each item runs the same inner sub-workflow.
+	// Sequential (concurrency=1): item 0 runs first, item 1 runs second.
+	outer, err := NewWorkflow("nocol-outer").
+		ForEach("items", Sub(inner)).
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New(WithSQLite(t.TempDir() + "/nocol.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+
+	// Run 1: item 0 processes step1 + step2 (step2 suspends).
+	// Because ForEach is sequential, item 0 runs before item 1 starts.
+	result, err := engine.RunSync(ctx, outer, Params{"items": []string{"A", "B"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Suspended {
+		t.Fatalf("expected Suspended, got %s (error: %v)", result.Status, result.Error)
+	}
+
+	// step1 ran once (for item 0 only), step2 ran once (for item 0, suspended).
+	if step1Runs.Load() != 1 {
+		t.Fatalf("step1 should have run 1 time before suspension, got %d", step1Runs.Load())
+	}
+	if step2Runs.Load() != 1 {
+		t.Fatalf("step2 should have run 1 time before suspension, got %d", step2Runs.Load())
+	}
+
+	// Resume: item 0 re-runs from step2 (step1 skipped — already completed).
+	// Then item 1 runs step1 from scratch — step1 must NOT be skipped even
+	// though item 0's step1 was already written to step_statuses.
+	// This is the collision test: if sub-step IDs were not item-scoped,
+	// item 1's step1 would be incorrectly skipped.
+	outer2, err := NewWorkflow("nocol-outer").
+		ForEach("items", Sub(inner)).
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err = engine.Resume(ctx, outer2, result.RunID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s (error: %v)", result.Status, result.Error)
+	}
+
+	// step1 should have run exactly twice total:
+	//   - once for item 0 on first run (count=1 at start of resume = still 1)
+	//   - once for item 1 on resume (count goes to 2)
+	// If step IDs were not item-scoped, item 1's step1 would see item 0's
+	// completed record and skip, leaving step1Runs at 1. That would be the bug.
+	if step1Runs.Load() != 2 {
+		t.Fatalf("step1 should have run twice total (once per item), got %d — "+
+			"item 1's step1 was incorrectly skipped due to step ID collision", step1Runs.Load())
+	}
+	// step2 runs twice: item 0 resumes + item 1 runs fresh.
+	if step2Runs.Load() != 3 {
+		t.Fatalf("step2 should have run 3 times total (item0 initial + item0 resume + item1), got %d", step2Runs.Load())
+	}
+}
+
+// TestListRuns_OffsetWithoutLimit verifies that ListRuns does not produce a
+// SQL syntax error when Offset > 0 and Limit == 0 (meaning "no limit").
+func TestListRuns_OffsetWithoutLimit(t *testing.T) {
+	ResetTaskRegistry()
+
+	Task("olim.noop", func(ctx *Ctx) error { return nil })
+
+	engine, err := New(WithSQLite(t.TempDir() + "/olim.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	wf, err := NewWorkflow("olim-wf").Step("olim.noop").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+
+	// Create 5 runs.
+	for i := 0; i < 5; i++ {
+		if _, err := engine.RunSync(ctx, wf, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Offset 2 without a Limit must not produce a SQL syntax error.
+	// SQLite requires LIMIT before OFFSET; the fix adds LIMIT -1 automatically.
+	runs, err := engine.ListRuns(ctx, RunFilter{Offset: 2})
+	if err != nil {
+		t.Fatalf("ListRuns with Offset but no Limit failed: %v", err)
+	}
+	// Should return 3 runs (5 total - 2 skipped).
+	if len(runs) != 3 {
+		t.Fatalf("expected 3 runs after offset 2, got %d", len(runs))
+	}
+
+	// Also verify memory persistence handles the same case consistently.
+	engineMem, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engineMem.Close()
+
+	for i := 0; i < 5; i++ {
+		if _, err := engineMem.RunSync(ctx, wf, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runsMem, err := engineMem.ListRuns(ctx, RunFilter{Offset: 2})
+	if err != nil {
+		t.Fatalf("memoryPersistence ListRuns with Offset but no Limit failed: %v", err)
+	}
+	if len(runsMem) != 3 {
+		t.Fatalf("expected 3 runs from memory after offset 2, got %d", len(runsMem))
+	}
+}

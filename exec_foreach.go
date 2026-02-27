@@ -46,7 +46,7 @@ func (e *Engine) executeForEach(ctx context.Context, wf *Workflow, s *step, runI
 				continue
 			}
 
-			if err := e.executeForEachItem(ctx, wf, s.forEachRef, item, i, runID, resuming); err != nil {
+			if err := e.executeForEachItem(ctx, wf, s.forEachRef, item, i, runID, resuming, itemKey); err != nil {
 				return err
 			}
 
@@ -102,7 +102,7 @@ func (e *Engine) executeForEach(ctx context.Context, wf *Workflow, s *step, runI
 				}
 			}()
 
-			if err := e.executeForEachItem(childCtx, wf, s.forEachRef, item, i, runID, resuming); err != nil {
+			if err := e.executeForEachItem(childCtx, wf, s.forEachRef, item, i, runID, resuming, itemKey); err != nil {
 				mu.Lock()
 				if firstErr == nil {
 					firstErr = err
@@ -129,13 +129,15 @@ func (e *Engine) executeForEach(ctx context.Context, wf *Workflow, s *step, runI
 }
 
 // executeForEachItem runs a single ForEach iteration with item context.
-func (e *Engine) executeForEachItem(ctx context.Context, wf *Workflow, ref StepRef, item any, index int, runID RunID, resuming bool) error {
+// parentStepKey is the ForEach item key (e.g. "forEach:items:0") used to scope
+// sub-step IDs so items using the same sub-workflow do not share step_statuses keys.
+func (e *Engine) executeForEachItem(ctx context.Context, wf *Workflow, ref StepRef, item any, index int, runID RunID, resuming bool, parentStepKey string) error {
 	if ref.subWorkflow != nil {
 		// Clone the sub-workflow so concurrent ForEach iterations don't share
 		// mutable state (executeSub writes to subWf.state).
 		subWf := ref.subWorkflow.clone()
 		iterCtx := context.WithValue(ctx, forEachCtxKey{}, &forEachCtxData{item: item, index: index})
-		return e.executeSub(iterCtx, wf, subWf, runID, resuming)
+		return e.executeSub(iterCtx, wf, subWf, runID, resuming, parentStepKey)
 	}
 
 	td := e.registry.lookupTask(ref.taskName)

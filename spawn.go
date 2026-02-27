@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -54,8 +56,9 @@ type SpawnJob struct {
 
 // spawnResult holds the outcome of a child process execution.
 type spawnResult struct {
-	storeData map[string][]byte // final store from child
-	err       string            // error message, empty on success
+	storeData  map[string][]byte // final store from child
+	err        string            // error message, empty on success
+	bailReason string            // bail reason if the child bailed, empty otherwise
 }
 
 // newSpawnServer creates and starts a gRPC server on a random available port.
@@ -193,18 +196,29 @@ func (ss *spawnServer) SendMessage(ctx context.Context, msg *pb.IPCMessage) (*pb
 			}
 		}
 
-	case pb.MessageType_MESSAGE_TYPE_STORE_PUT:
-		// IPC messages from child's Send() — route to engine handlers
-		if payload := msg.GetStorePut(); payload != nil && payload.ValueType == "__ipc__" {
-			if ss.engine != nil {
-				var parsed any
-				if err := json.Unmarshal(payload.Value, &parsed); err == nil {
-					payloadMap, ok := parsed.(map[string]any)
-					if !ok {
-						payloadMap = map[string]any{"data": parsed}
-					}
-					ss.engine.dispatchMessage(payload.Key, payloadMap)
+	case pb.MessageType_MESSAGE_TYPE_BAIL:
+		if payload := msg.GetBailPayload(); payload != nil {
+			ss.mu.Lock()
+			job, ok := ss.jobs[jobID]
+			ss.mu.Unlock()
+			if ok {
+				select {
+				case job.resultCh <- &spawnResult{bailReason: payload.Reason}:
+				default:
 				}
+			}
+		}
+
+	case pb.MessageType_MESSAGE_TYPE_IPC:
+		// Dedicated IPC message type — route to engine message handlers.
+		if payload := msg.GetIpcPayload(); payload != nil && ss.engine != nil {
+			var parsed any
+			if err := json.Unmarshal(payload.PayloadJson, &parsed); err == nil {
+				payloadMap, ok := parsed.(map[string]any)
+				if !ok {
+					payloadMap = map[string]any{"data": parsed}
+				}
+				ss.engine.dispatchMessage(payload.MsgType, payloadMap)
 			}
 		}
 
@@ -300,6 +314,16 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 		go func(job *SpawnJob, itemIndex int, itemStepKey string) {
 			defer wg.Done()
 			defer func() { <-sem }() // release semaphore
+			defer func() {
+				if r := recover(); r != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("spawn item %d panic: %v", itemIndex, r)
+						cancel()
+					}
+					mu.Unlock()
+				}
+			}()
 
 			// Execute spawn with middleware chain
 			var result *spawnResult
@@ -309,6 +333,9 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 				result, spawnErr = spawnChild(childCtx, ss.port, job, ss.secret)
 				if spawnErr != nil {
 					return spawnErr
+				}
+				if result.bailReason != "" {
+					return &BailError{Reason: result.bailReason}
 				}
 				if result.err != "" {
 					return fmt.Errorf("%s", result.err)
@@ -341,7 +368,15 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 			if chainErr != nil {
 				mu.Lock()
 				if firstErr == nil {
-					firstErr = fmt.Errorf("item %d: %w", itemIndex, chainErr)
+					// Preserve BailError without wrapping so it propagates
+					// through executeForEachSpawn → executeWorkflow → doExecute
+					// with Bailed status intact.
+					var bailErr *BailError
+					if errors.As(chainErr, &bailErr) {
+						firstErr = chainErr
+					} else {
+						firstErr = fmt.Errorf("item %d: %w", itemIndex, chainErr)
+					}
 					cancel()
 				}
 				mu.Unlock()
@@ -458,14 +493,21 @@ func spawnChild(ctx context.Context, port int, job *SpawnJob, secret string) (*s
 	}
 }
 
+// defaultMaxSpawnDepth is the maximum allowed spawn chain depth.
+// A depth of 1 means the root process can spawn children; children cannot spawn
+// further. Increase via GOSTAGE_MAX_SPAWN_DEPTH environment variable.
+const defaultMaxSpawnDepth = 5
+
 // buildChildEnv constructs a minimal environment for child processes,
 // forwarding only necessary variables and filtering out credentials.
+// It also tracks the spawn chain depth via GOSTAGE_SPAWN_DEPTH.
 func buildChildEnv(secret, jobToken string) []string {
 	allowed := map[string]bool{
 		"PATH": true, "HOME": true, "USER": true, "LOGNAME": true,
 		"TMPDIR": true, "TMP": true, "TEMP": true,
 		"LANG": true, "SHELL": true,
-		"GOSTAGE_CHILD_TIMEOUT": true,
+		"GOSTAGE_CHILD_TIMEOUT":   true,
+		"GOSTAGE_MAX_SPAWN_DEPTH": true,
 	}
 
 	var env []string
@@ -478,6 +520,15 @@ func buildChildEnv(secret, jobToken string) []string {
 			env = append(env, entry)
 		}
 	}
+
+	// Increment the spawn depth counter so child processes know how deep they are.
+	currentDepth := 0
+	if val := os.Getenv("GOSTAGE_SPAWN_DEPTH"); val != "" {
+		if d, parseErr := strconv.Atoi(val); parseErr == nil {
+			currentDepth = d
+		}
+	}
+	env = append(env, "GOSTAGE_SPAWN_DEPTH="+strconv.Itoa(currentDepth+1))
 
 	env = append(env, "GOSTAGE_SECRET="+secret)
 	env = append(env, "GOSTAGE_JOB_TOKEN="+jobToken)

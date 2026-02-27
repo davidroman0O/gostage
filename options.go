@@ -144,3 +144,23 @@ func WithStateLimit(n int) EngineOption {
 		return nil
 	}
 }
+
+// withNoPool is an unexported option used by HandleChild to skip starting the
+// worker pool. Child processes never submit async jobs via engine.Run(), so the
+// pool would idle for the entire child lifetime without being used.
+func withNoPool() EngineOption {
+	return func(e *Engine) error {
+		e.noPool = true
+		return nil
+	}
+}
+
+// withNoScheduler is an unexported option used by HandleChild to skip starting
+// the timer scheduler. Child processes use in-memory persistence and never enter
+// sleep steps durably, so the scheduler goroutine would idle without being used.
+func withNoScheduler() EngineOption {
+	return func(e *Engine) error {
+		e.noScheduler = true
+		return nil
+	}
+}

@@ -37,9 +37,11 @@ func lookupTask(name string) *taskDef {
 	return defaultRegistry.lookupTask(name)
 }
 
-// ResetTaskRegistry clears all registered tasks and function registries. Used in tests.
+// ResetTaskRegistry clears all registered tasks, conditions, map functions,
+// and the JSON-serializability cache. Used in tests for clean isolation.
 func ResetTaskRegistry() {
 	defaultRegistry.Reset()
+	ResetSerializableCache()
 }
 
 // TaskOption configures a task definition.

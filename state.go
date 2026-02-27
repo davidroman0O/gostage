@@ -410,6 +410,15 @@ func convertType(val any, typeName string) any {
 // serializableCache stores the result of isJSONSerializable per reflect.Type.
 var serializableCache sync.Map
 
+// ResetSerializableCache clears the isJSONSerializable results cache.
+// Call alongside ResetTaskRegistry() in test setup to ensure clean state.
+func ResetSerializableCache() {
+	serializableCache.Range(func(k, v any) bool {
+		serializableCache.Delete(k)
+		return true
+	})
+}
+
 // isJSONSerializable reports whether a value of the given type can be
 // marshaled to JSON without error. Results are cached per type.
 func isJSONSerializable(t reflect.Type) bool {

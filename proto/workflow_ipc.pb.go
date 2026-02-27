@@ -27,8 +27,10 @@ type MessageType int32
 const (
 	MessageType_MESSAGE_TYPE_UNSPECIFIED     MessageType = 0
 	MessageType_MESSAGE_TYPE_STORE_PUT       MessageType = 2
+	MessageType_MESSAGE_TYPE_IPC             MessageType = 3
 	MessageType_MESSAGE_TYPE_WORKFLOW_RESULT MessageType = 5
 	MessageType_MESSAGE_TYPE_FINAL_STORE     MessageType = 6
+	MessageType_MESSAGE_TYPE_BAIL            MessageType = 7
 )
 
 // Enum value maps for MessageType.
@@ -36,14 +38,18 @@ var (
 	MessageType_name = map[int32]string{
 		0: "MESSAGE_TYPE_UNSPECIFIED",
 		2: "MESSAGE_TYPE_STORE_PUT",
+		3: "MESSAGE_TYPE_IPC",
 		5: "MESSAGE_TYPE_WORKFLOW_RESULT",
 		6: "MESSAGE_TYPE_FINAL_STORE",
+		7: "MESSAGE_TYPE_BAIL",
 	}
 	MessageType_value = map[string]int32{
 		"MESSAGE_TYPE_UNSPECIFIED":     0,
 		"MESSAGE_TYPE_STORE_PUT":       2,
+		"MESSAGE_TYPE_IPC":             3,
 		"MESSAGE_TYPE_WORKFLOW_RESULT": 5,
 		"MESSAGE_TYPE_FINAL_STORE":     6,
+		"MESSAGE_TYPE_BAIL":            7,
 	}
 )
 
@@ -192,6 +198,8 @@ type IPCMessage struct {
 	//	*IPCMessage_StorePut
 	//	*IPCMessage_WorkflowResult
 	//	*IPCMessage_FinalStore
+	//	*IPCMessage_IpcPayload
+	//	*IPCMessage_BailPayload
 	Payload       isIPCMessage_Payload `protobuf_oneof:"payload"`
 	MessageId     string               `protobuf:"bytes,20,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
 	Timestamp     int64                `protobuf:"varint,21,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
@@ -271,6 +279,24 @@ func (x *IPCMessage) GetFinalStore() *FinalStorePayload {
 	return nil
 }
 
+func (x *IPCMessage) GetIpcPayload() *IPCPayload {
+	if x != nil {
+		if x, ok := x.Payload.(*IPCMessage_IpcPayload); ok {
+			return x.IpcPayload
+		}
+	}
+	return nil
+}
+
+func (x *IPCMessage) GetBailPayload() *BailPayload {
+	if x != nil {
+		if x, ok := x.Payload.(*IPCMessage_BailPayload); ok {
+			return x.BailPayload
+		}
+	}
+	return nil
+}
+
 func (x *IPCMessage) GetMessageId() string {
 	if x != nil {
 		return x.MessageId
@@ -308,13 +334,25 @@ type IPCMessage_FinalStore struct {
 	FinalStore *FinalStorePayload `protobuf:"bytes,15,opt,name=final_store,json=finalStore,proto3,oneof"`
 }
 
+type IPCMessage_IpcPayload struct {
+	IpcPayload *IPCPayload `protobuf:"bytes,16,opt,name=ipc_payload,json=ipcPayload,proto3,oneof"`
+}
+
+type IPCMessage_BailPayload struct {
+	BailPayload *BailPayload `protobuf:"bytes,17,opt,name=bail_payload,json=bailPayload,proto3,oneof"`
+}
+
 func (*IPCMessage_StorePut) isIPCMessage_Payload() {}
 
 func (*IPCMessage_WorkflowResult) isIPCMessage_Payload() {}
 
 func (*IPCMessage_FinalStore) isIPCMessage_Payload() {}
 
-// StorePutPayload carries key-value data or IPC messages from child Send() calls.
+func (*IPCMessage_IpcPayload) isIPCMessage_Payload() {}
+
+func (*IPCMessage_BailPayload) isIPCMessage_Payload() {}
+
+// StorePutPayload carries key-value store update data.
 type StorePutPayload struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
@@ -375,6 +413,104 @@ func (x *StorePutPayload) GetValueType() string {
 	return ""
 }
 
+// IPCPayload carries in-task Send() messages from child to parent.
+type IPCPayload struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	MsgType       string                 `protobuf:"bytes,1,opt,name=msg_type,json=msgType,proto3" json:"msg_type,omitempty"`
+	PayloadJson   []byte                 `protobuf:"bytes,2,opt,name=payload_json,json=payloadJson,proto3" json:"payload_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IPCPayload) Reset() {
+	*x = IPCPayload{}
+	mi := &file_proto_workflow_ipc_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IPCPayload) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IPCPayload) ProtoMessage() {}
+
+func (x *IPCPayload) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_workflow_ipc_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IPCPayload.ProtoReflect.Descriptor instead.
+func (*IPCPayload) Descriptor() ([]byte, []int) {
+	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *IPCPayload) GetMsgType() string {
+	if x != nil {
+		return x.MsgType
+	}
+	return ""
+}
+
+func (x *IPCPayload) GetPayloadJson() []byte {
+	if x != nil {
+		return x.PayloadJson
+	}
+	return nil
+}
+
+// BailPayload signals intentional early exit from a child task.
+type BailPayload struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Reason        string                 `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BailPayload) Reset() {
+	*x = BailPayload{}
+	mi := &file_proto_workflow_ipc_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BailPayload) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BailPayload) ProtoMessage() {}
+
+func (x *BailPayload) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_workflow_ipc_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BailPayload.ProtoReflect.Descriptor instead.
+func (*BailPayload) Descriptor() ([]byte, []int) {
+	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *BailPayload) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
 // WorkflowResultPayload carries error results from child processes.
 type WorkflowResultPayload struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
@@ -388,7 +524,7 @@ type WorkflowResultPayload struct {
 
 func (x *WorkflowResultPayload) Reset() {
 	*x = WorkflowResultPayload{}
-	mi := &file_proto_workflow_ipc_proto_msgTypes[3]
+	mi := &file_proto_workflow_ipc_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -400,7 +536,7 @@ func (x *WorkflowResultPayload) String() string {
 func (*WorkflowResultPayload) ProtoMessage() {}
 
 func (x *WorkflowResultPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_workflow_ipc_proto_msgTypes[3]
+	mi := &file_proto_workflow_ipc_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -413,7 +549,7 @@ func (x *WorkflowResultPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkflowResultPayload.ProtoReflect.Descriptor instead.
 func (*WorkflowResultPayload) Descriptor() ([]byte, []int) {
-	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{3}
+	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *WorkflowResultPayload) GetWorkflowId() string {
@@ -455,7 +591,7 @@ type FinalStorePayload struct {
 
 func (x *FinalStorePayload) Reset() {
 	*x = FinalStorePayload{}
-	mi := &file_proto_workflow_ipc_proto_msgTypes[4]
+	mi := &file_proto_workflow_ipc_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -467,7 +603,7 @@ func (x *FinalStorePayload) String() string {
 func (*FinalStorePayload) ProtoMessage() {}
 
 func (x *FinalStorePayload) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_workflow_ipc_proto_msgTypes[4]
+	mi := &file_proto_workflow_ipc_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -480,7 +616,7 @@ func (x *FinalStorePayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FinalStorePayload.ProtoReflect.Descriptor instead.
 func (*FinalStorePayload) Descriptor() ([]byte, []int) {
-	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{4}
+	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *FinalStorePayload) GetStoreData() map[string][]byte {
@@ -509,7 +645,7 @@ type MessageAck struct {
 
 func (x *MessageAck) Reset() {
 	*x = MessageAck{}
-	mi := &file_proto_workflow_ipc_proto_msgTypes[5]
+	mi := &file_proto_workflow_ipc_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -521,7 +657,7 @@ func (x *MessageAck) String() string {
 func (*MessageAck) ProtoMessage() {}
 
 func (x *MessageAck) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_workflow_ipc_proto_msgTypes[5]
+	mi := &file_proto_workflow_ipc_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -534,7 +670,7 @@ func (x *MessageAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MessageAck.ProtoReflect.Descriptor instead.
 func (*MessageAck) Descriptor() ([]byte, []int) {
-	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{5}
+	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *MessageAck) GetSuccess() bool {
@@ -571,7 +707,7 @@ type WorkflowDefinition struct {
 
 func (x *WorkflowDefinition) Reset() {
 	*x = WorkflowDefinition{}
-	mi := &file_proto_workflow_ipc_proto_msgTypes[6]
+	mi := &file_proto_workflow_ipc_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -583,7 +719,7 @@ func (x *WorkflowDefinition) String() string {
 func (*WorkflowDefinition) ProtoMessage() {}
 
 func (x *WorkflowDefinition) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_workflow_ipc_proto_msgTypes[6]
+	mi := &file_proto_workflow_ipc_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -596,7 +732,7 @@ func (x *WorkflowDefinition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkflowDefinition.ProtoReflect.Descriptor instead.
 func (*WorkflowDefinition) Descriptor() ([]byte, []int) {
-	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{6}
+	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *WorkflowDefinition) GetId() string {
@@ -637,7 +773,7 @@ type ReadySignal struct {
 
 func (x *ReadySignal) Reset() {
 	*x = ReadySignal{}
-	mi := &file_proto_workflow_ipc_proto_msgTypes[7]
+	mi := &file_proto_workflow_ipc_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -649,7 +785,7 @@ func (x *ReadySignal) String() string {
 func (*ReadySignal) ProtoMessage() {}
 
 func (x *ReadySignal) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_workflow_ipc_proto_msgTypes[7]
+	mi := &file_proto_workflow_ipc_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -662,7 +798,7 @@ func (x *ReadySignal) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadySignal.ProtoReflect.Descriptor instead.
 func (*ReadySignal) Descriptor() ([]byte, []int) {
-	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{7}
+	return file_proto_workflow_ipc_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ReadySignal) GetChildId() string {
@@ -690,14 +826,17 @@ const file_proto_workflow_ipc_proto_rawDesc = "" +
 	"\x0eis_last_action\x18\a \x01(\bR\fisLastAction\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\b \x01(\tR\tsessionId\x12'\n" +
-	"\x0fsequence_number\x18\t \x01(\x03R\x0esequenceNumber\"\xf4\x02\n" +
+	"\x0fsequence_number\x18\t \x01(\x03R\x0esequenceNumber\"\xe7\x03\n" +
 	"\n" +
 	"IPCMessage\x12(\n" +
 	"\x04type\x18\x01 \x01(\x0e2\x14.gostage.MessageTypeR\x04type\x127\n" +
 	"\tstore_put\x18\v \x01(\v2\x18.gostage.StorePutPayloadH\x00R\bstorePut\x12I\n" +
 	"\x0fworkflow_result\x18\x0e \x01(\v2\x1e.gostage.WorkflowResultPayloadH\x00R\x0eworkflowResult\x12=\n" +
 	"\vfinal_store\x18\x0f \x01(\v2\x1a.gostage.FinalStorePayloadH\x00R\n" +
-	"finalStore\x12\x1d\n" +
+	"finalStore\x126\n" +
+	"\vipc_payload\x18\x10 \x01(\v2\x13.gostage.IPCPayloadH\x00R\n" +
+	"ipcPayload\x129\n" +
+	"\fbail_payload\x18\x11 \x01(\v2\x14.gostage.BailPayloadH\x00R\vbailPayload\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x14 \x01(\tR\tmessageId\x12\x1c\n" +
 	"\ttimestamp\x18\x15 \x01(\x03R\ttimestamp\x121\n" +
@@ -707,7 +846,13 @@ const file_proto_workflow_ipc_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\fR\x05value\x12\x1d\n" +
 	"\n" +
-	"value_type\x18\x03 \x01(\tR\tvalueType\"\xa3\x01\n" +
+	"value_type\x18\x03 \x01(\tR\tvalueType\"J\n" +
+	"\n" +
+	"IPCPayload\x12\x19\n" +
+	"\bmsg_type\x18\x01 \x01(\tR\amsgType\x12!\n" +
+	"\fpayload_json\x18\x02 \x01(\fR\vpayloadJson\"%\n" +
+	"\vBailPayload\x12\x16\n" +
+	"\x06reason\x18\x01 \x01(\tR\x06reason\"\xa3\x01\n" +
 	"\x15WorkflowResultPayload\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12\x18\n" +
@@ -739,12 +884,14 @@ const file_proto_workflow_ipc_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"(\n" +
 	"\vReadySignal\x12\x19\n" +
-	"\bchild_id\x18\x01 \x01(\tR\achildId*\x87\x01\n" +
+	"\bchild_id\x18\x01 \x01(\tR\achildId*\xb4\x01\n" +
 	"\vMessageType\x12\x1c\n" +
 	"\x18MESSAGE_TYPE_UNSPECIFIED\x10\x00\x12\x1a\n" +
-	"\x16MESSAGE_TYPE_STORE_PUT\x10\x02\x12 \n" +
+	"\x16MESSAGE_TYPE_STORE_PUT\x10\x02\x12\x14\n" +
+	"\x10MESSAGE_TYPE_IPC\x10\x03\x12 \n" +
 	"\x1cMESSAGE_TYPE_WORKFLOW_RESULT\x10\x05\x12\x1c\n" +
-	"\x18MESSAGE_TYPE_FINAL_STORE\x10\x062\x96\x01\n" +
+	"\x18MESSAGE_TYPE_FINAL_STORE\x10\x06\x12\x15\n" +
+	"\x11MESSAGE_TYPE_BAIL\x10\a2\x96\x01\n" +
 	"\vWorkflowIPC\x12N\n" +
 	"\x19RequestWorkflowDefinition\x12\x14.gostage.ReadySignal\x1a\x1b.gostage.WorkflowDefinition\x127\n" +
 	"\vSendMessage\x12\x13.gostage.IPCMessage\x1a\x13.gostage.MessageAckB'Z%github.com/davidroman0O/gostage/protob\x06proto3"
@@ -762,39 +909,43 @@ func file_proto_workflow_ipc_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_workflow_ipc_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_workflow_ipc_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_proto_workflow_ipc_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_proto_workflow_ipc_proto_goTypes = []any{
 	(MessageType)(0),              // 0: gostage.MessageType
 	(*MessageContext)(nil),        // 1: gostage.MessageContext
 	(*IPCMessage)(nil),            // 2: gostage.IPCMessage
 	(*StorePutPayload)(nil),       // 3: gostage.StorePutPayload
-	(*WorkflowResultPayload)(nil), // 4: gostage.WorkflowResultPayload
-	(*FinalStorePayload)(nil),     // 5: gostage.FinalStorePayload
-	(*MessageAck)(nil),            // 6: gostage.MessageAck
-	(*WorkflowDefinition)(nil),    // 7: gostage.WorkflowDefinition
-	(*ReadySignal)(nil),           // 8: gostage.ReadySignal
-	nil,                           // 9: gostage.FinalStorePayload.StoreDataEntry
-	nil,                           // 10: gostage.FinalStorePayload.TypeInfoEntry
-	nil,                           // 11: gostage.WorkflowDefinition.InitialStoreEntry
+	(*IPCPayload)(nil),            // 4: gostage.IPCPayload
+	(*BailPayload)(nil),           // 5: gostage.BailPayload
+	(*WorkflowResultPayload)(nil), // 6: gostage.WorkflowResultPayload
+	(*FinalStorePayload)(nil),     // 7: gostage.FinalStorePayload
+	(*MessageAck)(nil),            // 8: gostage.MessageAck
+	(*WorkflowDefinition)(nil),    // 9: gostage.WorkflowDefinition
+	(*ReadySignal)(nil),           // 10: gostage.ReadySignal
+	nil,                           // 11: gostage.FinalStorePayload.StoreDataEntry
+	nil,                           // 12: gostage.FinalStorePayload.TypeInfoEntry
+	nil,                           // 13: gostage.WorkflowDefinition.InitialStoreEntry
 }
 var file_proto_workflow_ipc_proto_depIdxs = []int32{
 	0,  // 0: gostage.IPCMessage.type:type_name -> gostage.MessageType
 	3,  // 1: gostage.IPCMessage.store_put:type_name -> gostage.StorePutPayload
-	4,  // 2: gostage.IPCMessage.workflow_result:type_name -> gostage.WorkflowResultPayload
-	5,  // 3: gostage.IPCMessage.final_store:type_name -> gostage.FinalStorePayload
-	1,  // 4: gostage.IPCMessage.context:type_name -> gostage.MessageContext
-	9,  // 5: gostage.FinalStorePayload.store_data:type_name -> gostage.FinalStorePayload.StoreDataEntry
-	10, // 6: gostage.FinalStorePayload.type_info:type_name -> gostage.FinalStorePayload.TypeInfoEntry
-	11, // 7: gostage.WorkflowDefinition.initial_store:type_name -> gostage.WorkflowDefinition.InitialStoreEntry
-	8,  // 8: gostage.WorkflowIPC.RequestWorkflowDefinition:input_type -> gostage.ReadySignal
-	2,  // 9: gostage.WorkflowIPC.SendMessage:input_type -> gostage.IPCMessage
-	7,  // 10: gostage.WorkflowIPC.RequestWorkflowDefinition:output_type -> gostage.WorkflowDefinition
-	6,  // 11: gostage.WorkflowIPC.SendMessage:output_type -> gostage.MessageAck
-	10, // [10:12] is the sub-list for method output_type
-	8,  // [8:10] is the sub-list for method input_type
-	8,  // [8:8] is the sub-list for extension type_name
-	8,  // [8:8] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	6,  // 2: gostage.IPCMessage.workflow_result:type_name -> gostage.WorkflowResultPayload
+	7,  // 3: gostage.IPCMessage.final_store:type_name -> gostage.FinalStorePayload
+	4,  // 4: gostage.IPCMessage.ipc_payload:type_name -> gostage.IPCPayload
+	5,  // 5: gostage.IPCMessage.bail_payload:type_name -> gostage.BailPayload
+	1,  // 6: gostage.IPCMessage.context:type_name -> gostage.MessageContext
+	11, // 7: gostage.FinalStorePayload.store_data:type_name -> gostage.FinalStorePayload.StoreDataEntry
+	12, // 8: gostage.FinalStorePayload.type_info:type_name -> gostage.FinalStorePayload.TypeInfoEntry
+	13, // 9: gostage.WorkflowDefinition.initial_store:type_name -> gostage.WorkflowDefinition.InitialStoreEntry
+	10, // 10: gostage.WorkflowIPC.RequestWorkflowDefinition:input_type -> gostage.ReadySignal
+	2,  // 11: gostage.WorkflowIPC.SendMessage:input_type -> gostage.IPCMessage
+	9,  // 12: gostage.WorkflowIPC.RequestWorkflowDefinition:output_type -> gostage.WorkflowDefinition
+	8,  // 13: gostage.WorkflowIPC.SendMessage:output_type -> gostage.MessageAck
+	12, // [12:14] is the sub-list for method output_type
+	10, // [10:12] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_proto_workflow_ipc_proto_init() }
@@ -806,6 +957,8 @@ func file_proto_workflow_ipc_proto_init() {
 		(*IPCMessage_StorePut)(nil),
 		(*IPCMessage_WorkflowResult)(nil),
 		(*IPCMessage_FinalStore)(nil),
+		(*IPCMessage_IpcPayload)(nil),
+		(*IPCMessage_BailPayload)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -813,7 +966,7 @@ func file_proto_workflow_ipc_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_workflow_ipc_proto_rawDesc), len(file_proto_workflow_ipc_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   11,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

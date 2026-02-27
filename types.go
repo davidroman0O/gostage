@@ -5,6 +5,10 @@ import (
 	"time"
 )
 
+// HandlerID is an opaque identifier returned by OnMessage.
+// Pass it to OffMessage to deregister the handler.
+type HandlerID int64
+
 // Params is a convenience alias for map[string]any.
 // It's used for passing parameters, initial store data, and results.
 //

@@ -30,13 +30,19 @@ func TestSQLite_SaveAndLoadRun(t *testing.T) {
 		RunID:      "run-001",
 		WorkflowID: "wf-hello",
 		Status:     Running,
-		StepStates: map[string]Status{"step1": Completed},
+		StepStates: make(map[string]Status),
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
 
 	if err := p.SaveRun(ctx, run); err != nil {
 		t.Fatalf("SaveRun failed: %v", err)
+	}
+
+	// Step statuses are now persisted via UpdateStepStatus, not SaveRun.
+	// SaveRun is metadata-only; step_statuses table is the authoritative store.
+	if err := p.UpdateStepStatus(ctx, "run-001", "step1", Completed); err != nil {
+		t.Fatalf("UpdateStepStatus failed: %v", err)
 	}
 
 	loaded, err := p.LoadRun(ctx, "run-001")
@@ -409,12 +415,16 @@ func TestSQLite_DeleteRun(t *testing.T) {
 		RunID:      "del-run-1",
 		WorkflowID: "wf-del",
 		Status:     Completed,
-		StepStates: map[string]Status{"step1": Completed},
+		StepStates: make(map[string]Status),
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
 	if err := p.SaveRun(ctx, run); err != nil {
 		t.Fatalf("SaveRun: %v", err)
+	}
+	// Step statuses are now persisted via UpdateStepStatus.
+	if err := p.UpdateStepStatus(ctx, "del-run-1", "step1", Completed); err != nil {
+		t.Fatalf("UpdateStepStatus: %v", err)
 	}
 
 	// Also save state

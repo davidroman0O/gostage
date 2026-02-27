@@ -20,6 +20,13 @@ func (e *Engine) executeWorkflow(ctx context.Context, wf *Workflow, runID RunID,
 		}
 	}
 
+	// Compute merged step middleware once before the loop — the composition is
+	// constant per run, so allocating inside the loop is unnecessary.
+	allStepMW := e.stepMiddleware
+	if len(wf.cfg.stepMiddleware) > 0 {
+		allStepMW = append(append([]StepMiddleware{}, e.stepMiddleware...), wf.cfg.stepMiddleware...)
+	}
+
 	i := 0
 	for i < len(wf.steps) {
 		s := &wf.steps[i]
@@ -38,13 +45,6 @@ func (e *Engine) executeWorkflow(ctx context.Context, wf *Workflow, runID RunID,
 
 		// Update current step in persistence
 		e.updateCurrentStep(ctx, runID, s.id)
-
-		// Execute step (with middleware if configured)
-		// Merge engine-level and per-workflow step middleware
-		allStepMW := e.stepMiddleware
-		if len(wf.cfg.stepMiddleware) > 0 {
-			allStepMW = append(append([]StepMiddleware{}, e.stepMiddleware...), wf.cfg.stepMiddleware...)
-		}
 
 		var err error
 		if len(allStepMW) > 0 {
@@ -182,7 +182,7 @@ func (e *Engine) executeStep(ctx context.Context, wf *Workflow, s *step, runID R
 	case StepDoWhile:
 		return e.executeDoWhile(ctx, wf, s, runID, resuming)
 	case StepSub:
-		return e.executeSub(ctx, wf, s.subWorkflow, runID, resuming)
+		return e.executeSub(ctx, wf, s.subWorkflow, runID, resuming, s.id)
 	case StepSleep:
 		return e.executeSleep(ctx, s.sleepDuration)
 	default:
@@ -191,9 +191,12 @@ func (e *Engine) executeStep(ctx context.Context, wf *Workflow, s *step, runID R
 }
 
 // executeRef runs a single StepRef (task or sub-workflow).
-func (e *Engine) executeRef(ctx context.Context, wf *Workflow, ref StepRef, runID RunID, resuming bool) error {
+// parentStepKey is the context-scoped key of the calling step (e.g. a Parallel
+// ref key or a ForEach item key); it is passed through to executeSub so that
+// sub-step tracking IDs are unique per calling context.
+func (e *Engine) executeRef(ctx context.Context, wf *Workflow, ref StepRef, runID RunID, resuming bool, parentStepKey string) error {
 	if ref.subWorkflow != nil {
-		return e.executeSub(ctx, wf, ref.subWorkflow, runID, resuming)
+		return e.executeSub(ctx, wf, ref.subWorkflow, runID, resuming, parentStepKey)
 	}
 	return e.executeSingle(ctx, wf, ref.taskName, runID, resuming)
 }

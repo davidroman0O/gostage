@@ -366,3 +366,31 @@ func TestIsJSONSerializable_Pointer(t *testing.T) {
 		t.Fatal("*S should be serializable")
 	}
 }
+
+func TestResetSerializableCache(t *testing.T) {
+	// Warm the cache with a known type.
+	type SerializableType struct{ X int }
+	typ := reflect.TypeOf(SerializableType{})
+	result := isJSONSerializable(typ)
+	if !result {
+		t.Fatal("SerializableType should be serializable")
+	}
+
+	// Verify the cache now has an entry for this type.
+	if _, ok := serializableCache.Load(typ); !ok {
+		t.Fatal("cache should have an entry after isJSONSerializable call")
+	}
+
+	// Reset the cache.
+	ResetSerializableCache()
+
+	// The entry must be gone.
+	if _, ok := serializableCache.Load(typ); ok {
+		t.Fatal("cache entry must be removed after ResetSerializableCache()")
+	}
+
+	// isJSONSerializable must still return the correct result (recomputes).
+	if !isJSONSerializable(typ) {
+		t.Fatal("isJSONSerializable must still return true after cache reset")
+	}
+}
