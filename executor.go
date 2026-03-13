@@ -176,7 +176,17 @@ func (e *Engine) executeStep(ctx context.Context, wf *Workflow, s *step, runID R
 	case StepForEach:
 		return e.executeForEach(ctx, wf, s, runID, resuming)
 	case StepMap:
-		return e.executeMap(ctx, wf, s.mapFn)
+		mapFn := s.mapFn
+		if mapFn == nil && s.mapFnName != "" {
+			mapFn = e.registry.lookupMapFn(s.mapFnName)
+			if mapFn == nil {
+				return fmt.Errorf("map function %q not registered", s.mapFnName)
+			}
+		}
+		if mapFn == nil {
+			return fmt.Errorf("map step has nil function and no name")
+		}
+		return e.executeMap(ctx, wf, mapFn)
 	case StepDoUntil:
 		return e.executeDoUntil(ctx, wf, s, runID, resuming)
 	case StepDoWhile:

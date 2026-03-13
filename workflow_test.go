@@ -1,6 +1,7 @@
 package gostage
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -252,9 +253,25 @@ func TestWorkflow_WithSpawn(t *testing.T) {
 func TestWorkflow_Commit_ReturnsErrorOnUnregisteredTask(t *testing.T) {
 	ResetTaskRegistry()
 
-	_, err := NewWorkflow("bad").Step("nonexistent").Commit()
-	if err == nil {
-		t.Fatal("expected error for unregistered task")
+	// Commit succeeds — builder is structural only, no registry validation
+	wf, err := NewWorkflow("bad").Step("nonexistent").Commit()
+	if err != nil {
+		t.Fatalf("unexpected Commit error: %v", err)
+	}
+
+	// Error occurs at execution time when the engine can't find the task
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatalf("unexpected RunSync error: %v", err)
+	}
+	if result.Status != Failed {
+		t.Fatalf("expected Failed status, got %s", result.Status)
 	}
 }
 

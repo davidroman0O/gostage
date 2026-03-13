@@ -78,15 +78,6 @@ func TestTask_ResetRegistry(t *testing.T) {
 // TestEngine_RegistryIsolation verifies two engines with separate registries
 // can run concurrently without cross-contamination.
 func TestEngine_RegistryIsolation(t *testing.T) {
-	ResetTaskRegistry()
-
-	// Register a placeholder in the default registry so the builder validates.
-	// Each engine's registry will override with its own implementation at runtime.
-	Task("iso.task", func(ctx *Ctx) error {
-		Set(ctx, "source", "default")
-		return nil
-	})
-
 	regA := NewRegistry()
 	regA.RegisterTask("iso.task", func(ctx *Ctx) error {
 		Set(ctx, "source", "engine-A")

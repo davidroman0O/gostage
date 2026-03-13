@@ -1144,13 +1144,13 @@ func TestNamedBuilderMethods(t *testing.T) {
 	Condition("nb.cond", func(ctx *Ctx) bool { return true })
 	MapFn("nb.transform", func(ctx *Ctx) error { return nil })
 
-	// WhenNamed
+	// WhenNamed — stores name only, no function pointer
 	bc := WhenNamed("nb.cond").Step("nb.task")
 	if bc.condName != "nb.cond" {
 		t.Fatalf("expected condName 'nb.cond', got %q", bc.condName)
 	}
-	if bc.condition == nil {
-		t.Fatal("expected condition function to be set")
+	if bc.condition != nil {
+		t.Fatal("expected condition function to be nil (lazy resolution)")
 	}
 
 	// MapNamed
@@ -1163,8 +1163,8 @@ func TestNamedBuilderMethods(t *testing.T) {
 	if wf.steps[0].mapFnName != "nb.transform" {
 		t.Fatalf("expected mapFnName 'nb.transform', got %q", wf.steps[0].mapFnName)
 	}
-	if wf.steps[0].mapFn == nil {
-		t.Fatal("expected mapFn to be set")
+	if wf.steps[0].mapFn != nil {
+		t.Fatal("expected mapFn to be nil (lazy resolution)")
 	}
 
 	// DoUntilNamed
@@ -1189,15 +1189,11 @@ func TestNamedBuilderMethods(t *testing.T) {
 		t.Fatalf("expected loopCondName 'nb.cond', got %q", wf3.steps[0].loopCondName)
 	}
 
-	// WhenNamed panics on unregistered condition
-	func() {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Fatal("expected panic on unregistered condition")
-			}
-		}()
-		WhenNamed("nonexistent")
-	}()
+	// WhenNamed with unregistered name succeeds at build time (lazy resolution)
+	bc2 := WhenNamed("nonexistent").Step("nb.task")
+	if bc2.condName != "nonexistent" {
+		t.Fatalf("expected condName 'nonexistent', got %q", bc2.condName)
+	}
 }
 
 // === Full Definition Serialization (All 10 Step Kinds) ===

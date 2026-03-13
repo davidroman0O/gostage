@@ -17,8 +17,15 @@ func (e *Engine) executeBranch(ctx context.Context, wf *Workflow, cases []Branch
 			defaultCase = c
 			continue
 		}
+		condFn := c.condition
+		if condFn == nil && c.condName != "" {
+			condFn = e.registry.lookupCondition(c.condName)
+			if condFn == nil {
+				return fmt.Errorf("condition %q not registered", c.condName)
+			}
+		}
 		condResult, condErr := func() (result bool, err error) {
-			if c.condition == nil {
+			if condFn == nil {
 				return false, nil
 			}
 			defer func() {
@@ -26,7 +33,7 @@ func (e *Engine) executeBranch(ctx context.Context, wf *Workflow, cases []Branch
 					err = fmt.Errorf("branch condition panic: %v", r)
 				}
 			}()
-			return c.condition(branchCtx), nil
+			return condFn(branchCtx), nil
 		}()
 		if condErr != nil {
 			return condErr
@@ -45,6 +52,13 @@ func (e *Engine) executeBranch(ctx context.Context, wf *Workflow, cases []Branch
 
 // executeDoUntil repeats: execute, then check condition. Stops when condition is true.
 func (e *Engine) executeDoUntil(ctx context.Context, wf *Workflow, s *step, runID RunID, resuming bool) error {
+	loopCond := s.loopCond
+	if loopCond == nil && s.loopCondName != "" {
+		loopCond = e.registry.lookupCondition(s.loopCondName)
+		if loopCond == nil {
+			return fmt.Errorf("condition %q not registered", s.loopCondName)
+		}
+	}
 	for i := 0; i < maxLoopIterations; i++ {
 		if err := e.executeRef(ctx, wf, s.loopRef, runID, resuming, s.id); err != nil {
 			return err
@@ -60,7 +74,7 @@ func (e *Engine) executeDoUntil(ctx context.Context, wf *Workflow, s *step, runI
 					err = fmt.Errorf("loop condition panic: %v", r)
 				}
 			}()
-			return s.loopCond(condCtx), nil
+			return loopCond(condCtx), nil
 		}()
 		if condErr != nil {
 			return condErr
@@ -74,6 +88,13 @@ func (e *Engine) executeDoUntil(ctx context.Context, wf *Workflow, s *step, runI
 
 // executeDoWhile repeats: check condition, then execute. Stops when condition is false.
 func (e *Engine) executeDoWhile(ctx context.Context, wf *Workflow, s *step, runID RunID, resuming bool) error {
+	loopCond := s.loopCond
+	if loopCond == nil && s.loopCondName != "" {
+		loopCond = e.registry.lookupCondition(s.loopCondName)
+		if loopCond == nil {
+			return fmt.Errorf("condition %q not registered", s.loopCondName)
+		}
+	}
 	for i := 0; i < maxLoopIterations; i++ {
 		condCtx := newCtx(ctx, wf.state, e.logger)
 		condResult, condErr := func() (result bool, err error) {
@@ -82,7 +103,7 @@ func (e *Engine) executeDoWhile(ctx context.Context, wf *Workflow, s *step, runI
 					err = fmt.Errorf("loop condition panic: %v", r)
 				}
 			}()
-			return s.loopCond(condCtx), nil
+			return loopCond(condCtx), nil
 		}()
 		if condErr != nil {
 			return condErr

@@ -399,6 +399,19 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 				}
 			}
 
+			// Flush child state to persistence before marking item completed.
+			// Without this, a crash after UpdateStepStatus but before the parent
+			// step's flush permanently loses the child's state contributions.
+			if flushErr := wf.state.Flush(ctx); flushErr != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("flush child state for item %d: %w", i, flushErr)
+					cancel()
+				}
+				mu.Unlock()
+				return
+			}
+
 			// Track per-item completion for resume support
 			if persistErr := e.persistence.UpdateStepStatus(ctx, runID, itemStepKey, Completed); persistErr != nil {
 				mu.Lock()

@@ -503,22 +503,18 @@ func (b *WorkflowBuilder) Sleep(d time.Duration) *WorkflowBuilder {
 // --- Named variants for serializable workflows ---
 
 // WhenNamed starts a serializable conditional branch arm using a registered condition.
-// The condition must be registered with Condition() before building the workflow.
+// The condition must be registered with Condition() before the workflow executes.
 //
 //	gostage.Condition("is-high-priority", func(ctx *gostage.Ctx) bool {
 //	    return gostage.Get[string](ctx, "priority") == "high"
 //	})
 //	wf.Branch(gostage.WhenNamed("is-high-priority").Step("urgent"))
 func WhenNamed(condName string) *WhenClause {
-	fn := lookupCondition(condName)
-	if fn == nil {
-		panic(fmt.Sprintf("gostage: condition %q not registered", condName))
-	}
-	return &WhenClause{condition: fn, condName: condName}
+	return &WhenClause{condName: condName}
 }
 
 // MapNamed adds a serializable data transformation step using a registered map function.
-// The function must be registered with MapFn() before building the workflow.
+// The function must be registered with MapFn() before the workflow executes.
 //
 //	gostage.MapFn("parse-csv", func(ctx *gostage.Ctx) error {
 //	    raw := gostage.Get[[]byte](ctx, "raw")
@@ -530,21 +526,16 @@ func (b *WorkflowBuilder) MapNamed(mapFnName string) *WorkflowBuilder {
 	if b.committed {
 		panic("gostage: cannot modify workflow after Commit()")
 	}
-	fn := lookupMapFn(mapFnName)
-	if fn == nil {
-		panic(fmt.Sprintf("gostage: map function %q not registered", mapFnName))
-	}
 	b.steps = append(b.steps, builderStep{
 		kind:      StepMap,
 		name:      "map",
-		mapFn:     fn,
 		mapFnName: mapFnName,
 	})
 	return b
 }
 
 // DoUntilNamed repeats a step until a registered condition returns true.
-// The condition must be registered with Condition() before building the workflow.
+// The condition must be registered with Condition() before the workflow executes.
 //
 //	gostage.Condition("is-ready", func(ctx *gostage.Ctx) bool {
 //	    return gostage.Get[string](ctx, "status") == "ready"
@@ -554,22 +545,17 @@ func (b *WorkflowBuilder) DoUntilNamed(ref StepRef, condName string) *WorkflowBu
 	if b.committed {
 		panic("gostage: cannot modify workflow after Commit()")
 	}
-	fn := lookupCondition(condName)
-	if fn == nil {
-		panic(fmt.Sprintf("gostage: condition %q not registered", condName))
-	}
 	b.steps = append(b.steps, builderStep{
 		kind:         StepDoUntil,
 		name:         "doUntil",
 		loopRef:      ref,
-		loopCond:     fn,
 		loopCondName: condName,
 	})
 	return b
 }
 
 // DoWhileNamed repeats a step while a registered condition returns true.
-// The condition must be registered with Condition() before building the workflow.
+// The condition must be registered with Condition() before the workflow executes.
 //
 //	gostage.Condition("has-more", func(ctx *gostage.Ctx) bool {
 //	    return gostage.Get[bool](ctx, "has_more")
@@ -579,22 +565,17 @@ func (b *WorkflowBuilder) DoWhileNamed(ref StepRef, condName string) *WorkflowBu
 	if b.committed {
 		panic("gostage: cannot modify workflow after Commit()")
 	}
-	fn := lookupCondition(condName)
-	if fn == nil {
-		panic(fmt.Sprintf("gostage: condition %q not registered", condName))
-	}
 	b.steps = append(b.steps, builderStep{
 		kind:         StepDoWhile,
 		name:         "doWhile",
 		loopRef:      ref,
-		loopCond:     fn,
 		loopCondName: condName,
 	})
 	return b
 }
 
 // Commit finalizes the builder and returns the compiled Workflow.
-// Returns an error if any referenced task is not registered.
+// Returns an error if any step is structurally invalid (nil function without name, nil sub-workflow).
 func (b *WorkflowBuilder) Commit() (*Workflow, error) {
 	wf := &Workflow{
 		ID:    b.id,
@@ -616,41 +597,20 @@ func (b *WorkflowBuilder) Commit() (*Workflow, error) {
 		switch bs.kind {
 		case StepSingle:
 			s.taskName = bs.taskName
-			if err := validateTaskRef(bs.taskName); err != nil {
-				return nil, err
-			}
 
 		case StepParallel:
 			s.refs = bs.refs
-			for _, ref := range bs.refs {
-				if err := validateStepRef(ref); err != nil {
-					return nil, err
-				}
-			}
 
 		case StepStage:
 			s.refs = bs.refs
-			for _, ref := range bs.refs {
-				if err := validateStepRef(ref); err != nil {
-					return nil, err
-				}
-			}
 
 		case StepBranch:
 			s.cases = bs.cases
-			for _, c := range bs.cases {
-				if err := validateStepRef(c.ref); err != nil {
-					return nil, err
-				}
-			}
 
 		case StepForEach:
 			s.collectionKey = bs.collectionKey
 			s.forEachRef = bs.forEachRef
 			s.concurrency = 1 // default sequential
-			if err := validateStepRef(bs.forEachRef); err != nil {
-				return nil, err
-			}
 			for _, opt := range bs.forEachOpts {
 				opt(&s)
 			}
@@ -669,9 +629,6 @@ func (b *WorkflowBuilder) Commit() (*Workflow, error) {
 			s.loopRef = bs.loopRef
 			s.loopCond = bs.loopCond
 			s.loopCondName = bs.loopCondName
-			if err := validateStepRef(bs.loopRef); err != nil {
-				return nil, err
-			}
 
 		case StepSub:
 			if bs.subWorkflow == nil {
@@ -716,18 +673,3 @@ func (wf *Workflow) clone() *Workflow {
 	return cloned
 }
 
-// validateTaskRef returns an error if a task name is not registered.
-func validateTaskRef(name string) error {
-	if lookupTask(name) == nil {
-		return fmt.Errorf("gostage: task %q not registered", name)
-	}
-	return nil
-}
-
-// validateStepRef returns an error if a StepRef references an unregistered task.
-func validateStepRef(ref StepRef) error {
-	if ref.subWorkflow != nil {
-		return nil // sub-workflows are already validated
-	}
-	return validateTaskRef(ref.taskName)
-}

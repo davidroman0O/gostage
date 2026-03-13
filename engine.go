@@ -3,6 +3,7 @@ package gostage
 import (
 	"container/list"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -137,13 +138,6 @@ func New(opts ...EngineOption) (*Engine, error) {
 //
 //	result, err := engine.RunSync(ctx, wf, gostage.Params{"order_id": "ORD-123"})
 func (e *Engine) RunSync(ctx context.Context, wf *Workflow, params Params) (*Result, error) {
-	// Guard: reject if engine is closed
-	select {
-	case <-e.closeCh:
-		return nil, ErrEngineClosed
-	default:
-	}
-
 	if wf == nil {
 		return nil, ErrNilWorkflow
 	}
@@ -159,13 +153,25 @@ func (e *Engine) RunSync(ctx context.Context, wf *Workflow, params Params) (*Res
 	// Create cancellable context for lifecycle management
 	runCtx, cancel := context.WithCancel(runCtx)
 
-	// Register with run tracking so Cancel/Close can reach us
+	// Register with run tracking so Cancel/Close can reach us.
+	// Close-check and registration are atomic under the same lock
+	// to prevent a run from starting on a shutting-down engine.
 	handle := &runHandle{
 		cancel:   cancel,
 		done:     make(chan *Result, 1),
 		finished: make(chan struct{}),
 	}
 	e.mu.Lock()
+	select {
+	case <-e.closeCh:
+		e.mu.Unlock()
+		cancel()
+		if timeoutCancel != nil {
+			timeoutCancel()
+		}
+		return nil, ErrEngineClosed
+	default:
+	}
 	e.runs[runID] = handle
 	e.mu.Unlock()
 
@@ -187,13 +193,6 @@ func (e *Engine) RunSync(ctx context.Context, wf *Workflow, params Params) (*Res
 //
 //	runID, err := engine.Run(ctx, wf, gostage.Params{"order_id": "ORD-123"})
 func (e *Engine) Run(ctx context.Context, wf *Workflow, params Params) (RunID, error) {
-	// Guard: reject if engine is closed
-	select {
-	case <-e.closeCh:
-		return "", ErrEngineClosed
-	default:
-	}
-
 	if wf == nil {
 		return "", ErrNilWorkflow
 	}
@@ -208,7 +207,15 @@ func (e *Engine) Run(ctx context.Context, wf *Workflow, params Params) (RunID, e
 		finished: make(chan struct{}),
 	}
 
+	// Close-check and registration are atomic under the same lock.
 	e.mu.Lock()
+	select {
+	case <-e.closeCh:
+		e.mu.Unlock()
+		cancel()
+		return "", ErrEngineClosed
+	default:
+	}
 	e.runs[runID] = handle
 	e.mu.Unlock()
 
@@ -255,16 +262,30 @@ func (e *Engine) Wait(ctx context.Context, runID RunID) (*Result, error) {
 	e.mu.Unlock()
 
 	if !ok {
-		// Run may have already completed via RunSync, check persistence
+		// Run may have already completed, reconstruct full result from persistence
 		run, err := e.persistence.LoadRun(ctx, runID)
 		if err != nil {
 			return nil, &RunNotFoundError{RunID: runID}
 		}
-		return &Result{
-			RunID:      run.RunID,
-			Status:     run.Status,
-			BailReason: run.BailReason,
-		}, nil
+		result := &Result{
+			RunID:       run.RunID,
+			Status:      run.Status,
+			BailReason:  run.BailReason,
+			SuspendData: run.SuspendData,
+		}
+		// Load the state store so the result is complete
+		stateEntries, stateErr := e.persistence.LoadState(ctx, runID)
+		if stateErr == nil && len(stateEntries) > 0 {
+			store := make(map[string]any, len(stateEntries))
+			for k, entry := range stateEntries {
+				var val any
+				if jsonErr := json.Unmarshal(entry.Value, &val); jsonErr == nil {
+					store[k] = convertType(val, entry.TypeName)
+				}
+			}
+			result.Store = store
+		}
+		return result, nil
 	}
 
 	select {
@@ -294,7 +315,7 @@ func (e *Engine) Cancel(ctx context.Context, runID RunID) error {
 	}
 
 	// If the run was sleeping, cancel its timer and unpin the workflow
-	if run.Status == Sleeping {
+	if run.Status == Sleeping && e.scheduler != nil {
 		e.scheduler.Cancel(runID)
 		e.workflowCacheMu.Lock()
 		if e.pinnedWorkflows[run.WorkflowID] > 0 {
@@ -325,7 +346,9 @@ func (e *Engine) DeleteRun(ctx context.Context, runID RunID) error {
 		}
 	}
 	// Cancel any scheduled wake timer for sleeping runs
-	e.scheduler.Cancel(runID)
+	if e.scheduler != nil {
+		e.scheduler.Cancel(runID)
+	}
 	// Unpin workflow if this was a sleeping run
 	run, loadErr := e.persistence.LoadRun(ctx, runID)
 	if loadErr == nil && run.Status == Sleeping {
@@ -412,11 +435,12 @@ func (e *Engine) Resume(ctx context.Context, wf *Workflow, runID RunID, data Par
 		return nil, fmt.Errorf("load state for resume: %w", err)
 	}
 
-	// Restore dynamic step counter and replay mutations from the suspended run
-	wf.dynCounter = run.DynCounter
+	// Replay mutations first (regenerates original step IDs from counter=0),
+	// then restore the persisted counter for future new mutations.
 	if len(run.Mutations) > 0 {
 		replayMutations(wf, run.Mutations, e.registry)
 	}
+	wf.dynCounter = run.DynCounter
 
 	// Inject resume data
 	wf.state.Set("__resuming", true)
@@ -471,7 +495,10 @@ func (e *Engine) OffMessage(id HandlerID) {
 	entries := e.messageHandlers[msgType]
 	for i, entry := range entries {
 		if entry.id == id {
-			e.messageHandlers[msgType] = append(entries[:i], entries[i+1:]...)
+			newEntries := make([]handlerEntry, 0, len(entries)-1)
+			newEntries = append(newEntries, entries[:i]...)
+			newEntries = append(newEntries, entries[i+1:]...)
+			e.messageHandlers[msgType] = newEntries
 			return
 		}
 	}
@@ -680,11 +707,12 @@ func (e *Engine) wakeWorkflow(runID RunID) {
 			return
 		}
 
-		// Restore dynamic step counter and replay mutations from the sleeping run
-		wf.dynCounter = run.DynCounter
+		// Replay mutations first (regenerates original step IDs from counter=0),
+		// then restore the persisted counter for future new mutations.
 		if len(run.Mutations) > 0 {
 			replayMutations(wf, run.Mutations, e.registry)
 		}
+		wf.dynCounter = run.DynCounter
 
 		// Mark the sleep step as completed so the executor skips it on resume.
 		// The sleep step returned sleepError before being marked Completed,
