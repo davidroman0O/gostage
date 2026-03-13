@@ -67,14 +67,7 @@ func TestSubWorkflow_PerStepResume(t *testing.T) {
 	}
 
 	// On resume, step1 must be skipped (still at count 1).
-	outer2, err := NewWorkflow("sub3-outer").
-		Sub(inner).
-		Commit()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	result, err = engine.Resume(ctx, outer2, result.RunID, nil)
+	result, err = engine.Resume(ctx, result.RunID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,14 +205,7 @@ func TestSubWorkflow_ForEachResumeNoCollision(t *testing.T) {
 	// though item 0's step1 was already written to step_statuses.
 	// This is the collision test: if sub-step IDs were not item-scoped,
 	// item 1's step1 would be incorrectly skipped.
-	outer2, err := NewWorkflow("nocol-outer").
-		ForEach("items", Sub(inner)).
-		Commit()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	result, err = engine.Resume(ctx, outer2, result.RunID, nil)
+	result, err = engine.Resume(ctx, result.RunID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

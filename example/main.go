@@ -984,7 +984,7 @@ func demoSuspendResume(ctx context.Context) {
 	r1, _ := engine.RunSync(ctx, wf, gs.Params{"name": "Bob"})
 	fmt.Printf("  First run: status=%s, suspend_data=%v\n", r1.Status, r1.SuspendData)
 
-	r2, err := engine.Resume(ctx, wf, r1.RunID, gs.Params{"approved": true})
+	r2, err := engine.Resume(ctx, r1.RunID, gs.Params{"approved": true})
 	if err != nil {
 		fmt.Printf("  Resume error: %v\n", err)
 	} else {

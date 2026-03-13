@@ -35,7 +35,7 @@ func TestTypedErrors(t *testing.T) {
 	defer engine.Close()
 
 	// Resume a non-existent run -> ErrRunNotFound
-	_, err = engine.Resume(context.Background(), wf, "nonexistent-run-id", nil)
+	_, err = engine.Resume(context.Background(), "nonexistent-run-id", nil)
 	if !errors.Is(err, ErrRunNotFound) {
 		t.Fatalf("expected ErrRunNotFound, got: %v", err)
 	}
@@ -49,27 +49,14 @@ func TestTypedErrors(t *testing.T) {
 		t.Fatalf("expected Suspended, got %s", result.Status)
 	}
 
-	// Resume with wrong workflow -> ErrWorkflowMismatch
-	wrongWf, err := NewWorkflow("wrong-workflow").
-		Step("te.task").
-		Commit()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = engine.Resume(context.Background(), wrongWf, result.RunID, nil)
-	if !errors.Is(err, ErrWorkflowMismatch) {
-		t.Fatalf("expected ErrWorkflowMismatch, got: %v", err)
-	}
-
 	// Resume correctly so the run completes
-	_, err = engine.Resume(context.Background(), wf, result.RunID, Params{"approved": true})
+	_, err = engine.Resume(context.Background(), result.RunID, Params{"approved": true})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Resume a completed run -> ErrRunNotSuspended
-	_, err = engine.Resume(context.Background(), wf, result.RunID, nil)
+	_, err = engine.Resume(context.Background(), result.RunID, nil)
 	if !errors.Is(err, ErrRunNotSuspended) {
 		t.Fatalf("expected ErrRunNotSuspended, got: %v", err)
 	}
@@ -93,12 +80,6 @@ func TestInputValidation(t *testing.T) {
 	_, err = engine.Run(context.Background(), nil, nil)
 	if !errors.Is(err, ErrNilWorkflow) {
 		t.Fatalf("Run: expected ErrNilWorkflow, got: %v", err)
-	}
-
-	// Resume with nil workflow
-	_, err = engine.Resume(context.Background(), nil, "fake-id", nil)
-	if !errors.Is(err, ErrNilWorkflow) {
-		t.Fatalf("Resume: expected ErrNilWorkflow, got: %v", err)
 	}
 }
 

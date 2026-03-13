@@ -60,7 +60,7 @@ func TestStepLevelResume(t *testing.T) {
 	}
 
 	// Resume: step1 should be skipped (already completed), step2 re-executes with resume path
-	result, err = engine.Resume(context.Background(), wf, result.RunID, Params{"approved": true})
+	result, err = engine.Resume(context.Background(), result.RunID, Params{"approved": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestForEachPerItemResume(t *testing.T) {
 	atomic.StoreInt32(&itemRunCount, 0)
 
 	// Resume: "a" should be skipped (completed), "b" re-runs (with resume), "c" runs fresh
-	result, err = engine.Resume(context.Background(), wf, result.RunID, Params{})
+	result, err = engine.Resume(context.Background(), result.RunID, Params{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,14 +216,7 @@ func TestParallelPerRefResume(t *testing.T) {
 	}
 
 	// Resume: pref.a should be SKIPPED (per-ref completion), pref.b resumes, pref.c runs
-	wf2, err := NewWorkflow("pref-test").
-		Stage("group", Step("pref.a"), Step("pref.b"), Step("pref.c")).
-		Commit()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	result2, err := engine.Resume(context.Background(), wf2, result1.RunID, nil)
+	result2, err := engine.Resume(context.Background(), result1.RunID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,17 +271,14 @@ func TestMultipleSuspendResumeCycles(t *testing.T) {
 		return nil
 	})
 
-	buildWf := func() *Workflow {
-		wf, err := NewWorkflow("multi-suspend").
-			Step("msr.step1").
-			Step("msr.step2").
-			Step("msr.step3").
-			Step("msr.step4").
-			Commit()
-		if err != nil {
-			t.Fatal(err)
-		}
-		return wf
+	wf, err := NewWorkflow("multi-suspend").
+		Step("msr.step1").
+		Step("msr.step2").
+		Step("msr.step3").
+		Step("msr.step4").
+		Commit()
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	engine, err := New()
@@ -298,7 +288,7 @@ func TestMultipleSuspendResumeCycles(t *testing.T) {
 	defer engine.Close()
 
 	// Run 1: suspends at step2 (step2_approved not set)
-	result, err := engine.RunSync(context.Background(), buildWf(), nil)
+	result, err := engine.RunSync(context.Background(), wf, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +297,7 @@ func TestMultipleSuspendResumeCycles(t *testing.T) {
 	}
 
 	// Resume 1: pass step2_approved=true → step2 passes, step3 suspends
-	result, err = engine.Resume(context.Background(), buildWf(), result.RunID, Params{"step2_approved": true})
+	result, err = engine.Resume(context.Background(), result.RunID, Params{"step2_approved": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +306,7 @@ func TestMultipleSuspendResumeCycles(t *testing.T) {
 	}
 
 	// Resume 2: pass step3_approved=true → step3 passes, step4 runs, workflow completes
-	result, err = engine.Resume(context.Background(), buildWf(), result.RunID, Params{"step3_approved": true})
+	result, err = engine.Resume(context.Background(), result.RunID, Params{"step3_approved": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,11 +371,7 @@ func TestResumeKeyCleanup(t *testing.T) {
 	}
 
 	// Resume with data
-	wf2, err := NewWorkflow("resume-key-cleanup").Step("rkc.task").Commit()
-	if err != nil {
-		t.Fatal(err)
-	}
-	result2, err := engine.Resume(context.Background(), wf2, result1.RunID, Params{"approved": true})
+	result2, err := engine.Resume(context.Background(), result1.RunID, Params{"approved": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,13 +423,10 @@ func TestConcurrentResumeRace(t *testing.T) {
 		t.Fatalf("expected Suspended, got %s", result.Status)
 	}
 
-	wf2, _ := NewWorkflow("conc-resume").Step("d8.block_resume").Commit()
-	wf3, _ := NewWorkflow("conc-resume").Step("d8.block_resume").Commit()
-
 	// Start first Resume in a goroutine (will block on ch)
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := engine.Resume(ctx, wf2, result.RunID, nil)
+		_, err := engine.Resume(ctx, result.RunID, nil)
 		errCh <- err
 	}()
 
@@ -451,7 +434,7 @@ func TestConcurrentResumeRace(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Second Resume should get ErrRunAlreadyActive
-	_, err = engine.Resume(ctx, wf3, result.RunID, nil)
+	_, err = engine.Resume(ctx, result.RunID, nil)
 	if !errors.Is(err, ErrRunAlreadyActive) {
 		t.Fatalf("expected ErrRunAlreadyActive, got %v", err)
 	}
@@ -463,65 +446,3 @@ func TestConcurrentResumeRace(t *testing.T) {
 	}
 }
 
-func TestResumeStepCountMismatch(t *testing.T) {
-	ResetTaskRegistry()
-
-	callCount := 0
-	Task("d8.step_a2", func(ctx *Ctx) error {
-		callCount++
-		Set(ctx, "a", true)
-		return nil
-	})
-	Task("d8.step_b2", func(ctx *Ctx) error {
-		Set(ctx, "b", true)
-		return nil
-	})
-	Task("d8.step_c2", func(ctx *Ctx) error {
-		if IsResuming(ctx) {
-			return nil
-		}
-		return Suspend(ctx, Params{"reason": "wait"})
-	})
-
-	// 3-step workflow: a → b → c (suspends)
-	// After RunSync, steps a and b are completed (2 completed steps)
-	wf, _ := NewWorkflow("step-mismatch").
-		Step("d8.step_a2").
-		Step("d8.step_b2").
-		Step("d8.step_c2").
-		Commit()
-
-	engine, err := New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer engine.Close()
-
-	ctx := context.Background()
-
-	result, _ := engine.RunSync(ctx, wf, nil)
-	if result.Status != Suspended {
-		t.Fatalf("expected Suspended, got %s", result.Status)
-	}
-
-	// Resume with a 1-step workflow (fewer steps than the 2 completed) → should fail
-	shortWf, _ := NewWorkflow("step-mismatch").Step("d8.step_c2").Commit()
-	_, err = engine.Resume(ctx, shortWf, result.RunID, nil)
-	if !errors.Is(err, ErrWorkflowMismatch) {
-		t.Fatalf("expected ErrWorkflowMismatch, got %v", err)
-	}
-
-	// Resume with the full 3-step workflow → should succeed
-	wf3, _ := NewWorkflow("step-mismatch").
-		Step("d8.step_a2").
-		Step("d8.step_b2").
-		Step("d8.step_c2").
-		Commit()
-	resumed, err := engine.Resume(ctx, wf3, result.RunID, nil)
-	if err != nil {
-		t.Fatalf("Resume with matching workflow failed: %v", err)
-	}
-	if resumed.Status != Completed {
-		t.Fatalf("expected Completed, got %s (error: %v)", resumed.Status, resumed.Error)
-	}
-}

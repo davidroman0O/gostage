@@ -53,6 +53,14 @@ type Engine struct {
 	// registry holds task, condition, and map function registrations.
 	registry *Registry
 
+	// eventHandlers receive lifecycle events outside the middleware chain.
+	eventHandlers []EventHandler
+
+	// gcTTL and gcInterval configure background run garbage collection.
+	// Zero gcInterval means GC is disabled.
+	gcTTL      time.Duration
+	gcInterval time.Duration
+
 	// autoRecover enables crash recovery on startup.
 	autoRecover bool
 
@@ -121,6 +129,11 @@ func New(opts ...EngineOption) (*Engine, error) {
 		if err := e.Recover(context.Background()); err != nil {
 			return nil, fmt.Errorf("auto recover: %w", err)
 		}
+	}
+
+	// Start run garbage collection if configured
+	if e.gcInterval > 0 {
+		go e.runGCLoop()
 	}
 
 	return e, nil
@@ -318,7 +331,17 @@ func (e *Engine) Cancel(ctx context.Context, runID RunID) error {
 
 	run.Status = Cancelled
 	run.UpdatedAt = time.Now()
-	return e.persistence.SaveRun(ctx, run)
+	saveErr := e.persistence.SaveRun(ctx, run)
+	if saveErr == nil {
+		e.emitEvent(EngineEvent{
+			Type:       EventRunCancelled,
+			RunID:      runID,
+			WorkflowID: run.WorkflowID,
+			Status:     Cancelled,
+			Timestamp:  time.Now(),
+		})
+	}
+	return saveErr
 }
 
 // DeleteRun removes a run and all its associated state from persistence.
@@ -350,22 +373,92 @@ func (e *Engine) DeleteRun(ctx context.Context, runID RunID) error {
 		}
 		e.workflowCacheMu.Unlock()
 	}
-	return e.persistence.DeleteRun(ctx, runID)
+	delErr := e.persistence.DeleteRun(ctx, runID)
+	if delErr == nil {
+		e.emitEvent(EngineEvent{
+			Type:      EventRunDeleted,
+			RunID:     runID,
+			Timestamp: time.Now(),
+		})
+	}
+	return delErr
+}
+
+// runGCLoop periodically purges terminal runs older than the configured TTL.
+func (e *Engine) runGCLoop() {
+	ticker := time.NewTicker(e.gcInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-e.closeCh:
+			return
+		case <-ticker.C:
+			if _, err := e.PurgeRuns(context.Background(), e.gcTTL); err != nil {
+				e.logger.Warn("run GC: %v", err)
+			}
+		}
+	}
+}
+
+// PurgeRuns deletes terminal runs whose UpdatedAt is older than the given TTL.
+// A TTL of 0 deletes all terminal runs regardless of age.
+// Returns the number of runs purged.
+func (e *Engine) PurgeRuns(ctx context.Context, ttl time.Duration) (int, error) {
+	select {
+	case <-e.closeCh:
+		return 0, ErrEngineClosed
+	default:
+	}
+
+	var before time.Time
+	if ttl > 0 {
+		before = time.Now().Add(-ttl)
+	} else {
+		before = time.Now().Add(time.Hour) // far future = match everything
+	}
+
+	terminalStatuses := []Status{Completed, Failed, Bailed, Cancelled}
+	purged := 0
+
+	for _, status := range terminalStatuses {
+		runs, err := e.persistence.ListRuns(ctx, RunFilter{
+			Status: status,
+			Before: before,
+		})
+		if err != nil {
+			return purged, fmt.Errorf("list %s runs for purge: %w", status, err)
+		}
+		for _, run := range runs {
+			if err := e.persistence.DeleteRun(ctx, run.RunID); err != nil {
+				e.logger.Warn("purge run %s: %v", run.RunID, err)
+				continue
+			}
+			e.emitEvent(EngineEvent{
+				Type:       EventRunDeleted,
+				RunID:      run.RunID,
+				WorkflowID: run.WorkflowID,
+				Timestamp:  time.Now(),
+			})
+			purged++
+		}
+	}
+
+	return purged, nil
 }
 
 // Resume resumes a suspended workflow with the provided data.
+// The workflow is rebuilt from the persisted definition — the caller does not
+// provide the workflow object. This ensures structural consistency between
+// the original run and the resumed execution.
 //
 //	result, err := engine.Resume(ctx, runID, gostage.Params{"approved": true})
-func (e *Engine) Resume(ctx context.Context, wf *Workflow, runID RunID, data Params) (*Result, error) {
+func (e *Engine) Resume(ctx context.Context, runID RunID, data Params) (*Result, error) {
 	// Guard: reject if engine is closed
 	select {
 	case <-e.closeCh:
 		return nil, ErrEngineClosed
 	default:
-	}
-
-	if wf == nil {
-		return nil, ErrNilWorkflow
 	}
 
 	// Concurrent resume prevention: reserve slot before proceeding
@@ -402,20 +495,18 @@ func (e *Engine) Resume(ctx context.Context, wf *Workflow, runID RunID, data Par
 		return nil, fmt.Errorf("%w: status is %s", ErrRunNotSuspended, run.Status)
 	}
 
-	if wf.ID != run.WorkflowID {
-		return nil, fmt.Errorf("%w: expected %s, got %s", ErrWorkflowMismatch, run.WorkflowID, wf.ID)
-	}
-
-	// Verify the workflow has at least as many steps as the run has completed.
-	completedCount := 0
-	for _, status := range run.StepStates {
-		if status == Completed {
-			completedCount++
+	// Rebuild workflow: cache first (same-engine lifetime), then persisted definition
+	wf := e.lookupCachedWorkflow(run.WorkflowID)
+	if wf == nil && run.WorkflowDef != nil {
+		if rebuilt, rebuildErr := NewWorkflowFromDefWithRegistry(run.WorkflowDef, e.registry); rebuildErr == nil {
+			wf = rebuilt
+			e.cacheWorkflow(rebuilt)
+		} else {
+			return nil, fmt.Errorf("rebuild workflow from definition: %w", rebuildErr)
 		}
 	}
-	if len(wf.steps) < completedCount {
-		return nil, fmt.Errorf("%w: workflow has %d steps but run completed %d",
-			ErrWorkflowMismatch, len(wf.steps), completedCount)
+	if wf == nil {
+		return nil, ErrWorkflowNotResumable
 	}
 
 	wf = wf.clone()
@@ -613,6 +704,14 @@ func (e *Engine) wakeWorkflow(runID RunID) {
 			return
 		}
 
+		e.emitEvent(EngineEvent{
+			Type:       EventRunWoken,
+			RunID:      runID,
+			WorkflowID: run.WorkflowID,
+			Status:     Running,
+			Timestamp:  time.Now(),
+		})
+
 		// Re-execute (resuming skips completed steps)
 		result := e.doExecute(ctx, wf, runID, true)
 
@@ -733,6 +832,14 @@ func (e *Engine) executeRun(ctx context.Context, wf *Workflow, runID RunID, para
 		return nil, fmt.Errorf("save initial run: %w", err)
 	}
 
+	e.emitEvent(EngineEvent{
+		Type:       EventRunCreated,
+		RunID:      runID,
+		WorkflowID: wf.ID,
+		Status:     Running,
+		Timestamp:  now,
+	})
+
 	result := e.doExecute(ctx, wf, runID, false)
 	return result, nil
 }
@@ -819,6 +926,31 @@ func (e *Engine) doExecute(ctx context.Context, wf *Workflow, runID RunID, resum
 		result.Error = err
 	}
 
+	// Emit lifecycle event for the terminal status.
+	// Cancelled is emitted by Cancel() — skip here to avoid duplicates.
+	var eventType EventType
+	switch result.Status {
+	case Completed:
+		eventType = EventRunCompleted
+	case Failed:
+		eventType = EventRunFailed
+	case Bailed:
+		eventType = EventRunBailed
+	case Suspended:
+		eventType = EventRunSuspended
+	case Sleeping:
+		eventType = EventRunSleeping
+	}
+	if eventType > 0 {
+		e.emitEvent(EngineEvent{
+			Type:       eventType,
+			RunID:      runID,
+			WorkflowID: wf.ID,
+			Status:     result.Status,
+			Timestamp:  time.Now(),
+		})
+	}
+
 	// Update persistence — use background context so writes succeed even if
 	// the workflow's context was cancelled.
 	bgCtx := context.Background()
@@ -845,6 +977,14 @@ func (e *Engine) doExecute(ctx context.Context, wf *Workflow, runID RunID, resum
 		if result.Status == Suspended || result.Status == Sleeping {
 			run.Mutations = captureDynamicState(wf)
 			run.DynCounter = wf.dynCounter
+		}
+		// Reject suspension of anonymous-closure workflows — they cannot be resumed
+		// because the definition is not serializable. Fail early so the developer
+		// sees the problem during development, not when Resume is called in production.
+		if (result.Status == Suspended || result.Status == Sleeping) && run.WorkflowDef == nil {
+			result.Status = Failed
+			result.Error = ErrWorkflowNotResumable
+			run.Status = Failed
 		}
 		if saveErr := e.persistence.SaveRun(bgCtx, run); saveErr != nil {
 			e.logger.Error("persist final run state: %v", saveErr)

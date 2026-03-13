@@ -145,6 +145,28 @@ func WithStateLimit(n int) EngineOption {
 	}
 }
 
+// WithRunGC enables automatic garbage collection of terminal runs.
+// Runs with terminal status (Completed, Failed, Bailed, Cancelled) older
+// than ttl are deleted every interval. A TTL of 0 purges immediately.
+//
+//	engine, _ := gostage.New(gostage.WithRunGC(24*time.Hour, 5*time.Minute))
+func WithRunGC(ttl, interval time.Duration) EngineOption {
+	return func(e *Engine) error {
+		e.gcTTL = ttl
+		e.gcInterval = interval
+		return nil
+	}
+}
+
+// WithEventHandler registers an observer for engine lifecycle events.
+// Multiple handlers can be registered. Handler panics are recovered and logged.
+func WithEventHandler(h EventHandler) EngineOption {
+	return func(e *Engine) error {
+		e.eventHandlers = append(e.eventHandlers, h)
+		return nil
+	}
+}
+
 // withNoPool is an unexported option used by HandleChild to skip starting the
 // worker pool. Child processes never submit async jobs via engine.Run(), so the
 // pool would idle for the entire child lifetime without being used.

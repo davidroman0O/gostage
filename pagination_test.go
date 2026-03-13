@@ -2,7 +2,9 @@ package gostage
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 // === ListRuns pagination with Offset (Issue 14) ===
@@ -132,5 +134,54 @@ func TestListRuns_OffsetWithoutLimit(t *testing.T) {
 	}
 	if len(runsMem) != 3 {
 		t.Fatalf("expected 3 runs from memory after offset 2, got %d", len(runsMem))
+	}
+}
+
+func TestListRuns_BeforeFilter(t *testing.T) {
+	ResetTaskRegistry()
+	Task("bf.task", func(ctx *Ctx) error { return nil })
+
+	wf, err := NewWorkflow("bf-wf").Step("bf.task").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "bf.db")
+	engine, err := New(WithSQLite(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+
+	// Before = far future should find the run
+	futureRuns, err := engine.ListRuns(context.Background(), RunFilter{
+		Status: Completed,
+		Before: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(futureRuns) != 1 {
+		t.Fatalf("expected 1 run with Before=future, got %d", len(futureRuns))
+	}
+
+	// Before = far past should find nothing
+	pastRuns, err := engine.ListRuns(context.Background(), RunFilter{
+		Status: Completed,
+		Before: time.Now().Add(-time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pastRuns) != 0 {
+		t.Fatalf("expected 0 runs with Before=past, got %d", len(pastRuns))
 	}
 }

@@ -819,11 +819,7 @@ func TestEngine_Resume(t *testing.T) {
 	}
 
 	// Resume with approval
-	wf2, err := NewWorkflow("resume").Step("e.approve_order").Commit()
-	if err != nil {
-		t.Fatal(err)
-	}
-	resumed, err := engine.Resume(context.Background(), wf2, result.RunID, Params{"approved": true})
+	resumed, err := engine.Resume(context.Background(), result.RunID, Params{"approved": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1027,11 +1023,7 @@ func TestEngine_DeleteKeySurvivesResume(t *testing.T) {
 	defer engine2.Close()
 
 	// Resume the run
-	wf2, err := NewWorkflow("delete-key-test").Step("e.set_and_suspend").Commit()
-	if err != nil {
-		t.Fatal(err)
-	}
-	result2, err := engine2.Resume(context.Background(), wf2, runID, nil)
+	result2, err := engine2.Resume(context.Background(), runID, nil)
 	if err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
@@ -1750,5 +1742,257 @@ func TestNewWorkflowFromDefWithRegistry(t *testing.T) {
 	source, _ := ResultGet[string](result, "source")
 	if source != "custom-registry" {
 		t.Fatalf("expected 'custom-registry', got %q", source)
+	}
+}
+
+func TestEngine_PurgeRuns(t *testing.T) {
+	ResetTaskRegistry()
+	Task("pr.task", func(ctx *Ctx) error { return nil })
+
+	wf, err := NewWorkflow("pr-wf").Step("pr.task").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "pr.db")
+	engine, err := New(WithSQLite(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	for i := 0; i < 3; i++ {
+		result, runErr := engine.RunSync(context.Background(), wf, nil)
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if result.Status != Completed {
+			t.Fatalf("run %d: expected Completed, got %s", i, result.Status)
+		}
+	}
+
+	runs, err := engine.ListRuns(context.Background(), RunFilter{Status: Completed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 3 {
+		t.Fatalf("expected 3 completed runs, got %d", len(runs))
+	}
+
+	purged, err := engine.PurgeRuns(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if purged != 3 {
+		t.Fatalf("expected 3 purged, got %d", purged)
+	}
+
+	remaining, err := engine.ListRuns(context.Background(), RunFilter{Status: Completed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("expected 0 remaining, got %d", len(remaining))
+	}
+}
+
+func TestEngine_WithRunGC(t *testing.T) {
+	ResetTaskRegistry()
+	Task("gc.task", func(ctx *Ctx) error { return nil })
+
+	wf, err := NewWorkflow("gc-wf").Step("gc.task").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "gc.db")
+	engine, err := New(
+		WithSQLite(dbPath),
+		WithRunGC(0, 100*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+
+	// Wait for GC to run
+	time.Sleep(300 * time.Millisecond)
+
+	runs, err := engine.ListRuns(context.Background(), RunFilter{Status: Completed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("expected GC to purge completed run, got %d remaining", len(runs))
+	}
+
+	engine.Close()
+}
+
+func TestEngine_SuspendAnonymousWorkflow_Fails(t *testing.T) {
+	ResetTaskRegistry()
+	Task("sa.task", func(ctx *Ctx) error {
+		return Suspend(ctx, Params{"reason": "need input"})
+	})
+
+	// Build a workflow with an anonymous closure — WorkflowDef will be nil
+	wf, err := NewWorkflow("sa-wf").
+		Step("sa.task").
+		Branch(When(func(ctx *Ctx) bool { return true }).Step("sa.task")).
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Failed {
+		t.Fatalf("expected Failed (anonymous workflow can't suspend), got %s", result.Status)
+	}
+	if !errors.Is(result.Error, ErrWorkflowNotResumable) {
+		t.Fatalf("expected ErrWorkflowNotResumable, got: %v", result.Error)
+	}
+}
+
+func TestEngine_ResumeNilWorkflowDef(t *testing.T) {
+	ResetTaskRegistry()
+	Task("rn.task", func(ctx *Ctx) error {
+		return Suspend(ctx, Params{"reason": "input"})
+	})
+
+	dbPath := filepath.Join(t.TempDir(), "rn.db")
+	engine, err := New(WithSQLite(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Manually create a suspended run with nil WorkflowDef
+	ctx := context.Background()
+	run := &RunState{
+		RunID:      "nil-def-run",
+		WorkflowID: "rn-wf",
+		Status:     Suspended,
+		StepStates: make(map[string]Status),
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+	}
+	if err := engine.persistence.SaveRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = engine.Resume(ctx, "nil-def-run", Params{"data": "value"})
+	if err == nil {
+		t.Fatal("expected error for nil WorkflowDef")
+	}
+	if !errors.Is(err, ErrWorkflowNotResumable) {
+		t.Fatalf("expected ErrWorkflowNotResumable, got: %v", err)
+	}
+	engine.Close()
+}
+
+func TestEngine_ResumeMissingTask(t *testing.T) {
+	ResetTaskRegistry()
+	Task("rm.task", func(ctx *Ctx) error {
+		return Suspend(ctx, Params{"need": "input"})
+	})
+
+	wf, err := NewWorkflow("rm-wf").Step("rm.task").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "rm.db")
+	engine, err := New(WithSQLite(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Suspended {
+		t.Fatalf("expected Suspended, got %s", result.Status)
+	}
+	runID := result.RunID
+	engine.Close()
+
+	// Create a new engine WITHOUT registering the task
+	ResetTaskRegistry()
+	engine2, err := New(WithSQLite(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine2.Close()
+
+	_, err = engine2.Resume(context.Background(), runID, Params{"data": "value"})
+	if err == nil {
+		t.Fatal("expected error for missing task")
+	}
+}
+
+func TestEngine_ResumeCrossEngine(t *testing.T) {
+	ResetTaskRegistry()
+	Task("ce.task", func(ctx *Ctx) error {
+		if IsResuming(ctx) {
+			Set(ctx, "resumed", true)
+			return nil
+		}
+		return Suspend(ctx, Params{"need": "approval"})
+	})
+
+	wf, err := NewWorkflow("ce-wf").Step("ce.task").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "ce.db")
+	engine1, err := New(WithSQLite(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := engine1.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Suspended {
+		t.Fatalf("expected Suspended, got %s", result.Status)
+	}
+	runID := result.RunID
+	engine1.Close()
+
+	// New engine, same database — Resume rebuilds from persisted WorkflowDef
+	engine2, err := New(WithSQLite(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine2.Close()
+
+	result2, err := engine2.Resume(context.Background(), runID, Params{"approved": true})
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if result2.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result2.Status)
+	}
+	resumed, _ := ResultGet[bool](result2, "resumed")
+	if !resumed {
+		t.Fatal("expected resumed=true")
 	}
 }

@@ -83,6 +83,8 @@ type RunFilter struct {
 	Limit int
 	// Offset skips the first N results. Used with Limit for pagination.
 	Offset int
+	// Before filters by UpdatedAt < this time. Zero means no time filter.
+	Before time.Time
 }
 
 // memoryPersistence is an in-memory implementation of Persistence.
@@ -209,6 +211,9 @@ func (m *memoryPersistence) ListRuns(_ context.Context, filter RunFilter) ([]*Ru
 			continue
 		}
 		if filter.Status != "" && run.Status != filter.Status {
+			continue
+		}
+		if !filter.Before.IsZero() && !run.UpdatedAt.Before(filter.Before) {
 			continue
 		}
 		filtered = append(filtered, copyRunState(run))

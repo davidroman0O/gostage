@@ -4,6 +4,7 @@ package gostage
 type handlerEntry struct {
 	id      HandlerID
 	handler MessageHandler
+	runID   RunID // empty = engine-wide, non-empty = scoped to this run
 }
 
 // OnMessage registers a handler for IPC messages of the given type.
@@ -18,6 +19,25 @@ func (e *Engine) OnMessage(msgType string, handler MessageHandler) HandlerID {
 	e.messageHandlersMu.Lock()
 	defer e.messageHandlersMu.Unlock()
 	e.messageHandlers[msgType] = append(e.messageHandlers[msgType], handlerEntry{id: id, handler: handler})
+	e.messageHandlerIndex[id] = msgType
+	return id
+}
+
+// OnMessageForRun registers a handler scoped to a specific run.
+// The handler only fires for messages from that run. Engine-wide handlers
+// registered via OnMessage still fire for all messages.
+func (e *Engine) OnMessageForRun(msgType string, runID RunID, handler MessageHandler) HandlerID {
+	if handler == nil {
+		return 0
+	}
+	id := HandlerID(e.messageHandlerCounter.Add(1))
+	e.messageHandlersMu.Lock()
+	defer e.messageHandlersMu.Unlock()
+	e.messageHandlers[msgType] = append(e.messageHandlers[msgType], handlerEntry{
+		id:      id,
+		handler: handler,
+		runID:   runID,
+	})
 	e.messageHandlerIndex[id] = msgType
 	return id
 }
@@ -50,7 +70,9 @@ func (e *Engine) OffMessage(id HandlerID) {
 }
 
 // dispatchMessage routes an IPC message to all registered handlers.
-func (e *Engine) dispatchMessage(msgType string, payload map[string]any) {
+// Scoped handlers only fire when the runID matches. Engine-wide handlers
+// (registered via OnMessage with no runID) always fire.
+func (e *Engine) dispatchMessage(msgType string, payload map[string]any, runID RunID) {
 	e.messageHandlersMu.RLock()
 	entries := e.messageHandlers[msgType]
 	// Also fire wildcard handlers (registered with "*")
@@ -58,6 +80,9 @@ func (e *Engine) dispatchMessage(msgType string, payload map[string]any) {
 	e.messageHandlersMu.RUnlock()
 
 	for _, entry := range entries {
+		if entry.runID != "" && entry.runID != runID {
+			continue
+		}
 		fn := entry.handler
 		func() {
 			defer func() {
@@ -69,6 +94,9 @@ func (e *Engine) dispatchMessage(msgType string, payload map[string]any) {
 		}()
 	}
 	for _, entry := range wildcardEntries {
+		if entry.runID != "" && entry.runID != runID {
+			continue
+		}
 		fn := entry.handler
 		func() {
 			defer func() {

@@ -204,7 +204,7 @@ func TestMutationInsertSurvivesResume(t *testing.T) {
 	}
 
 	// Resume: injected step should still be present and run
-	result, err = engine.Resume(ctx, wf, result.RunID, Params{"go": true})
+	result, err = engine.Resume(ctx, result.RunID, Params{"go": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +274,7 @@ func TestMutationDisableSurvivesResume(t *testing.T) {
 	}
 
 	// Resume: "skipped" should still be disabled
-	result, err = engine.Resume(ctx, wf, result.RunID, Params{"go": true})
+	result, err = engine.Resume(ctx, result.RunID, Params{"go": true})
 	if err != nil {
 		t.Fatal(err)
 	}

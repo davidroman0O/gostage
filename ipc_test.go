@@ -177,5 +177,5 @@ func TestOnMessageNilHandler(t *testing.T) {
 
 	// Verify no handler was registered by checking that dispatching does nothing
 	// (if a nil handler were registered, dispatching would panic)
-	engine.dispatchMessage("test", map[string]any{"key": "value"})
+	engine.dispatchMessage("test", map[string]any{"key": "value"}, "")
 }

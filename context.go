@@ -342,7 +342,7 @@ func Send(ctx *Ctx, msgType string, payload any) error {
 		if !ok {
 			payloadMap = map[string]any{"data": payload}
 		}
-		ctx.engine.dispatchMessage(msgType, payloadMap)
+		ctx.engine.dispatchMessage(msgType, payloadMap, ctx.state.runID)
 	}
 	return nil
 }

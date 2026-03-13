@@ -47,6 +47,7 @@ type spawnServer struct {
 // The exported fields are accessible to ChildMiddleware implementations.
 type SpawnJob struct {
 	ID             string
+	RunID          RunID             // the run this job belongs to
 	TaskName       string
 	StoreData      map[string][]byte // serialized store snapshot including item/index
 	DefinitionJSON []byte            // serialized SubWorkflowDef for multi-stage children
@@ -218,7 +219,13 @@ func (ss *spawnServer) SendMessage(ctx context.Context, msg *pb.IPCMessage) (*pb
 				if !ok {
 					payloadMap = map[string]any{"data": parsed}
 				}
-				ss.engine.dispatchMessage(payload.MsgType, payloadMap)
+				jobRunID := RunID("")
+				ss.mu.Lock()
+				if job, ok := ss.jobs[jobID]; ok {
+					jobRunID = job.RunID
+				}
+				ss.mu.Unlock()
+				ss.engine.dispatchMessage(payload.MsgType, payloadMap, jobRunID)
 			}
 		}
 
@@ -287,6 +294,7 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 		jobToken := uuid.New().String()
 		job := &SpawnJob{
 			ID:        jobID,
+			RunID:     runID,
 			TaskName:  s.forEachRef.taskName,
 			StoreData: storeData,
 			resultCh:  make(chan *spawnResult, 1),

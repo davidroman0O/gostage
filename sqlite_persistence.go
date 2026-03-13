@@ -441,6 +441,10 @@ func (p *sqlitePersistence) ListRuns(ctx context.Context, filter RunFilter) ([]*
 		query += " AND status = ?"
 		args = append(args, string(filter.Status))
 	}
+	if !filter.Before.IsZero() {
+		query += " AND updated_at < ?"
+		args = append(args, filter.Before.Format(time.RFC3339Nano))
+	}
 
 	query += " ORDER BY created_at DESC"
 

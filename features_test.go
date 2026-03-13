@@ -516,7 +516,7 @@ func TestRunAndResumeAfterClose(t *testing.T) {
 	}
 
 	// Resume after Close should return error
-	_, resumeErr := engine.Resume(context.Background(), wf, "fake-run-id", nil)
+	_, resumeErr := engine.Resume(context.Background(), "fake-run-id", nil)
 	if resumeErr == nil {
 		t.Fatal("expected Resume to fail after Close")
 	}
