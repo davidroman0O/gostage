@@ -218,7 +218,7 @@ func (e *Engine) executeSingle(ctx context.Context, wf *Workflow, taskName strin
 		return fmt.Errorf("task %q not registered", taskName)
 	}
 
-	retries, retryDelay := resolveRetryConfig(td, wf)
+	retries, strategy := resolveRetryConfig(td, wf)
 
 	taskCtx := newCtx(ctx, wf.state, e.logger)
 	taskCtx.resuming = resuming
@@ -226,7 +226,7 @@ func (e *Engine) executeSingle(ctx context.Context, wf *Workflow, taskName strin
 	taskCtx.mutations = wf.mutations
 	taskCtx.engine = e
 
-	return e.retryTask(ctx, taskName, taskCtx, td.fn, retries, retryDelay, td.timeout)
+	return e.retryTask(ctx, taskName, taskCtx, td.fn, retries, strategy, td.timeout)
 }
 
 // updateCurrentStep updates the current step tracking in the run state.

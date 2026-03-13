@@ -41,32 +41,43 @@ func (e *Engine) executeTaskFn(taskCtx *Ctx, taskName string, fn func(*Ctx) erro
 
 // resolveRetryConfig returns the retry count and delay for a task,
 // falling back to workflow defaults if the task has no explicit config.
-func resolveRetryConfig(td *taskDef, wf *Workflow) (int, time.Duration) {
+func resolveRetryConfig(td *taskDef, wf *Workflow) (int, RetryStrategy) {
 	retries := td.retries
-	retryDelay := td.retryDelay
+	strategy := td.retryStrategy
 	if retries < 0 && wf.cfg.defaultRetries > 0 {
 		retries = wf.cfg.defaultRetries
-		retryDelay = wf.cfg.defaultRetryDelay
+		if strategy == nil {
+			strategy = wf.cfg.defaultRetryStrategy
+		}
+		if strategy == nil && wf.cfg.defaultRetryDelay > 0 {
+			strategy = FixedDelay(wf.cfg.defaultRetryDelay)
+		}
 	}
 	if retries < 0 {
 		retries = 0
 	}
-	return retries, retryDelay
+	if strategy == nil && td.retryDelay > 0 {
+		strategy = FixedDelay(td.retryDelay)
+	}
+	return retries, strategy
 }
 
 // retryTask executes a task function with retry logic, middleware, and optional per-task timeout.
 // This is the unified retry loop used by both executeSingle and executeForEachItem,
 // ensuring consistent handling of non-retryable signals (bail, suspend, sleep).
 func (e *Engine) retryTask(ctx context.Context, taskName string, taskCtx *Ctx,
-	fn func(*Ctx) error, retries int, retryDelay time.Duration, taskTimeout time.Duration) error {
+	fn func(*Ctx) error, retries int, strategy RetryStrategy, taskTimeout time.Duration) error {
 
 	var lastErr error
 	for attempt := 0; attempt <= retries; attempt++ {
-		if attempt > 0 && retryDelay > 0 {
-			select {
-			case <-time.After(retryDelay):
-			case <-ctx.Done():
-				return ctx.Err()
+		if attempt > 0 && strategy != nil {
+			delay := strategy.Delay(attempt - 1)
+			if delay > 0 {
+				select {
+				case <-time.After(delay):
+				case <-ctx.Done():
+					return ctx.Err()
+				}
 			}
 		}
 

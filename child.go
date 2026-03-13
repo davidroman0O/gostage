@@ -240,7 +240,11 @@ func HandleChild(opts ...EngineOption) {
 		if retries < 0 {
 			retries = 0
 		}
-		taskErr = childEngine.retryTask(ctx, taskName, taskCtx, td.fn, retries, td.retryDelay, td.timeout)
+		strategy := td.retryStrategy
+		if strategy == nil && td.retryDelay > 0 {
+			strategy = FixedDelay(td.retryDelay)
+		}
+		taskErr = childEngine.retryTask(ctx, taskName, taskCtx, td.fn, retries, strategy, td.timeout)
 	}
 
 	if taskErr != nil {

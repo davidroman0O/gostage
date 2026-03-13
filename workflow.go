@@ -85,12 +85,13 @@ type Workflow struct {
 }
 
 type workflowConfig struct {
-	onStepComplete    StepCallback
-	onError           ErrorCallback
-	defaultRetries    int
-	defaultRetryDelay time.Duration
-	stepMiddleware    []StepMiddleware
-	tags              []string
+	onStepComplete       StepCallback
+	onError              ErrorCallback
+	defaultRetries       int
+	defaultRetryDelay    time.Duration
+	defaultRetryStrategy RetryStrategy
+	stepMiddleware       []StepMiddleware
+	tags                 []string
 }
 
 // StepCallback is called after each step completes successfully.
@@ -230,6 +231,19 @@ func WithDefaultRetry(n int, delay time.Duration) WorkflowOption {
 	return func(cfg *workflowConfig) {
 		cfg.defaultRetries = n
 		cfg.defaultRetryDelay = delay
+	}
+}
+
+// WithDefaultRetryStrategy sets a workflow-wide default retry strategy.
+// Individual task strategies (via WithRetryStrategy) take precedence.
+//
+//	gostage.NewWorkflow("resilient",
+//	    gostage.WithDefaultRetry(5, 0),
+//	    gostage.WithDefaultRetryStrategy(gostage.ExponentialBackoffWithJitter(100*time.Millisecond, 30*time.Second)),
+//	)
+func WithDefaultRetryStrategy(s RetryStrategy) WorkflowOption {
+	return func(cfg *workflowConfig) {
+		cfg.defaultRetryStrategy = s
 	}
 }
 

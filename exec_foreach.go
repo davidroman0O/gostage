@@ -145,7 +145,7 @@ func (e *Engine) executeForEachItem(ctx context.Context, wf *Workflow, ref StepR
 		return fmt.Errorf("task %q not registered", ref.taskName)
 	}
 
-	retries, retryDelay := resolveRetryConfig(td, wf)
+	retries, strategy := resolveRetryConfig(td, wf)
 
 	taskCtx := newCtx(ctx, wf.state, e.logger)
 	taskCtx.forEachItem = item
@@ -155,7 +155,7 @@ func (e *Engine) executeForEachItem(ctx context.Context, wf *Workflow, ref StepR
 	taskCtx.mutations = wf.mutations
 	taskCtx.engine = e
 
-	return e.retryTask(ctx, ref.taskName, taskCtx, td.fn, retries, retryDelay, td.timeout)
+	return e.retryTask(ctx, ref.taskName, taskCtx, td.fn, retries, strategy, td.timeout)
 }
 
 // getSliceFromState extracts a slice from the run state for ForEach iteration.

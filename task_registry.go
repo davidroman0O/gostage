@@ -13,13 +13,14 @@ type TaskFunc func(ctx *Ctx) error
 
 // taskDef holds the definition of a registered task.
 type taskDef struct {
-	name        string
-	fn          TaskFunc
-	retries     int
-	retryDelay  time.Duration
-	timeout     time.Duration
-	tags        []string
-	description string
+	name          string
+	fn            TaskFunc
+	retries       int
+	retryDelay    time.Duration
+	retryStrategy RetryStrategy
+	timeout       time.Duration
+	tags          []string
+	description   string
 }
 
 // Task registers a named task function in the default registry.
@@ -62,6 +63,20 @@ func WithRetry(n int) TaskOption {
 func WithRetryDelay(d time.Duration) TaskOption {
 	return func(td *taskDef) {
 		td.retryDelay = d
+		td.retryStrategy = FixedDelay(d)
+	}
+}
+
+// WithRetryStrategy sets a custom retry strategy for a task.
+// This overrides WithRetryDelay if both are set.
+//
+//	gostage.Task("api-call", handler,
+//	    gostage.WithRetry(5),
+//	    gostage.WithRetryStrategy(gostage.ExponentialBackoffWithJitter(100*time.Millisecond, 30*time.Second)),
+//	)
+func WithRetryStrategy(s RetryStrategy) TaskOption {
+	return func(td *taskDef) {
+		td.retryStrategy = s
 	}
 }
 
