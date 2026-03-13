@@ -144,3 +144,48 @@ func TestEngine_RegistryIsolation(t *testing.T) {
 		t.Fatalf("engine B produced %q, want %q", sourceB, "engine-B")
 	}
 }
+
+func TestRegistry_ConditionAndMapFn(t *testing.T) {
+	reg := NewRegistry()
+	reg.RegisterTask("rcm.task", func(ctx *Ctx) error {
+		Set(ctx, "ran", true)
+		return nil
+	})
+	reg.RegisterCondition("rcm.cond", func(ctx *Ctx) bool {
+		return true
+	})
+	reg.RegisterMapFn("rcm.map", func(ctx *Ctx) error {
+		Set(ctx, "mapped", true)
+		return nil
+	})
+
+	wf, err := NewWorkflow("rcm-wf").
+		Branch(WhenNamed("rcm.cond").Step("rcm.task")).
+		MapNamed("rcm.map").
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New(WithRegistry(reg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+	ran, _ := ResultGet[bool](result, "ran")
+	mapped, _ := ResultGet[bool](result, "mapped")
+	if !ran {
+		t.Fatal("expected condition branch to execute")
+	}
+	if !mapped {
+		t.Fatal("expected map function to execute")
+	}
+}

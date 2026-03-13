@@ -1411,3 +1411,344 @@ func TestEngine_ForEachConcurrentState(t *testing.T) {
 		}
 	}
 }
+
+func TestEngine_GetRun(t *testing.T) {
+	ResetTaskRegistry()
+	Task("gr.task", func(ctx *Ctx) error {
+		Set(ctx, "done", true)
+		return nil
+	})
+	wf, err := NewWorkflow("get-run").Step("gr.task").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := New(WithSQLite(filepath.Join(t.TempDir(), "gr.db")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	run, err := engine.GetRun(context.Background(), result.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if run.Status != Completed {
+		t.Fatalf("expected Completed, got %s", run.Status)
+	}
+	if run.RunID != result.RunID {
+		t.Fatalf("RunID mismatch: %s vs %s", run.RunID, result.RunID)
+	}
+}
+
+func TestEngine_WithAutoRecover(t *testing.T) {
+	ResetTaskRegistry()
+	Task("ar.task", func(ctx *Ctx) error { return nil })
+
+	dbPath := filepath.Join(t.TempDir(), "ar.db")
+
+	engine1, err := New(WithSQLite(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	run := &RunState{
+		RunID:      "crashed-run",
+		WorkflowID: "ar-wf",
+		Status:     Running,
+		StepStates: make(map[string]Status),
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+	}
+	if err := engine1.persistence.SaveRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	engine1.Close()
+
+	engine2, err := New(WithSQLite(dbPath), WithAutoRecover())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine2.Close()
+
+	recovered, err := engine2.GetRun(ctx, "crashed-run")
+	if err != nil {
+		t.Fatalf("GetRun after recovery: %v", err)
+	}
+	if recovered.Status != Failed {
+		t.Fatalf("expected Failed after auto-recover, got %s", recovered.Status)
+	}
+}
+
+func TestEngine_SleepWakeCycle_EndToEnd(t *testing.T) {
+	ResetTaskRegistry()
+	Task("sw.before", func(ctx *Ctx) error {
+		Set(ctx, "phase", "before-sleep")
+		return nil
+	})
+	Task("sw.after", func(ctx *Ctx) error {
+		Set(ctx, "phase", "after-sleep")
+		return nil
+	})
+
+	wf, err := NewWorkflow("sleep-wake").
+		Step("sw.before").
+		Sleep(100 * time.Millisecond).
+		Step("sw.after").
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "sw.db")
+	engine, err := New(WithSQLite(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	runID, err := engine.Run(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The run goes through two handle lifecycles:
+	// 1. Run → Sleeping (initial handle cleaned up)
+	// 2. Wake → Completed (new handle created by wakeWorkflow)
+	// Poll GetRun until the full cycle completes. The run may not be
+	// in persistence yet immediately after Run() returns (async execution).
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		run, getErr := engine.GetRun(context.Background(), runID)
+		if getErr != nil {
+			// Run not yet in persistence — execution hasn't started
+			if errors.Is(getErr, ErrRunNotFound) {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			t.Fatalf("GetRun: %v", getErr)
+		}
+		if run.Status == Completed {
+			return
+		}
+		if run.Status == Failed {
+			t.Fatalf("run failed during sleep-wake cycle")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("sleep-wake cycle did not complete within 5 seconds")
+}
+
+func TestEngine_EnableStep(t *testing.T) {
+	ResetTaskRegistry()
+	var order []string
+	Task("en.a", func(ctx *Ctx) error {
+		order = append(order, "a")
+		return nil
+	})
+	Task("en.b", func(ctx *Ctx) error {
+		order = append(order, "b")
+		DisableStep(ctx, "en.c")
+		EnableStep(ctx, "en.c")
+		return nil
+	})
+	Task("en.c", func(ctx *Ctx) error {
+		order = append(order, "c")
+		return nil
+	})
+
+	wf, err := NewWorkflow("enable-step").
+		Step("en.a").
+		Step("en.b").
+		Step("en.c").
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+	if len(order) != 3 || order[2] != "c" {
+		t.Fatalf("expected [a b c], got %v", order)
+	}
+}
+
+func TestEngine_EnableByTag(t *testing.T) {
+	ResetTaskRegistry()
+	var order []string
+	Task("et.setup", func(ctx *Ctx) error {
+		order = append(order, "setup")
+		DisableByTag(ctx, "optional")
+		EnableByTag(ctx, "optional")
+		return nil
+	})
+	Task("et.opt", func(ctx *Ctx) error {
+		order = append(order, "opt")
+		return nil
+	})
+
+	wf, err := NewWorkflow("enable-tag").
+		Step("et.setup").
+		Step("et.opt", WithStepTags("optional")).
+		Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+	if len(order) != 2 || order[1] != "opt" {
+		t.Fatalf("expected [setup opt], got %v", order)
+	}
+}
+
+func TestEngine_WithPersistence(t *testing.T) {
+	ResetTaskRegistry()
+	Task("wp.task", func(ctx *Ctx) error {
+		Set(ctx, "val", 42)
+		return nil
+	})
+	wf, err := NewWorkflow("with-persist").Step("wp.task").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	customPersist := newMemoryPersistence()
+	engine, err := New(WithPersistence(customPersist))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+
+	run, loadErr := customPersist.LoadRun(context.Background(), result.RunID)
+	if loadErr != nil {
+		t.Fatalf("LoadRun from custom persistence: %v", loadErr)
+	}
+	if run.Status != Completed {
+		t.Fatalf("custom persistence shows %s, want Completed", run.Status)
+	}
+}
+
+func TestEngine_WithLogger(t *testing.T) {
+	ResetTaskRegistry()
+	Task("wl.task", func(ctx *Ctx) error { return nil })
+	wf, err := NewWorkflow("with-logger").Step("wl.task").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	logger := NewDefaultLogger()
+	engine, err := New(WithLogger(logger))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), wf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+}
+
+func TestTask_WithDescription(t *testing.T) {
+	ResetTaskRegistry()
+	Task("wd.task", func(ctx *Ctx) error { return nil },
+		WithDescription("Process payment charge"),
+	)
+	td := defaultRegistry.lookupTask("wd.task")
+	if td == nil {
+		t.Fatal("task not registered")
+	}
+	if td.description != "Process payment charge" {
+		t.Fatalf("expected description 'Process payment charge', got %q", td.description)
+	}
+}
+
+func TestNewWorkflowFromDefWithRegistry(t *testing.T) {
+	ResetTaskRegistry()
+
+	customReg := NewRegistry()
+	customReg.RegisterTask("defr.task", func(ctx *Ctx) error {
+		Set(ctx, "source", "custom-registry")
+		return nil
+	})
+
+	wf, err := NewWorkflow("defr-wf").Step("defr.task").Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	def, err := WorkflowToDefinition(wf)
+	if err != nil {
+		t.Fatalf("WorkflowToDefinition: %v", err)
+	}
+	jsonBytes, err := MarshalWorkflowDefinition(def)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	def2, err := UnmarshalWorkflowDefinition(jsonBytes)
+	if err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	rebuilt, err := NewWorkflowFromDefWithRegistry(def2, customReg)
+	if err != nil {
+		t.Fatalf("NewWorkflowFromDefWithRegistry: %v", err)
+	}
+
+	engine, err := New(WithRegistry(customReg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	result, err := engine.RunSync(context.Background(), rebuilt, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Completed {
+		t.Fatalf("expected Completed, got %s", result.Status)
+	}
+	source, _ := ResultGet[string](result, "source")
+	if source != "custom-registry" {
+		t.Fatalf("expected 'custom-registry', got %q", source)
+	}
+}

@@ -528,3 +528,46 @@ func TestSliceOfStructsSurvivesSpawnRoundTrip(t *testing.T) {
 		t.Fatalf("record 1: %+v", records[1])
 	}
 }
+
+func TestCtx_GetOk(t *testing.T) {
+	s := newRunState("test", nil)
+	ctx := newCtx(context.Background(), s, NewDefaultLogger())
+
+	// Missing key
+	val, ok := GetOk[string](ctx, "missing")
+	if ok {
+		t.Fatal("expected ok=false for missing key")
+	}
+	if val != "" {
+		t.Fatalf("expected zero value, got %q", val)
+	}
+
+	// Existing key with zero value
+	Set(ctx, "empty", "")
+	val, ok = GetOk[string](ctx, "empty")
+	if !ok {
+		t.Fatal("expected ok=true for existing key with zero value")
+	}
+	if val != "" {
+		t.Fatalf("expected empty string, got %q", val)
+	}
+
+	// Existing key with value
+	Set(ctx, "name", "Alice")
+	val, ok = GetOk[string](ctx, "name")
+	if !ok {
+		t.Fatal("expected ok=true for existing key")
+	}
+	if val != "Alice" {
+		t.Fatalf("expected 'Alice', got %q", val)
+	}
+
+	// Type mismatch
+	intVal, ok := GetOk[int](ctx, "name")
+	if ok {
+		t.Fatal("expected ok=false for type mismatch")
+	}
+	if intVal != 0 {
+		t.Fatalf("expected zero value for type mismatch, got %d", intVal)
+	}
+}

@@ -145,6 +145,20 @@ func GetOr[T any](ctx *Ctx, key string, def T) T {
 	return typed
 }
 
+// GetOk retrieves a typed value and reports whether the key exists.
+// Returns (zero, false) if the key is missing or the type does not match.
+// Unlike Get, this allows distinguishing a missing key from a zero value.
+//
+//	val, ok := gostage.GetOk[string](ctx, "user.name")
+func GetOk[T any](ctx *Ctx, key string) (T, bool) {
+	val, ok := ctx.state.Get(key)
+	if !ok {
+		var zero T
+		return zero, false
+	}
+	return coerce[T](val)
+}
+
 // Set stores a typed value in the workflow store.
 // Returns an error if the value's type is not JSON-serializable (e.g. contains
 // channels, functions, or complex numbers).
