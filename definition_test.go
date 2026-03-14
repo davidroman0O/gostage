@@ -155,8 +155,8 @@ func TestFunctionRegistry(t *testing.T) {
 		MapFn("test-map", func(ctx *Ctx) error { return nil })
 	}()
 
-	// Reset clears everything
-	ResetFunctionRegistries()
+	// Reset clears everything (ResetTaskRegistry clears all three registries)
+	ResetTaskRegistry()
 	if fn := lookupCondition("test-cond"); fn != nil {
 		t.Fatal("expected nil after reset")
 	}

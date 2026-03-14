@@ -50,18 +50,3 @@ func lookupMapFn(name string) MapFunc {
 	return defaultRegistry.lookupMapFn(name)
 }
 
-// ResetFunctionRegistries clears all registered conditions and map functions. Used in tests.
-func ResetFunctionRegistries() {
-	// Reset is now handled by Registry.Reset() which clears all three registries.
-	// This function exists for backward compatibility — it only clears conditions and map functions.
-	// Since ResetTaskRegistry calls defaultRegistry.Reset() which clears everything,
-	// and this is typically called from ResetTaskRegistry, we only need to clear if called standalone.
-	r := defaultRegistry
-	r.condMu.Lock()
-	r.conditions = make(map[string]ConditionFunc)
-	r.condMu.Unlock()
-
-	r.mapFnMu.Lock()
-	r.mapFns = make(map[string]MapFunc)
-	r.mapFnMu.Unlock()
-}

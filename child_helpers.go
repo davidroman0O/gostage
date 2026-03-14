@@ -47,7 +47,7 @@ func (e *Engine) ExecuteWorkflowForChild(ctx context.Context, wf *Workflow, runI
 // ExecuteSingleTaskForChild runs a single task in a child process using the
 // engine's retry and middleware machinery.
 func (e *Engine) ExecuteSingleTaskForChild(ctx context.Context, taskName string, childState *ChildRunState, storeVals map[string]any, ipcSendFn func(string, any) error) error {
-	td := lookupTask(taskName)
+	td := e.registry.lookupTask(taskName)
 	if td == nil {
 		return fmt.Errorf("task %q not registered in child", taskName)
 	}
