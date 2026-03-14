@@ -4,92 +4,74 @@ package gostage;
 
 option go_package = "github.com/davidroman0O/gostage/proto";
 
-// WorkflowIPC service defines the communication between parent and child processes
+// WorkflowIPC service defines the communication between parent and child processes.
+// Pull model: child connects to parent's gRPC server, requests work, returns results.
 service WorkflowIPC {
-  // Initialize workflow - sends the workflow definition via gRPC
-  rpc InitializeWorkflow(WorkflowDefinition) returns (WorkflowAck);
-  
-  // Child requests workflow definition from parent (new pull model)
+  // Child requests workflow definition from parent
   rpc RequestWorkflowDefinition(ReadySignal) returns (WorkflowDefinition);
-  
-  // Child signals it's ready to receive workflow definitions
-  rpc ChildReady(ReadySignal) returns (MessageAck);
-  
-  // Send a single message from child to parent
+
+  // Send a single message from child to parent (IPC, final store, results)
   rpc SendMessage(IPCMessage) returns (MessageAck);
-  
-  // Stream messages for high-frequency communication
-  rpc StreamMessages(stream IPCMessage) returns (stream MessageAck);
-  
-  // Bidirectional streaming for real-time communication
-  rpc BidirectionalStream(stream IPCMessage) returns (stream IPCMessage);
 }
 
-// Message metadata for comprehensive tracing
+// Message metadata for tracing
 message MessageContext {
-  string workflow_id = 1;      // ID of the workflow that sent this message
-  string stage_id = 2;         // ID of the stage that sent this message
-  string action_name = 3;      // Name of the action that sent this message
-  int32 process_id = 4;        // PID of the process that sent this message
-  bool is_child_process = 5;   // Whether this came from a spawned child process
-  int32 action_index = 6;      // Index of action within stage (0-based)
-  bool is_last_action = 7;     // Whether this is the last action in the stage
-  string session_id = 8;       // Unique session identifier for this workflow run
-  int64 sequence_number = 9;   // Incremental sequence number for this session
+  string workflow_id = 1;
+  string stage_id = 2;
+  string action_name = 3;
+  int32 process_id = 4;
+  bool is_child_process = 5;
+  int32 action_index = 6;
+  bool is_last_action = 7;
+  string session_id = 8;
+  int64 sequence_number = 9;
 }
 
 // Main message wrapper with metadata
 message IPCMessage {
   MessageType type = 1;
   oneof payload {
-    LogPayload log = 10;
     StorePutPayload store_put = 11;
-    StoreDeletePayload store_delete = 12;
-    WorkflowStartPayload workflow_start = 13;
     WorkflowResultPayload workflow_result = 14;
     FinalStorePayload final_store = 15;
+    IPCPayload ipc_payload = 16;
+    BailPayload bail_payload = 17;
   }
-  
-  // Metadata for comprehensive tracking
+
   string message_id = 20;
   int64 timestamp = 21;
-  MessageContext context = 22;  // Full context information
+  MessageContext context = 22;
 }
 
-// Message types - matches your existing MessageType
+// Message types for parent-child IPC
 enum MessageType {
   MESSAGE_TYPE_UNSPECIFIED = 0;
-  MESSAGE_TYPE_LOG = 1;
   MESSAGE_TYPE_STORE_PUT = 2;
-  MESSAGE_TYPE_STORE_DELETE = 3;
-  MESSAGE_TYPE_WORKFLOW_START = 4;
+  MESSAGE_TYPE_IPC = 3;
   MESSAGE_TYPE_WORKFLOW_RESULT = 5;
   MESSAGE_TYPE_FINAL_STORE = 6;
+  MESSAGE_TYPE_BAIL = 7;
 }
 
-// Type-safe payload definitions
-message LogPayload {
-  string level = 1;
-  string message = 2;
-  int64 timestamp = 3;
-  map<string, string> metadata = 4;
-}
-
+// StorePutPayload carries key-value store update data.
 message StorePutPayload {
   string key = 1;
-  bytes value = 2;  // JSON-encoded value for flexibility
-  string value_type = 3;  // Type information for deserialization
+  bytes value = 2;
+  string value_type = 3;
 }
 
-message StoreDeletePayload {
-  string key = 1;
+// IPCPayload carries in-task Send() messages from child to parent.
+message IPCPayload {
+  string msg_type = 1;
+  bytes payload_json = 2;
 }
 
-message WorkflowStartPayload {
-  string workflow_id = 1;
-  bytes workflow_definition = 2;  // Serialized SubWorkflowDef
+// BailPayload signals intentional early exit from a child task.
+message BailPayload {
+  string reason = 1;
 }
 
+// WorkflowResultPayload carries error results from child processes.
 message WorkflowResultPayload {
   string workflow_id = 1;
   bool success = 2;
@@ -97,41 +79,28 @@ message WorkflowResultPayload {
   int64 execution_time_ms = 4;
 }
 
+// FinalStorePayload carries the child's dirty store entries back to parent.
 message FinalStorePayload {
-  map<string, bytes> store_data = 1;  // Key -> JSON-encoded value
-  map<string, string> type_info = 2;  // Key -> type information
+  map<string, bytes> store_data = 1;
+  map<string, string> type_info = 2;
 }
 
-// Acknowledgment message
+// MessageAck acknowledges receipt of a message.
 message MessageAck {
   bool success = 1;
   string error_message = 2;
-  string message_id = 3;  // Echo back the message ID
+  string message_id = 3;
 }
 
-// Connection info for establishing gRPC connection
-message ConnectionInfo {
-  string address = 1;  // "localhost:50051"
-  int32 port = 2;
-  string transport = 3;  // "grpc" or "json"
-}
-
-// Workflow definition message for gRPC-based initialization
+// WorkflowDefinition carries the work assignment from parent to child.
 message WorkflowDefinition {
   string id = 1;
   string name = 2;
-  bytes definition_json = 3;  // Serialized SubWorkflowDef as JSON
-  map<string, bytes> initial_store = 4;  // Initial store data
+  bytes definition_json = 3;
+  map<string, bytes> initial_store = 4;
 }
 
-// Acknowledgment for workflow initialization
-message WorkflowAck {
-  bool success = 1;
-  string error_message = 2;
-  string workflow_id = 3;
-}
-
-// ReadySignal message for child process synchronization
+// ReadySignal is sent by child to request its work assignment.
 message ReadySignal {
   string child_id = 1;
-} 
+}

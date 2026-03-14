@@ -1,158 +1,114 @@
 package gostage
 
-import (
-	"fmt"
-	"time"
-)
+import "time"
 
-// TaskFunc is the function signature for function-based tasks.
-// It receives a Ctx and returns an error.
-type TaskFunc func(ctx *Ctx) error
-
-// TaskOption configures a registered task.
-type TaskOption func(*taskDef)
-
-// taskDef holds the internal definition of a registered task.
-type taskDef struct {
-	name        string
-	fn          TaskFunc
-	retries     int
-	retryDelay  time.Duration
-	description string
-	tags        []string
-}
-
-// taskRegistry holds all registered function-based tasks.
-var taskRegistry = make(map[string]*taskDef)
-
-// Task registers a function-based task with the given name and options.
-// Tasks must be registered before building a workflow that references them.
+// TaskFunc is the function signature for task implementations.
 //
 //	gostage.Task("greet", func(ctx *gostage.Ctx) error {
-//	    name := gostage.GetOr[string](ctx, "user.name", "World")
+//	    name := gostage.GetOr[string](ctx, "name", "World")
 //	    ctx.Log.Info("Hello, %s!", name)
 //	    return nil
 //	})
+type TaskFunc func(ctx *Ctx) error
+
+// taskDef holds the definition of a registered task.
+type taskDef struct {
+	name          string
+	fn            TaskFunc
+	retries       int
+	retryDelay    time.Duration
+	retryStrategy RetryStrategy
+	timeout       time.Duration
+	tags          []string
+	description   string
+}
+
+// Task registers a named task function in the default registry.
+// Panics if a task with the same name is already registered.
+//
+//	gostage.Task("greet", func(ctx *gostage.Ctx) error {
+//	    return nil
+//	}, gostage.WithRetry(3), gostage.WithRetryDelay(time.Second))
 func Task(name string, fn TaskFunc, opts ...TaskOption) {
-	if _, exists := taskRegistry[name]; exists {
-		panic(fmt.Sprintf("task %q is already registered", name))
-	}
-
-	def := &taskDef{
-		name: name,
-		fn:   fn,
-	}
-
-	for _, opt := range opts {
-		opt(def)
-	}
-
-	taskRegistry[name] = def
-
-	// Also register in the action registry so child processes can instantiate it.
-	// We wrap the TaskFunc in an Action adapter.
-	RegisterAction(name, func() Action {
-		return &taskAction{
-			BaseAction: NewBaseAction(def.name, def.description),
-			fn:         def.fn,
-			tags:       def.tags,
-		}
-	})
+	defaultRegistry.RegisterTask(name, fn, opts...)
 }
 
-// lookupTask returns the taskDef for the given name, or nil.
+// lookupTask returns the task definition from the default registry.
 func lookupTask(name string) *taskDef {
-	return taskRegistry[name]
+	return defaultRegistry.lookupTask(name)
 }
 
-// taskAction adapts a TaskFunc to the Action interface.
-// This allows function-based tasks to be used wherever Actions are expected,
-// including in child processes via the action registry.
-type taskAction struct {
-	BaseAction
-	fn         TaskFunc
-	tags       []string
-	retries    int
-	retryDelay time.Duration
+// ResetTaskRegistry clears all registered tasks, conditions, map functions,
+// and the JSON-serializability cache. Used in tests for clean isolation.
+func ResetTaskRegistry() {
+	defaultRegistry.Reset()
+	ResetSerializableCache()
 }
 
-func (t *taskAction) Tags() []string {
-	if len(t.tags) > 0 {
-		return t.tags
-	}
-	return t.BaseAction.Tags()
-}
+// TaskOption configures a task definition.
+type TaskOption func(*taskDef)
 
-func (t *taskAction) Execute(actCtx *ActionContext) error {
-	ctx := newCtxFromActionContext(actCtx)
-
-	err := t.fn(ctx)
-	if err == nil || t.retries <= 0 {
-		return err
-	}
-
-	// Don't retry bail or suspend errors — those are intentional control flow.
-	if isBailOrSuspend(err) {
-		return err
-	}
-
-	for attempt := 1; attempt <= t.retries; attempt++ {
-		if t.retryDelay > 0 {
-			time.Sleep(t.retryDelay)
-		}
-		err = t.fn(ctx)
-		if err == nil {
-			return nil
-		}
-		if isBailOrSuspend(err) {
-			return err
-		}
-	}
-
-	return fmt.Errorf("after %d retries: %w", t.retries, err)
-}
-
-// isBailOrSuspend checks if an error is a BailError or SuspendError.
-func isBailOrSuspend(err error) bool {
-	if _, ok := err.(*BailError); ok {
-		return true
-	}
-	if _, ok := err.(*SuspendError); ok {
-		return true
-	}
-	return false
-}
-
-// WithRetry configures the number of retry attempts for a task.
+// WithRetry sets the number of retry attempts for a task.
+//
+//	gostage.Task("flaky", handler, gostage.WithRetry(3))
 func WithRetry(n int) TaskOption {
-	return func(d *taskDef) {
-		d.retries = n
+	return func(td *taskDef) {
+		td.retries = n
 	}
 }
 
 // WithRetryDelay sets the delay between retry attempts.
+//
+//	gostage.Task("flaky", handler, gostage.WithRetry(3), gostage.WithRetryDelay(2*time.Second))
 func WithRetryDelay(d time.Duration) TaskOption {
-	return func(def *taskDef) {
-		def.retryDelay = d
+	return func(td *taskDef) {
+		td.retryDelay = d
+		td.retryStrategy = FixedDelay(d)
 	}
 }
 
-// WithDescription sets a human-readable description for the task.
-func WithDescription(desc string) TaskOption {
-	return func(d *taskDef) {
-		d.description = desc
+// WithRetryStrategy sets a custom retry strategy for a task.
+// This overrides WithRetryDelay if both are set.
+//
+//	gostage.Task("api-call", handler,
+//	    gostage.WithRetry(5),
+//	    gostage.WithRetryStrategy(gostage.ExponentialBackoffWithJitter(100*time.Millisecond, 30*time.Second)),
+//	)
+func WithRetryStrategy(s RetryStrategy) TaskOption {
+	return func(td *taskDef) {
+		td.retryStrategy = s
 	}
 }
 
-// WithTags adds tags to the task for organization and filtering.
+// WithTags attaches tags to a task for querying and conditional execution.
+//
+//	gostage.Task("send.email", handler, gostage.WithTags("notification", "async"))
 func WithTags(tags ...string) TaskOption {
-	return func(d *taskDef) {
-		d.tags = append(d.tags, tags...)
+	return func(td *taskDef) {
+		td.tags = tags
 	}
 }
 
-// ResetTaskRegistry clears the task registry. Intended for testing only.
-func ResetTaskRegistry() {
-	taskRegistry = make(map[string]*taskDef)
-	actionRegistry = make(map[string]ActionFactory)
+// WithTaskTimeout sets a per-task timeout for individual invocations.
+// Each retry attempt gets its own timeout. Independent of the workflow-level timeout.
+//
+//	gostage.Task("slow", handler, gostage.WithTaskTimeout(30*time.Second))
+func WithTaskTimeout(d time.Duration) TaskOption {
+	return func(td *taskDef) {
+		td.timeout = d
+	}
+}
+
+// WithDescription sets a human-readable description for a task.
+//
+//	gostage.Task("charge", handler, gostage.WithDescription("Process payment"))
+func WithDescription(desc string) TaskOption {
+	return func(td *taskDef) {
+		td.description = desc
+	}
+}
+
+// ListTasksByTag returns names of all tasks that have the given tag.
+func ListTasksByTag(tag string) []string {
+	return defaultRegistry.listTasksByTag(tag)
 }
