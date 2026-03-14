@@ -173,6 +173,51 @@ reg.RegisterTask("compute", myHandler)
 engine, _ := gostage.New(gostage.WithRegistry(reg))
 ```
 
+## Bail (early exit)
+
+A task can bail to exit the workflow intentionally — it's not an error, it's a deliberate stop with a reason:
+
+```go
+gostage.Task("validate", func(ctx *gostage.Ctx) error {
+    if total <= 0 {
+        return gostage.Bail(ctx, "invalid order total")
+    }
+    return nil
+})
+
+// result.Status == Bailed
+// result.BailReason == "invalid order total"
+// result.Error == nil (bail is NOT an error)
+```
+
+## Dynamic mutations
+
+Steps can be inserted, disabled, or re-enabled at runtime:
+
+```go
+gostage.Task("step-a", func(ctx *gostage.Ctx) error {
+    gostage.InsertAfter(ctx, "bonus-step")  // add a step after the current one
+    gostage.DisableStep(ctx, "step-c")      // skip step-c
+    return nil
+})
+```
+
+Mutations survive suspend/resume — they're persisted and replayed.
+
+## IPC messaging
+
+Tasks can send typed messages to registered handlers — works in both parent and child processes:
+
+```go
+// Register a handler
+engine.OnMessage("progress", func(msgType string, payload map[string]any) {
+    fmt.Printf("progress: %v\n", payload)
+})
+
+// Inside a task
+gostage.Send(ctx, "progress", map[string]any{"pct": 50})
+```
+
 ## Scoped message handlers
 
 IPC message handlers can be scoped to a specific run:
@@ -183,9 +228,63 @@ engine.OnMessageForRun("progress", runID, func(msgType string, payload map[strin
 })
 ```
 
+## Async execution
+
+Start workflows without blocking, wait for results, or cancel:
+
+```go
+runID, _ := engine.Run(ctx, wf, params)           // returns immediately
+result, _ := engine.Wait(ctx, runID)               // blocks until done
+engine.Cancel(ctx, runID)                          // abort a running workflow
+run, _ := engine.GetRun(ctx, runID)                // non-blocking status check
+runs, _ := engine.ListRuns(ctx, gostage.RunFilter{Status: gostage.Running})
+engine.DeleteRun(ctx, runID)                       // remove from persistence
+```
+
+## Loops
+
+Repeat steps until or while a condition is met:
+
+```go
+// DoUntil: execute body, then check (do-until)
+wf.DoUntilNamed(gostage.Step("poll"), "is-ready")
+
+// DoWhile: check first, then execute (while-do)
+wf.DoWhileNamed(gostage.Step("fetch-page"), "has-more")
+```
+
+## Tags
+
+Organize tasks and steps with tags for querying and conditional execution:
+
+```go
+gostage.Task("charge", handler, gostage.WithTags("billing", "critical"))
+
+wf.Step("charge", gostage.WithStepTags("billing"))
+
+// Inside a task: find and disable all billing steps
+ids := gostage.FindStepsByTag(ctx, "billing")
+gostage.DisableByTag(ctx, "billing")
+```
+
+## Workflow serialization
+
+Workflows built with named variants can be serialized to JSON and rebuilt:
+
+```go
+def, _ := gostage.WorkflowToDefinition(wf)
+jsonBytes, _ := gostage.MarshalWorkflowDefinition(def)
+
+// Later — rebuild from JSON
+def2, _ := gostage.UnmarshalWorkflowDefinition(jsonBytes)
+rebuilt, _ := gostage.NewWorkflowFromDef(def2)
+```
+
+This is how persistence and child process transfer work internally.
+
 ## Examples
 
-The `examples/` directory has 16 standalone programs organized by audience:
+The `examples/` directory has 24 standalone programs organized by topic:
 
 **Getting started:**
 - [01-hello-world](examples/01-hello-world) — single task, state read/write
@@ -193,24 +292,33 @@ The `examples/` directory has 16 standalone programs organized by audience:
 - [03-parallel](examples/03-parallel) — concurrent fan-out
 - [04-foreach](examples/04-foreach) — collection iteration with concurrency
 - [05-branching](examples/05-branching) — conditional execution with named conditions
+- [06-loops](examples/06-loops) — DoUntil and DoWhile repeat patterns
 
-**Core features:**
-- [06-suspend-resume](examples/06-suspend-resume) — full suspend/resume lifecycle
-- [07-sleep-recovery](examples/07-sleep-recovery) — crash recovery for sleeping workflows
-- [08-retry-backoff](examples/08-retry-backoff) — exponential backoff with jitter
-- [09-order-processing](examples/09-order-processing) — e-commerce workflow with payment callback
+**Durability:**
+- [07-suspend-resume](examples/07-suspend-resume) — full suspend/resume lifecycle
+- [08-sleep-recovery](examples/08-sleep-recovery) — crash recovery for sleeping workflows
+- [09-retry-backoff](examples/09-retry-backoff) — exponential backoff with jitter
+- [10-bail-early-exit](examples/10-bail-early-exit) — intentional early exit with reason
+- [11-async-run-wait-cancel](examples/11-async-run-wait-cancel) — non-blocking Run, Wait, and Cancel
 
-**Architecture patterns:**
-- [10-etl-pipeline](examples/10-etl-pipeline) — parallel extract, named transform, load
-- [11-approval-workflow](examples/11-approval-workflow) — branching with dynamic step insertion
-- [12-deep-composition](examples/12-deep-composition) — ForEach + Sub + Branch + Parallel nested
+**Workflow control:**
+- [12-dynamic-mutations](examples/12-dynamic-mutations) — InsertAfter, DisableStep at runtime
+- [13-tags](examples/13-tags) — task tags, step tags, FindStepsByTag, DisableByTag
+- [14-serialization](examples/14-serialization) — workflow definition round-trip to JSON
 
-**Advanced:**
-- [13-middleware](examples/13-middleware) — custom step and task middleware
-- [14-events](examples/14-events) — lifecycle event monitoring
-- [15-custom-registry](examples/15-custom-registry) — engine isolation with separate registries
-- [16-run-gc](examples/16-run-gc) — automatic and manual run garbage collection
-- [17-spawn-processes](examples/17-spawn-processes) — ForEach with child process spawning for crash isolation
+**Real-world patterns:**
+- [15-order-processing](examples/15-order-processing) — e-commerce workflow with payment callback
+- [16-etl-pipeline](examples/16-etl-pipeline) — parallel extract, named transform, load
+- [17-approval-workflow](examples/17-approval-workflow) — branching with dynamic step insertion
+- [18-deep-composition](examples/18-deep-composition) — ForEach + Sub + Branch + Parallel nested
+- [19-spawn-processes](examples/19-spawn-processes) — ForEach with child process spawning
+
+**Engine features:**
+- [20-middleware](examples/20-middleware) — custom step and task middleware
+- [21-events](examples/21-events) — lifecycle event monitoring
+- [22-custom-registry](examples/22-custom-registry) — engine isolation with separate registries
+- [23-run-gc](examples/23-run-gc) — automatic and manual run garbage collection
+- [24-ipc-messaging](examples/24-ipc-messaging) — Send/OnMessage and scoped handlers
 
 ## Testing
 
