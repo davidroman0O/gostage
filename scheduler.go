@@ -29,20 +29,27 @@ type timerEntry struct {
 // timerHeap implements heap.Interface for timerEntry.
 type timerHeap []*timerEntry
 
-func (h timerHeap) Len() int           { return len(h) }
+// Len returns the number of entries in the heap. Implements heap.Interface.
+func (h timerHeap) Len() int { return len(h) }
+
+// Less reports whether the entry at index i has an earlier wake time than index j. Implements heap.Interface.
 func (h timerHeap) Less(i, j int) bool { return h[i].wakeAt.Before(h[j].wakeAt) }
+
+// Swap exchanges the entries at indices i and j and updates their stored heap indices. Implements heap.Interface.
 func (h timerHeap) Swap(i, j int) {
 	h[i], h[j] = h[j], h[i]
 	h[i].index = i
 	h[j].index = j
 }
 
+// Push appends a timerEntry to the heap and sets its index. Implements heap.Interface.
 func (h *timerHeap) Push(x any) {
 	entry := x.(*timerEntry)
 	entry.index = len(*h)
 	*h = append(*h, entry)
 }
 
+// Pop removes and returns the entry with the earliest wake time. Implements heap.Interface.
 func (h *timerHeap) Pop() any {
 	old := *h
 	n := len(old)

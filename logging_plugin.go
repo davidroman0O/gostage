@@ -18,6 +18,7 @@ func LoggingPlugin(logger Logger) Plugin {
 	return &loggingPlugin{logger: logger}
 }
 
+// EngineMiddleware returns middleware that logs workflow start/end with duration.
 func (p *loggingPlugin) EngineMiddleware() EngineMiddleware {
 	return func(ctx context.Context, wf *Workflow, runID RunID, next func() error) error {
 		p.logger.Info("workflow %s run %s started", wf.ID, runID)
@@ -33,6 +34,7 @@ func (p *loggingPlugin) EngineMiddleware() EngineMiddleware {
 	}
 }
 
+// StepMiddleware returns middleware that logs step start/end with duration.
 func (p *loggingPlugin) StepMiddleware() StepMiddleware {
 	return func(ctx context.Context, info StepInfo, runID RunID, next func() error) error {
 		p.logger.Debug("step %s started (run %s)", info.ID, runID)
@@ -48,6 +50,7 @@ func (p *loggingPlugin) StepMiddleware() StepMiddleware {
 	}
 }
 
+// TaskMiddleware returns middleware that logs task start/end with duration.
 func (p *loggingPlugin) TaskMiddleware() TaskMiddleware {
 	return func(tctx *Ctx, taskName string, next func() error) error {
 		p.logger.Debug("task %s started", taskName)
@@ -63,6 +66,7 @@ func (p *loggingPlugin) TaskMiddleware() TaskMiddleware {
 	}
 }
 
+// ChildMiddleware returns nil because the logging plugin does not wrap child process execution.
 func (p *loggingPlugin) ChildMiddleware() ChildMiddleware {
 	return nil
 }

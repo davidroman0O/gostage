@@ -66,7 +66,7 @@ func main() {
 
 	// Simulate crash
 	engine1.Close()
-	fmt.Println("--- Engine crashed ---\n")
+	fmt.Println("\n--- Engine crashed ---")
 
 	// Engine 2: restart with auto-recovery
 	engine2, err := gs.New(gs.WithSQLite(dbPath), gs.WithAutoRecover())

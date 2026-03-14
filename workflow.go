@@ -5,20 +5,22 @@ import (
 	"time"
 )
 
-// StepKind identifies the type of step in a workflow.
+// StepKind identifies the structural type of a step in a workflow. Each kind
+// determines how the engine executes the step and which fields of the
+// internal step struct are populated.
 type StepKind int
 
 const (
-	StepSingle   StepKind = iota // single task execution
-	StepParallel                 // parallel fan-out of multiple tasks
-	StepBranch                   // conditional branching
-	StepForEach                  // iteration over a collection
-	StepMap                      // inline data transformation
-	StepDoUntil                  // repeat-until loop
-	StepDoWhile                  // while-do loop
-	StepSub                      // nested sub-workflow
-	StepSleep                    // timed delay
-	StepStage                    // named group of sequential steps
+	StepSingle   StepKind = iota // A single registered task execution.
+	StepParallel                 // Concurrent fan-out; all refs execute simultaneously.
+	StepBranch                   // Conditional routing; first matching When case executes.
+	StepForEach                  // Collection iteration with optional concurrency and spawn.
+	StepMap                      // Inline data transformation via a user-provided function.
+	StepDoUntil                  // Post-condition loop: body executes, then condition is checked.
+	StepDoWhile                  // Pre-condition loop: condition is checked, then body executes.
+	StepSub                      // Nested sub-workflow sharing the parent's state.
+	StepSleep                    // Timed delay; persistent or in-memory depending on engine config.
+	StepStage                    // Named group of sequential steps for organizational clarity.
 )
 
 // step is one unit of execution in a workflow.
@@ -72,7 +74,14 @@ func (s *step) info() StepInfo {
 	}
 }
 
-// Workflow is the compiled result of a builder chain.
+// Workflow is the compiled, immutable definition produced by
+// [WorkflowBuilder.Commit]. It describes the sequence of steps to execute
+// but does not hold per-run state. The engine clones the workflow for each
+// execution so that concurrent runs do not interfere with each other.
+//
+// A Workflow should be created once and reused across multiple [Engine.RunSync]
+// or [Engine.Run] calls. Modifying a Workflow after Commit is not supported
+// and may cause undefined behavior.
 type Workflow struct {
 	ID         string
 	Name       string
@@ -94,28 +103,40 @@ type workflowConfig struct {
 	tags                 []string
 }
 
-// StepCallback is called after each step completes successfully.
+// StepCallback is invoked after each step completes successfully, receiving
+// the step name and the execution context. Register it via [OnStepComplete]
+// as a workflow option.
 type StepCallback func(stepName string, ctx *Ctx)
 
-// ErrorCallback is called when a step fails.
+// ErrorCallback is invoked when a step fails (after all retries are
+// exhausted), receiving the final error. Register it via [OnError] as a
+// workflow option.
 type ErrorCallback func(err error)
 
 // --- StepRef: composable step descriptor ---
 
-// StepRef is a step descriptor used in Parallel, ForEach, Branch, etc.
+// StepRef is a composable step descriptor that points to either a registered
+// task (by name) or a committed sub-workflow. StepRef values are used as
+// arguments to [WorkflowBuilder.Parallel], [WorkflowBuilder.ForEach],
+// [WorkflowBuilder.Stage], [WorkflowBuilder.DoUntil], [WorkflowBuilder.DoWhile],
+// and the branch clause completers ([WhenClause.Step], [WhenClause.Sub],
+// [DefaultClause.Step], [DefaultClause.Sub]).
 type StepRef struct {
 	taskName    string
 	subWorkflow *Workflow
 }
 
-// Step creates a StepRef pointing to a registered task.
+// Step creates a [StepRef] that references a task registered in the task
+// registry by name. The task does not need to be registered at workflow
+// construction time; it is resolved at execution time.
 //
 //	gostage.Parallel(gostage.Step("task1"), gostage.Step("task2"))
 func Step(taskName string) StepRef {
 	return StepRef{taskName: taskName}
 }
 
-// Sub creates a StepRef pointing to a sub-workflow.
+// Sub creates a [StepRef] that references a committed sub-workflow. The
+// sub-workflow shares the parent's key-value store during execution.
 //
 //	gostage.ForEach("items", gostage.Sub(otherWf))
 func Sub(wf *Workflow) StepRef {
@@ -124,7 +145,10 @@ func Sub(wf *Workflow) StepRef {
 
 // --- Branch helpers ---
 
-// BranchCase represents one arm of a Branch.
+// BranchCase represents one arm of a [WorkflowBuilder.Branch] step. Each case
+// pairs a condition (or default marker) with a [StepRef] to execute when the
+// condition is met. Create BranchCase values using [When], [WhenNamed], or
+// [Default], followed by .Step() or .Sub().
 type BranchCase struct {
 	condition func(*Ctx) bool
 	condName  string // named variant for serializable workflows
@@ -132,13 +156,20 @@ type BranchCase struct {
 	isDefault bool
 }
 
-// WhenClause builds a conditional branch arm.
+// WhenClause is an intermediate builder for constructing a conditional
+// [BranchCase]. Complete it by calling .Step(taskName) or .Sub(workflow).
 type WhenClause struct {
 	condition func(*Ctx) bool
 	condName  string // named variant for serializable workflows
 }
 
-// When starts a conditional branch arm.
+// When starts a conditional branch arm that evaluates cond at runtime. The
+// first [BranchCase] whose condition returns true is executed; remaining cases
+// are skipped. If no When condition matches and no [Default] case is provided,
+// the Branch step is a no-op.
+//
+// For workflows that need to survive suspend/resume (persistence), use
+// [WhenNamed] with a registered condition instead.
 //
 //	gostage.When(func(ctx *gostage.Ctx) bool {
 //	    return gostage.Get[string](ctx, "priority") == "high"
@@ -147,49 +178,63 @@ func When(cond func(*Ctx) bool) *WhenClause {
 	return &WhenClause{condition: cond}
 }
 
-// Step completes the WhenClause with a task to execute.
+// Step completes the WhenClause by specifying the registered task to execute
+// when the condition is met.
 func (w *WhenClause) Step(taskName string) BranchCase {
 	return BranchCase{condition: w.condition, condName: w.condName, ref: StepRef{taskName: taskName}}
 }
 
-// Sub completes the WhenClause with a sub-workflow to execute.
+// Sub completes the WhenClause by specifying the sub-workflow to execute
+// when the condition is met.
 func (w *WhenClause) Sub(wf *Workflow) BranchCase {
 	return BranchCase{condition: w.condition, condName: w.condName, ref: StepRef{subWorkflow: wf}}
 }
 
-// DefaultClause builds the default branch arm.
+// DefaultClause is an intermediate builder for constructing the fallback
+// [BranchCase] that executes when no [When] or [WhenNamed] condition matches.
 type DefaultClause struct{}
 
-// Default starts the default branch arm (executed when no When matches).
+// Default starts the default branch arm. It is executed only when no [When]
+// or [WhenNamed] condition returns true. A Branch may have at most one
+// Default case.
 func Default() *DefaultClause { return &DefaultClause{} }
 
-// Step completes the DefaultClause with a task to execute.
+// Step completes the DefaultClause by specifying the registered task to
+// execute as the fallback.
 func (d *DefaultClause) Step(taskName string) BranchCase {
 	return BranchCase{ref: StepRef{taskName: taskName}, isDefault: true}
 }
 
-// Sub completes the DefaultClause with a sub-workflow to execute.
+// Sub completes the DefaultClause by specifying the sub-workflow to execute
+// as the fallback.
 func (d *DefaultClause) Sub(wf *Workflow) BranchCase {
 	return BranchCase{ref: StepRef{subWorkflow: wf}, isDefault: true}
 }
 
 // --- ForEach options ---
 
-// ForEachOption configures a ForEach step.
+// ForEachOption configures the behavior of a [WorkflowBuilder.ForEach] step.
 type ForEachOption func(*step)
 
-// WithConcurrency sets the max concurrent iterations for ForEach.
+// WithConcurrency sets the maximum number of concurrent iterations for a
+// ForEach step. The default is 1 (sequential). Each concurrent iteration
+// shares the same workflow state, so tasks must write to unique keys to
+// avoid data races.
 //
-//	gostage.ForEach("tracks", gostage.Step("download"), gostage.WithConcurrency(4))
+//	wf.ForEach("tracks", gostage.Step("download"), gostage.WithConcurrency(4))
 func WithConcurrency(n int) ForEachOption {
 	return func(s *step) {
 		s.concurrency = n
 	}
 }
 
-// WithSpawn makes each ForEach iteration run in an isolated child process.
+// WithSpawn makes each ForEach iteration run in an isolated child process
+// instead of a goroutine. Child processes receive a snapshot of the parent's
+// state and return their dirty writes on completion. This provides process-level
+// isolation at the cost of IPC overhead. Requires a [SpawnRunner] to be
+// configured on the engine.
 //
-//	gostage.ForEach("tracks", gostage.Step("download"), gostage.WithSpawn())
+//	wf.ForEach("tracks", gostage.Step("download"), gostage.WithSpawn())
 func WithSpawn() ForEachOption {
 	return func(s *step) {
 		s.useSpawn = true
@@ -198,10 +243,14 @@ func WithSpawn() ForEachOption {
 
 // --- Workflow options ---
 
-// WorkflowOption configures a workflow.
+// WorkflowOption configures a [Workflow] at construction time. Pass options
+// to [NewWorkflow] to customize callbacks, retry defaults, middleware, and tags.
 type WorkflowOption func(*workflowConfig)
 
-// OnStepComplete registers a callback invoked after each step completes.
+// OnStepComplete registers a callback invoked after each step completes
+// successfully. The callback receives the step name and the execution context,
+// allowing inspection of the store state at that point. Only one callback can
+// be registered; subsequent calls overwrite the previous one.
 //
 //	gostage.NewWorkflow("monitored", gostage.OnStepComplete(func(step string, ctx *gostage.Ctx) {
 //	    log.Printf("Step %s done", step)
@@ -212,7 +261,9 @@ func OnStepComplete(fn StepCallback) WorkflowOption {
 	}
 }
 
-// OnError registers a callback invoked when a step fails.
+// OnError registers a callback invoked when a step fails after exhausting
+// all retries. The callback receives the final error. Only one callback can
+// be registered; subsequent calls overwrite the previous one.
 //
 //	gostage.NewWorkflow("monitored", gostage.OnError(func(err error) {
 //	    alerting.Send(err.Error())
@@ -223,8 +274,11 @@ func OnError(fn ErrorCallback) WorkflowOption {
 	}
 }
 
-// WithDefaultRetry sets workflow-wide retry defaults.
-// Individual task retries (via WithRetry) take precedence.
+// WithDefaultRetry sets workflow-wide retry defaults applied to all tasks
+// that do not have their own retry configuration (set via WithRetry on the
+// task). The n parameter is the maximum number of retry attempts, and delay
+// is the fixed delay between attempts unless overridden by a
+// [RetryStrategy] via [WithDefaultRetryStrategy].
 //
 //	gostage.NewWorkflow("resilient", gostage.WithDefaultRetry(5, time.Second))
 func WithDefaultRetry(n int, delay time.Duration) WorkflowOption {
@@ -234,8 +288,10 @@ func WithDefaultRetry(n int, delay time.Duration) WorkflowOption {
 	}
 }
 
-// WithDefaultRetryStrategy sets a workflow-wide default retry strategy.
-// Individual task strategies (via WithRetryStrategy) take precedence.
+// WithDefaultRetryStrategy sets a workflow-wide default [RetryStrategy]
+// applied to all tasks that do not have their own strategy (set via
+// WithRetryStrategy on the task). This overrides the fixed delay set by
+// [WithDefaultRetry] but not per-task strategies.
 //
 //	gostage.NewWorkflow("resilient",
 //	    gostage.WithDefaultRetry(5, 0),
@@ -247,7 +303,8 @@ func WithDefaultRetryStrategy(s RetryStrategy) WorkflowOption {
 	}
 }
 
-// WithWorkflowTags attaches tags to the workflow for querying.
+// WithWorkflowTags attaches metadata tags to the workflow. Tags can be used
+// for organizational purposes and are stored in the [Workflow.Tags] field.
 //
 //	gostage.NewWorkflow("order", gostage.WithWorkflowTags("billing", "critical"))
 func WithWorkflowTags(tags ...string) WorkflowOption {
@@ -257,6 +314,9 @@ func WithWorkflowTags(tags ...string) WorkflowOption {
 }
 
 // WithWorkflowMiddleware adds step-level middleware scoped to this workflow.
+// Workflow middleware runs in addition to any engine-level step middleware
+// and is applied to every step within the workflow. Multiple calls append
+// additional middleware to the chain.
 //
 //	gostage.NewWorkflow("monitored", gostage.WithWorkflowMiddleware(timingMW))
 func WithWorkflowMiddleware(m StepMiddleware) WorkflowOption {
@@ -267,10 +327,11 @@ func WithWorkflowMiddleware(m StepMiddleware) WorkflowOption {
 
 // --- WorkflowBuilder ---
 
-// StepOption configures an individual step in the builder.
+// StepOption configures an individual step added via [WorkflowBuilder.Step].
 type StepOption func(*builderStep)
 
-// WithStepTags attaches tags to a step for querying and conditional execution.
+// WithStepTags attaches metadata tags to a step. Tags enable runtime queries
+// via [FindStepsByTag] and bulk mutations via [DisableByTag] and [EnableByTag].
 //
 //	wf.Step("charge", gostage.WithStepTags("billing", "critical"))
 func WithStepTags(tags ...string) StepOption {
@@ -315,7 +376,10 @@ type builderStep struct {
 	sleepDuration time.Duration
 }
 
-// WorkflowBuilder constructs a Workflow using a fluent API.
+// WorkflowBuilder constructs a [Workflow] using a fluent (method-chaining) API.
+// Create one with [NewWorkflow], add steps via the builder methods (Step,
+// Parallel, Branch, ForEach, etc.), and finalize with [WorkflowBuilder.Commit].
+// After Commit, the builder is frozen and further mutations panic.
 type WorkflowBuilder struct {
 	id        string
 	name      string
@@ -324,9 +388,11 @@ type WorkflowBuilder struct {
 	committed bool
 }
 
-// NewWorkflow starts building a new workflow with the given ID and options.
+// NewWorkflow starts building a new workflow with the given ID and optional
+// configuration. The ID is used as both the workflow identifier and its
+// display name. It must not be empty; passing an empty string causes a panic.
 //
-//	wf := gostage.NewWorkflow("process-order").
+//	wf, err := gostage.NewWorkflow("process-order").
 //	    Step("validate").
 //	    Step("charge").
 //	    Commit()
@@ -341,7 +407,9 @@ func NewWorkflow(id string, opts ...WorkflowOption) *WorkflowBuilder {
 	return b
 }
 
-// Step adds a single task step to the workflow.
+// Step adds a single task step that executes the registered task identified
+// by taskName. The task is resolved from the registry at execution time, not
+// at build time. Panics if called after [WorkflowBuilder.Commit].
 //
 //	wf.Step("charge", gostage.WithStepTags("billing"))
 func (b *WorkflowBuilder) Step(taskName string, opts ...StepOption) *WorkflowBuilder {
@@ -360,7 +428,10 @@ func (b *WorkflowBuilder) Step(taskName string, opts ...StepOption) *WorkflowBui
 	return b
 }
 
-// Stage adds a named group of sequential steps.
+// Stage adds a named group of sequential steps. Stages provide organizational
+// structure; the contained steps execute in order, one after another. Unlike
+// [WorkflowBuilder.Parallel], there is no concurrency. Panics if called after
+// [WorkflowBuilder.Commit].
 //
 //	wf.Stage("validation", gostage.Step("validate.input"), gostage.Step("validate.rules"))
 func (b *WorkflowBuilder) Stage(name string, refs ...StepRef) *WorkflowBuilder {
@@ -375,7 +446,11 @@ func (b *WorkflowBuilder) Stage(name string, refs ...StepRef) *WorkflowBuilder {
 	return b
 }
 
-// Parallel adds steps that execute concurrently.
+// Parallel adds steps that execute concurrently in separate goroutines. All
+// steps must complete before the workflow proceeds to the next step. If any
+// parallel step fails, the overall Parallel step fails. Since parallel steps
+// share the same store, each step should write to unique keys to avoid data
+// races. Panics if called after [WorkflowBuilder.Commit].
 //
 //	wf.Parallel(gostage.Step("charge"), gostage.Step("reserve"), gostage.Step("check"))
 func (b *WorkflowBuilder) Parallel(refs ...StepRef) *WorkflowBuilder {
@@ -390,7 +465,11 @@ func (b *WorkflowBuilder) Parallel(refs ...StepRef) *WorkflowBuilder {
 	return b
 }
 
-// Branch adds conditional execution.
+// Branch adds conditional execution. Cases are evaluated in order; the first
+// [BranchCase] whose condition returns true is executed and remaining cases
+// are skipped. If no condition matches and a [Default] case is provided, the
+// default executes. If no condition matches and no default exists, the Branch
+// step is a no-op. Panics if called after [WorkflowBuilder.Commit].
 //
 //	wf.Branch(
 //	    gostage.When(isHighPriority).Step("urgent"),
@@ -408,7 +487,15 @@ func (b *WorkflowBuilder) Branch(cases ...BranchCase) *WorkflowBuilder {
 	return b
 }
 
-// ForEach iterates over a collection stored in the KV store.
+// ForEach iterates over a collection stored in the workflow's key-value store
+// under the given key. The collection must be a slice (e.g. []string, []any).
+// For each element, the referenced task or sub-workflow executes with the
+// current item accessible via [Item] and the index via [ItemIndex].
+//
+// By default, iterations run sequentially (concurrency 1). Use [WithConcurrency]
+// to allow multiple iterations to run simultaneously, and [WithSpawn] to run
+// each iteration in an isolated child process. Panics if called after
+// [WorkflowBuilder.Commit].
 //
 //	wf.ForEach("tracks", gostage.Step("download"), gostage.WithConcurrency(4))
 func (b *WorkflowBuilder) ForEach(key string, ref StepRef, opts ...ForEachOption) *WorkflowBuilder {
@@ -425,8 +512,11 @@ func (b *WorkflowBuilder) ForEach(key string, ref StepRef, opts ...ForEachOption
 	return b
 }
 
-// DoUntil repeats a step until the condition returns true.
-// The step executes first, then the condition is checked (do-until).
+// DoUntil repeats a step until the condition returns true. The body executes
+// first, then the condition is evaluated (post-condition loop). This
+// guarantees at least one execution. For workflows that need to survive
+// suspend/resume, use [WorkflowBuilder.DoUntilNamed] with a registered
+// condition. Panics if called after [WorkflowBuilder.Commit].
 //
 //	wf.DoUntil(gostage.Step("poll"), func(ctx *gostage.Ctx) bool {
 //	    return gostage.Get[string](ctx, "status") == "ready"
@@ -444,8 +534,11 @@ func (b *WorkflowBuilder) DoUntil(ref StepRef, cond func(*Ctx) bool) *WorkflowBu
 	return b
 }
 
-// DoWhile repeats a step while the condition returns true.
-// The condition is checked before each iteration (while-do).
+// DoWhile repeats a step while the condition returns true. The condition is
+// evaluated before each iteration (pre-condition loop). If the condition is
+// false on the first check, the body never executes. For workflows that need
+// to survive suspend/resume, use [WorkflowBuilder.DoWhileNamed] with a
+// registered condition. Panics if called after [WorkflowBuilder.Commit].
 //
 //	wf.DoWhile(gostage.Step("fetch.page"), func(ctx *gostage.Ctx) bool {
 //	    return gostage.Get[bool](ctx, "has_more")
@@ -463,7 +556,12 @@ func (b *WorkflowBuilder) DoWhile(ref StepRef, cond func(*Ctx) bool) *WorkflowBu
 	return b
 }
 
-// Map adds an inline data transformation step.
+// Map adds an inline data transformation step. The function receives the
+// execution context and can read/write the store to transform data between
+// steps. Unlike task steps, Map functions are not registered by name and run
+// in-process. For workflows that need to survive suspend/resume, use
+// [WorkflowBuilder.MapNamed] with a registered function. Panics if called
+// after [WorkflowBuilder.Commit].
 //
 //	wf.Map(func(ctx *gostage.Ctx) error {
 //	    raw := gostage.Get[[]byte](ctx, "raw")
@@ -482,9 +580,12 @@ func (b *WorkflowBuilder) Map(fn func(*Ctx) error) *WorkflowBuilder {
 	return b
 }
 
-// Sub adds a nested sub-workflow step.
+// Sub adds a nested sub-workflow step. The sub-workflow's steps execute
+// sequentially within the parent workflow, sharing the same key-value store.
+// The sub-workflow must have been previously finalized with [WorkflowBuilder.Commit].
+// Panics if called after [WorkflowBuilder.Commit].
 //
-//	wf.Sub(otherWf)
+//	wf.Sub(paymentWf)
 func (b *WorkflowBuilder) Sub(wf *Workflow) *WorkflowBuilder {
 	if b.committed {
 		panic("gostage: cannot modify workflow after Commit()")
@@ -497,9 +598,16 @@ func (b *WorkflowBuilder) Sub(wf *Workflow) *WorkflowBuilder {
 	return b
 }
 
-// Sleep adds a timed delay step.
-// With persistence, the run is saved as Sleeping and no goroutine blocks.
-// Without persistence, time.Sleep is used.
+// Sleep adds a timed delay step. The behavior depends on the engine's
+// persistence configuration:
+//
+//   - With persistence: the run is saved with status [Sleeping] and no
+//     goroutine blocks. The engine's timer scheduler wakes the workflow when
+//     the duration elapses, even across process restarts.
+//   - Without persistence (in-memory only): time.Sleep is called directly,
+//     blocking the executing goroutine.
+//
+// Panics if called after [WorkflowBuilder.Commit].
 //
 //	wf.Sleep(time.Hour)
 func (b *WorkflowBuilder) Sleep(d time.Duration) *WorkflowBuilder {
@@ -516,8 +624,11 @@ func (b *WorkflowBuilder) Sleep(d time.Duration) *WorkflowBuilder {
 
 // --- Named variants for serializable workflows ---
 
-// WhenNamed starts a serializable conditional branch arm using a registered condition.
-// The condition must be registered with Condition() before the workflow executes.
+// WhenNamed starts a serializable conditional branch arm using a condition
+// registered via [Condition]. Unlike [When], the condition is referenced by
+// name rather than by closure, making the workflow definition serializable
+// for persistence and resume. The condition must be registered before the
+// workflow executes; it does not need to exist at build time.
 //
 //	gostage.Condition("is-high-priority", func(ctx *gostage.Ctx) bool {
 //	    return gostage.Get[string](ctx, "priority") == "high"
@@ -527,8 +638,12 @@ func WhenNamed(condName string) *WhenClause {
 	return &WhenClause{condName: condName}
 }
 
-// MapNamed adds a serializable data transformation step using a registered map function.
-// The function must be registered with MapFn() before the workflow executes.
+// MapNamed adds a serializable data transformation step using a function
+// registered via [MapFn]. Unlike [WorkflowBuilder.Map], the function is
+// referenced by name rather than by closure, making the workflow definition
+// serializable for persistence and resume. The function must be registered
+// before the workflow executes; it does not need to exist at build time.
+// Panics if called after [WorkflowBuilder.Commit].
 //
 //	gostage.MapFn("parse-csv", func(ctx *gostage.Ctx) error {
 //	    raw := gostage.Get[[]byte](ctx, "raw")
@@ -548,8 +663,11 @@ func (b *WorkflowBuilder) MapNamed(mapFnName string) *WorkflowBuilder {
 	return b
 }
 
-// DoUntilNamed repeats a step until a registered condition returns true.
-// The condition must be registered with Condition() before the workflow executes.
+// DoUntilNamed repeats a step until a condition registered via [Condition]
+// returns true. Like [WorkflowBuilder.DoUntil], this is a post-condition loop
+// that guarantees at least one execution. Unlike DoUntil, the condition is
+// referenced by name, making the workflow serializable for persistence and
+// resume. Panics if called after [WorkflowBuilder.Commit].
 //
 //	gostage.Condition("is-ready", func(ctx *gostage.Ctx) bool {
 //	    return gostage.Get[string](ctx, "status") == "ready"
@@ -568,8 +686,12 @@ func (b *WorkflowBuilder) DoUntilNamed(ref StepRef, condName string) *WorkflowBu
 	return b
 }
 
-// DoWhileNamed repeats a step while a registered condition returns true.
-// The condition must be registered with Condition() before the workflow executes.
+// DoWhileNamed repeats a step while a condition registered via [Condition]
+// returns true. Like [WorkflowBuilder.DoWhile], this is a pre-condition loop
+// that may execute zero times if the condition is initially false. Unlike
+// DoWhile, the condition is referenced by name, making the workflow
+// serializable for persistence and resume. Panics if called after
+// [WorkflowBuilder.Commit].
 //
 //	gostage.Condition("has-more", func(ctx *gostage.Ctx) bool {
 //	    return gostage.Get[bool](ctx, "has_more")
@@ -588,8 +710,13 @@ func (b *WorkflowBuilder) DoWhileNamed(ref StepRef, condName string) *WorkflowBu
 	return b
 }
 
-// Commit finalizes the builder and returns the compiled Workflow.
-// Returns an error if any step is structurally invalid (nil function without name, nil sub-workflow).
+// Commit finalizes the builder and returns the compiled [Workflow]. After
+// Commit, the builder is frozen; any subsequent calls to builder methods
+// panic. Commit performs structural validation only -- it checks for nil
+// functions on Map steps without a named alternative, nil conditions on loop
+// steps without a named alternative, and nil sub-workflows on Sub steps. It
+// does not verify that referenced task names or condition names are registered
+// in the registry; those are resolved at execution time.
 func (b *WorkflowBuilder) Commit() (*Workflow, error) {
 	wf := &Workflow{
 		ID:    b.id,

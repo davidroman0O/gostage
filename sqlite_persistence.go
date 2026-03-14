@@ -181,6 +181,8 @@ func (p *sqlitePersistence) loadStepStatuses(ctx context.Context, runID RunID) (
 	return states, rows.Err()
 }
 
+// SaveRun persists a new or updated run state to SQLite.
+// Uses INSERT ... ON CONFLICT to upsert the run record atomically.
 func (p *sqlitePersistence) SaveRun(ctx context.Context, run *RunState) error {
 	// step_states column is no longer the authoritative source — step statuses
 	// are now stored in the step_statuses table via UpdateStepStatus.
@@ -241,6 +243,9 @@ func (p *sqlitePersistence) SaveRun(ctx context.Context, run *RunState) error {
 	return err
 }
 
+// LoadRun retrieves a run by its ID from SQLite.
+// Returns a RunNotFoundError if no run with the given ID exists.
+// Step statuses are loaded from the dedicated step_statuses table.
 func (p *sqlitePersistence) LoadRun(ctx context.Context, runID RunID) (*RunState, error) {
 	// step_states column is kept for backward compatibility but authoritative
 	// step status is now in the step_statuses table.
@@ -325,6 +330,8 @@ func (p *sqlitePersistence) LoadRun(ctx context.Context, runID RunID) (*RunState
 	return &run, nil
 }
 
+// UpdateStepStatus upserts the status of a specific step within a run.
+// Uses INSERT ... ON CONFLICT for atomic updates without read-modify-write.
 func (p *sqlitePersistence) UpdateStepStatus(ctx context.Context, runID RunID, stepID string, status Status) error {
 	// Single upsert — no read-modify-write, no JSON marshaling.
 	_, err := p.db.ExecContext(ctx, `
@@ -338,6 +345,8 @@ func (p *sqlitePersistence) UpdateStepStatus(ctx context.Context, runID RunID, s
 	return nil
 }
 
+// SaveState persists dirty state entries for a run using a single transaction.
+// Each entry is upserted individually within the transaction for atomicity.
 func (p *sqlitePersistence) SaveState(ctx context.Context, runID RunID, entries map[string]StateEntry) error {
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -366,6 +375,8 @@ func (p *sqlitePersistence) SaveState(ctx context.Context, runID RunID, entries 
 	return tx.Commit()
 }
 
+// LoadState retrieves all state entries for a run from the run_state table.
+// Returns an empty map (not nil) if no state entries exist.
 func (p *sqlitePersistence) LoadState(ctx context.Context, runID RunID) (map[string]StateEntry, error) {
 	const query = `SELECT key, value, type_name FROM run_state WHERE run_id = ?`
 
@@ -388,11 +399,13 @@ func (p *sqlitePersistence) LoadState(ctx context.Context, runID RunID) (map[str
 	return entries, rows.Err()
 }
 
+// DeleteState removes all state entries for a run from the run_state table.
 func (p *sqlitePersistence) DeleteState(ctx context.Context, runID RunID) error {
 	_, err := p.db.ExecContext(ctx, `DELETE FROM run_state WHERE run_id = ?`, string(runID))
 	return err
 }
 
+// DeleteStateKey removes a single state entry for a run from the run_state table.
 func (p *sqlitePersistence) DeleteStateKey(ctx context.Context, runID RunID, key string) error {
 	_, err := p.db.ExecContext(ctx,
 		`DELETE FROM run_state WHERE run_id = ? AND key = ?`,
@@ -400,6 +413,8 @@ func (p *sqlitePersistence) DeleteStateKey(ctx context.Context, runID RunID, key
 	return err
 }
 
+// DeleteRun removes a run and all its associated data (step statuses, state entries,
+// and the run record itself) within a single transaction.
 func (p *sqlitePersistence) DeleteRun(ctx context.Context, runID RunID) error {
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -415,6 +430,8 @@ func (p *sqlitePersistence) DeleteRun(ctx context.Context, runID RunID) error {
 	return tx.Commit()
 }
 
+// UpdateCurrentStep updates only the current step identifier for a run.
+// Returns a RunNotFoundError if no run with the given ID exists.
 func (p *sqlitePersistence) UpdateCurrentStep(ctx context.Context, runID RunID, stepID string) error {
 	result, err := p.db.ExecContext(ctx,
 		`UPDATE runs SET current_step = ?, updated_at = ? WHERE run_id = ?`,
@@ -429,6 +446,8 @@ func (p *sqlitePersistence) UpdateCurrentStep(ctx context.Context, runID RunID, 
 	return nil
 }
 
+// ListRuns returns runs matching the given filter criteria, ordered by creation time descending.
+// Supports filtering by workflow ID, status, and update time, with offset/limit pagination.
 func (p *sqlitePersistence) ListRuns(ctx context.Context, filter RunFilter) ([]*RunState, error) {
 	query := "SELECT run_id, workflow_id, status, current_step, bail_reason, suspend_data, wake_at, mutations, workflow_def, dyn_counter, created_at, updated_at FROM runs WHERE 1=1"
 	var args []any
@@ -558,6 +577,7 @@ func (p *sqlitePersistence) ListRuns(ctx context.Context, filter RunFilter) ([]*
 	return results, nil
 }
 
+// Close releases the underlying SQLite database connection.
 func (p *sqlitePersistence) Close() error {
 	return p.db.Close()
 }

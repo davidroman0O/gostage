@@ -24,6 +24,7 @@ func FixedDelay(d time.Duration) RetryStrategy {
 	return &fixedDelayStrategy{delay: d}
 }
 
+// Delay returns the fixed delay regardless of the attempt number.
 func (s *fixedDelayStrategy) Delay(_ int) time.Duration {
 	return s.delay
 }
@@ -44,6 +45,7 @@ func ExponentialBackoff(base, max time.Duration) RetryStrategy {
 	return &exponentialBackoffStrategy{base: base, max: max}
 }
 
+// Delay returns base * 2^attempt, capped at the configured maximum.
 func (s *exponentialBackoffStrategy) Delay(attempt int) time.Duration {
 	d := time.Duration(float64(s.base) * math.Pow(2, float64(attempt)))
 	if s.max > 0 && d > s.max {
@@ -69,6 +71,7 @@ func ExponentialBackoffWithJitter(base, max time.Duration) RetryStrategy {
 	return &exponentialJitterStrategy{base: base, max: max}
 }
 
+// Delay returns a random duration between 0 and min(base * 2^attempt, max).
 func (s *exponentialJitterStrategy) Delay(attempt int) time.Duration {
 	ceiling := time.Duration(float64(s.base) * math.Pow(2, float64(attempt)))
 	if s.max > 0 && ceiling > s.max {

@@ -14,7 +14,22 @@ import (
 	"github.com/google/uuid"
 )
 
-// Engine orchestrates workflow execution with persistence and checkpointing.
+// Engine orchestrates durable workflow execution with persistence, checkpointing,
+// and timer-based sleep/wake scheduling. It manages a bounded worker pool for
+// asynchronous runs, an LRU workflow cache for resume and wake operations, and
+// a registry of IPC message handlers for child process communication.
+//
+// An Engine is safe for concurrent use by multiple goroutines. All public methods
+// guard against use after Close by checking an internal shutdown channel and
+// returning ErrEngineClosed.
+//
+// Create an Engine with New and shut it down with Close when finished:
+//
+//	engine, err := gostage.New(gostage.WithSQLite("app.db"))
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	defer engine.Close()
 type Engine struct {
 	persistence Persistence
 	logger      Logger
@@ -87,13 +102,33 @@ type runHandle struct {
 	finished chan struct{} // closed when all persistence writes are done
 }
 
-// EngineOption configures the engine.
+// EngineOption configures an Engine during construction via New. Each option
+// is applied in order, and any option may return an error to abort creation.
+// See the With* functions in options.go for the available options.
 type EngineOption func(*Engine) error
 
-// New creates a new Engine with the given options.
-// If no persistence is configured, an in-memory store is used.
+// New creates and starts a new Engine with the given options. If no persistence
+// backend is configured, an in-memory store is used (state does not survive
+// process restarts). The default logger is a no-op that discards all messages.
 //
-//	engine, err := gostage.New(gostage.WithSQLite("app.db"))
+// New starts the worker pool and timer scheduler immediately. If WithAutoRecover
+// is set, New also scans persistence for interrupted runs and recovers them
+// before returning; a recovery failure causes New to return an error.
+//
+// The caller must call Close when the Engine is no longer needed to release
+// resources and flush in-flight persistence writes.
+//
+// Returns an error if any option fails or if auto-recovery encounters an
+// unrecoverable problem.
+//
+//	engine, err := gostage.New(
+//	    gostage.WithSQLite("app.db"),
+//	    gostage.WithWorkerPoolSize(8),
+//	)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	defer engine.Close()
 func New(opts ...EngineOption) (*Engine, error) {
 	e := &Engine{
 		persistence:     newMemoryPersistence(),
@@ -143,9 +178,26 @@ func New(opts ...EngineOption) (*Engine, error) {
 	return e, nil
 }
 
-// RunSync executes a workflow synchronously and returns the result.
+// RunSync executes a workflow synchronously, blocking the calling goroutine
+// until the workflow completes, fails, suspends, bails, or enters a sleep.
+// The returned Result contains the final status, any error, the bail reason or
+// suspend data (if applicable), and a snapshot of the workflow's state store.
+//
+// The params map is written into the workflow's state store before execution
+// begins, making the values available to all tasks via ctx.Get.
+//
+// If the engine-level timeout (WithTimeout) is configured, a deadline is applied
+// to the run context. The run is also registered with the engine's tracking so
+// it can be cancelled via Cancel or stopped by Close.
+//
+// Returns ErrEngineClosed if the engine has been shut down. Returns
+// ErrNilWorkflow if wf is nil.
 //
 //	result, err := engine.RunSync(ctx, wf, gostage.Params{"order_id": "ORD-123"})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	fmt.Println(result.Status) // "completed", "failed", "suspended", etc.
 func (e *Engine) RunSync(ctx context.Context, wf *Workflow, params Params) (*Result, error) {
 	if wf == nil {
 		return nil, ErrNilWorkflow
@@ -198,9 +250,23 @@ func (e *Engine) RunSync(ctx context.Context, wf *Workflow, params Params) (*Res
 	return e.executeRun(runCtx, wf, runID, params)
 }
 
-// Run starts a workflow execution asynchronously and returns the run ID.
+// Run starts a workflow execution asynchronously on the engine's worker pool
+// and returns the RunID immediately without waiting for completion. Use Wait
+// to block until the run finishes and retrieve its Result.
+//
+// The workflow executes on a pooled goroutine. If the worker pool is shut down
+// or the engine is closed, Run returns ErrEngineClosed. Returns ErrNilWorkflow
+// if wf is nil.
+//
+// The provided context is propagated to the workflow execution; cancelling it
+// cancels the run. Unlike RunSync, Run does not apply the engine-level timeout
+// automatically -- the caller controls the context lifetime.
 //
 //	runID, err := engine.Run(ctx, wf, gostage.Params{"order_id": "ORD-123"})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	result, err := engine.Wait(ctx, runID)
 func (e *Engine) Run(ctx context.Context, wf *Workflow, params Params) (RunID, error) {
 	if wf == nil {
 		return "", ErrNilWorkflow
@@ -262,8 +328,18 @@ func (e *Engine) Run(ctx context.Context, wf *Workflow, params Params) (RunID, e
 	return runID, nil
 }
 
-// Wait blocks until a run completes and returns the result.
+// Wait blocks the calling goroutine until the specified run finishes and
+// returns its Result. If the run is still in-flight, Wait blocks on the
+// run's internal completion channel. If the run has already finished (the
+// handle is no longer tracked), Wait reconstructs the Result from the
+// persistence layer, including the full state store.
 //
+// Returns a *RunNotFoundError (matching ErrRunNotFound via errors.Is) if the
+// run ID does not exist in either the active run map or persistence. Returns
+// ctx.Err() if the provided context is cancelled or times out before the run
+// completes.
+//
+//	runID, _ := engine.Run(ctx, wf, nil)
 //	result, err := engine.Wait(ctx, runID)
 func (e *Engine) Wait(ctx context.Context, runID RunID) (*Result, error) {
 	e.mu.Lock()
@@ -308,7 +384,18 @@ func (e *Engine) Wait(ctx context.Context, runID RunID) (*Result, error) {
 	}
 }
 
-// Cancel cancels a running workflow.
+// Cancel cancels a workflow run. For actively running workflows, it triggers
+// the context cancellation so the executing goroutine observes the signal.
+// For sleeping workflows, it also cancels the scheduled wake timer and unpins
+// the workflow from the cache.
+//
+// The run's persisted status is updated to Cancelled and an EventRunCancelled
+// event is emitted. Returns the persistence error from LoadRun if the run ID
+// does not exist, or from SaveRun if the status update fails.
+//
+// Cancel is safe to call on runs in any status. Calling it on an already
+// terminal run (Completed, Failed, Bailed, Cancelled) updates the status
+// to Cancelled but has no other side effects.
 func (e *Engine) Cancel(ctx context.Context, runID RunID) error {
 	e.mu.Lock()
 	handle, ok := e.runs[runID]
@@ -348,9 +435,19 @@ func (e *Engine) Cancel(ctx context.Context, runID RunID) error {
 	return saveErr
 }
 
-// DeleteRun removes a run and all its associated state from persistence.
-// If the run is currently active, it is cancelled and DeleteRun waits for
-// all in-flight persistence writes to complete before deleting.
+// DeleteRun removes a run and all its associated state from persistence. If
+// the run is currently active, DeleteRun cancels it and waits for all in-flight
+// persistence writes to finish before deleting. If the provided context is
+// cancelled while waiting, DeleteRun proceeds with deletion anyway to avoid
+// leaving orphaned data.
+//
+// For sleeping runs, DeleteRun also cancels the scheduled wake timer and
+// unpins the workflow from the cache. An EventRunDeleted event is emitted
+// on successful deletion.
+//
+// Returns the persistence error if the delete operation fails. If the run
+// does not exist in persistence, the behavior depends on the persistence
+// implementation (the default backends return nil).
 func (e *Engine) DeleteRun(ctx context.Context, runID RunID) error {
 	e.mu.Lock()
 	handle, active := e.runs[runID]
@@ -405,9 +502,18 @@ func (e *Engine) runGCLoop() {
 	}
 }
 
-// PurgeRuns deletes terminal runs whose UpdatedAt is older than the given TTL.
-// A TTL of 0 deletes all terminal runs regardless of age.
-// Returns the number of runs purged.
+// PurgeRuns garbage-collects terminal runs (Completed, Failed, Bailed,
+// Cancelled) whose UpdatedAt timestamp is older than the given TTL. A TTL of 0
+// deletes all terminal runs regardless of age. Non-terminal runs (Running,
+// Sleeping, Suspended) are never purged.
+//
+// Returns the number of runs successfully deleted. If some deletions fail,
+// PurgeRuns logs warnings and continues with the remaining runs, returning the
+// count of those that succeeded along with the first listing error encountered.
+//
+// Returns ErrEngineClosed if the engine has been shut down.
+//
+//	purged, err := engine.PurgeRuns(ctx, 24*time.Hour) // delete runs older than 1 day
 func (e *Engine) PurgeRuns(ctx context.Context, ttl time.Duration) (int, error) {
 	select {
 	case <-e.closeCh:
@@ -451,10 +557,24 @@ func (e *Engine) PurgeRuns(ctx context.Context, ttl time.Duration) (int, error) 
 	return purged, nil
 }
 
-// Resume resumes a suspended workflow with the provided data.
-// The workflow is rebuilt from the persisted definition — the caller does not
-// provide the workflow object. This ensures structural consistency between
-// the original run and the resumed execution.
+// Resume resumes a suspended workflow run, blocking the calling goroutine until
+// the workflow completes (like RunSync). The workflow structure is rebuilt from
+// the persisted definition, not supplied by the caller, ensuring structural
+// consistency between the original run and the resumed execution.
+//
+// The data map is injected into the workflow's state store under "__resume:"
+// prefixed keys, making the values accessible to the resuming task via
+// ctx.Get("__resume:key"). A "__resuming" flag is also set to true.
+//
+// Resume uses cache-first lookup: it checks the engine's in-memory workflow
+// cache before falling back to the persisted WorkflowDef. If neither is
+// available (e.g., the workflow was built with anonymous closures that cannot
+// be serialized), Resume returns ErrWorkflowNotResumable.
+//
+// Returns ErrEngineClosed if the engine is shut down. Returns ErrRunNotFound
+// if the run ID does not exist. Returns ErrRunNotSuspended if the run is not
+// in Suspended status. Returns ErrRunAlreadyActive if another goroutine is
+// already executing or resuming this run.
 //
 //	result, err := engine.Resume(ctx, runID, gostage.Params{"approved": true})
 func (e *Engine) Resume(ctx context.Context, runID RunID, data Params) (*Result, error) {
@@ -548,8 +668,21 @@ func (e *Engine) Resume(ctx context.Context, runID RunID, data Params) (*Result,
 	return result, nil
 }
 
-// Close releases engine resources with ordered shutdown.
-// Safe to call multiple times — the second and subsequent calls are no-ops.
+// Close performs an ordered shutdown of the engine and releases all resources.
+// The shutdown sequence is:
+//
+//  1. Signal all subsystems via the close channel (prevents new runs from starting).
+//  2. Stop the timer scheduler (no more sleep-wake timer fires).
+//  3. Cancel all active runs via their context cancel functions.
+//  4. Drain the worker pool, waiting for in-flight jobs to complete. If
+//     WithShutdownTimeout is configured and workers do not finish in time,
+//     Close proceeds after a bounded grace period and logs a warning.
+//  5. Close the spawn runner (flushes child process state).
+//  6. Close the persistence layer (last, so in-flight runs can flush writes).
+//
+// Close is safe to call multiple times; the second and subsequent calls are
+// no-ops and return nil. The returned error, if any, comes from closing the
+// persistence layer.
 func (e *Engine) Close() error {
 	var closeErr error
 	e.closeOnce.Do(func() {
@@ -743,11 +876,25 @@ func (e *Engine) wakeWorkflow(runID RunID) {
 	}
 }
 
-// Recover scans persistence for interrupted workflows and handles them.
-// - Running workflows are marked as Failed (crashed mid-execution)
-// - Sleeping workflows past their wake time are resumed immediately
-// - Sleeping workflows with future wake times are registered with the timer scheduler
-// - Suspended workflows are left alone (waiting for external input)
+// Recover scans persistence for interrupted workflows and handles crash
+// recovery. It is designed to be called after a process restart to restore
+// engine state. The recovery logic handles each status as follows:
+//
+//   - Running: Marked as Failed, since a running workflow found in persistence
+//     after restart indicates a crash mid-execution.
+//   - Sleeping (wake time in the past): Resumed immediately by calling the
+//     internal wake handler. The workflow's persisted definition is rebuilt
+//     and cached so the wake handler can find it.
+//   - Sleeping (wake time in the future): Registered with the timer scheduler
+//     for automatic wake at the originally scheduled time.
+//   - Suspended: Left untouched, as these runs are waiting for explicit
+//     external input via Resume.
+//
+// Recover is called automatically during New when WithAutoRecover is set.
+// It can also be called manually at any time.
+//
+// Returns an error if listing runs from persistence fails. Individual run
+// recovery failures are logged but do not abort the overall recovery.
 func (e *Engine) Recover(ctx context.Context) error {
 	// Recover crashed running workflows
 	runningRuns, err := e.persistence.ListRuns(ctx, RunFilter{Status: Running})
@@ -1018,8 +1165,14 @@ func (e *Engine) doExecute(ctx context.Context, wf *Workflow, runID RunID, resum
 	return result
 }
 
-// ListRuns returns runs matching the given filter criteria.
-// Delegates to the persistence layer's filter-based query.
+// ListRuns queries the persistence layer for runs matching the given filter
+// criteria. Filters can narrow results by workflow ID, status, update time,
+// and paginate with offset and limit. An empty filter returns all runs.
+//
+// Returns ErrEngineClosed if the engine has been shut down. Returns nil (not
+// an empty slice) when no runs match the filter.
+//
+//	runs, err := engine.ListRuns(ctx, gostage.RunFilter{Status: gostage.Completed, Limit: 10})
 func (e *Engine) ListRuns(ctx context.Context, filter RunFilter) ([]*RunState, error) {
 	select {
 	case <-e.closeCh:
@@ -1029,8 +1182,19 @@ func (e *Engine) ListRuns(ctx context.Context, filter RunFilter) ([]*RunState, e
 	return e.persistence.ListRuns(ctx, filter)
 }
 
-// GetRun returns the current state of a run without blocking.
-// Unlike Wait, this returns immediately regardless of run status.
+// GetRun returns the current persisted state of a run without blocking.
+// Unlike Wait, GetRun returns immediately regardless of whether the run is
+// still in progress, making it suitable for polling or status checks.
+//
+// Returns ErrEngineClosed if the engine has been shut down. Returns a
+// *RunNotFoundError (matching ErrRunNotFound via errors.Is) if the run
+// does not exist in persistence.
+//
+//	run, err := engine.GetRun(ctx, runID)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	fmt.Println(run.Status)
 func (e *Engine) GetRun(ctx context.Context, runID RunID) (*RunState, error) {
 	select {
 	case <-e.closeCh:

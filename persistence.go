@@ -103,6 +103,7 @@ func newMemoryPersistence() *memoryPersistence {
 	}
 }
 
+// SaveRun stores a deep copy of the run state in memory.
 func (m *memoryPersistence) SaveRun(_ context.Context, run *RunState) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -110,6 +111,8 @@ func (m *memoryPersistence) SaveRun(_ context.Context, run *RunState) error {
 	return nil
 }
 
+// LoadRun retrieves a deep copy of a run by its ID.
+// Returns a RunNotFoundError if the run does not exist.
 func (m *memoryPersistence) LoadRun(_ context.Context, runID RunID) (*RunState, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -120,6 +123,8 @@ func (m *memoryPersistence) LoadRun(_ context.Context, runID RunID) (*RunState, 
 	return copyRunState(run), nil
 }
 
+// UpdateStepStatus updates the status of a specific step within an in-memory run.
+// Returns a RunNotFoundError if the run does not exist.
 func (m *memoryPersistence) UpdateStepStatus(_ context.Context, runID RunID, stepID string, status Status) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -135,6 +140,8 @@ func (m *memoryPersistence) UpdateStepStatus(_ context.Context, runID RunID, ste
 	return nil
 }
 
+// SaveState merges the given state entries into the in-memory store for a run.
+// Existing keys are overwritten; new keys are added.
 func (m *memoryPersistence) SaveState(_ context.Context, runID RunID, entries map[string]StateEntry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -149,6 +156,8 @@ func (m *memoryPersistence) SaveState(_ context.Context, runID RunID, entries ma
 	return nil
 }
 
+// LoadState retrieves a copy of all state entries for a run.
+// Returns nil if no state entries exist for the given run.
 func (m *memoryPersistence) LoadState(_ context.Context, runID RunID) (map[string]StateEntry, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -164,6 +173,7 @@ func (m *memoryPersistence) LoadState(_ context.Context, runID RunID) (map[strin
 	return out, nil
 }
 
+// DeleteState removes all state entries for a run from the in-memory store.
 func (m *memoryPersistence) DeleteState(_ context.Context, runID RunID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -171,6 +181,7 @@ func (m *memoryPersistence) DeleteState(_ context.Context, runID RunID) error {
 	return nil
 }
 
+// DeleteStateKey removes a single state entry for a run from the in-memory store.
 func (m *memoryPersistence) DeleteStateKey(_ context.Context, runID RunID, key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -180,6 +191,7 @@ func (m *memoryPersistence) DeleteStateKey(_ context.Context, runID RunID, key s
 	return nil
 }
 
+// DeleteRun removes a run and all its associated state from the in-memory store.
 func (m *memoryPersistence) DeleteRun(_ context.Context, runID RunID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -188,6 +200,8 @@ func (m *memoryPersistence) DeleteRun(_ context.Context, runID RunID) error {
 	return nil
 }
 
+// UpdateCurrentStep updates the current step identifier for an in-memory run.
+// Returns a RunNotFoundError if the run does not exist.
 func (m *memoryPersistence) UpdateCurrentStep(_ context.Context, runID RunID, stepID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -200,8 +214,12 @@ func (m *memoryPersistence) UpdateCurrentStep(_ context.Context, runID RunID, st
 	return nil
 }
 
+// isInMemory implements the InMemoryPersistence marker interface.
 func (m *memoryPersistence) isInMemory() {}
 
+// ListRuns returns deep copies of runs matching the given filter criteria.
+// Results are filtered by workflow ID, status, and update time, then paginated
+// with offset and limit.
 func (m *memoryPersistence) ListRuns(_ context.Context, filter RunFilter) ([]*RunState, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -273,6 +291,7 @@ func copyRunState(run *RunState) *RunState {
 	return &cp
 }
 
+// Close is a no-op for the in-memory persistence implementation.
 func (m *memoryPersistence) Close() error {
 	return nil
 }
@@ -282,10 +301,13 @@ type RunNotFoundError struct {
 	RunID RunID
 }
 
+// Error returns a human-readable message including the missing run ID.
 func (e *RunNotFoundError) Error() string {
 	return "run not found: " + string(e.RunID)
 }
 
+// Is reports whether target matches the sentinel ErrRunNotFound, enabling
+// errors.Is(err, ErrRunNotFound) to work with typed RunNotFoundError values.
 func (e *RunNotFoundError) Is(target error) bool {
 	return target == ErrRunNotFound
 }

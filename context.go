@@ -8,8 +8,18 @@ import (
 	"reflect"
 )
 
-// Ctx is the execution context passed to every task function.
-// It provides access to the workflow's state, logging, and control flow.
+// Ctx is the execution context passed to every task function during a workflow run.
+// It provides access to the shared key-value store, structured logging, control flow
+// primitives (Bail, Suspend), dynamic workflow mutations (InsertAfter, DisableStep),
+// and ForEach iteration state.
+//
+// Ctx is not a context.Context. Call ctx.Context() to obtain the underlying
+// context.Context for deadline and cancellation checks.
+//
+// In concurrent ForEach iterations, each goroutine receives its own Ctx with
+// independent ForEach item/index values, but all share the same underlying state.
+// Write to unique keys (e.g. fmt.Sprintf("result_%d", gostage.ItemIndex(ctx)))
+// to avoid data races.
 type Ctx struct {
 	// Log provides structured logging within a task.
 	Log Logger
@@ -54,7 +64,9 @@ func newCtx(goCtx context.Context, s *runState, logger Logger) *Ctx {
 	return ctx
 }
 
-// Context returns the underlying context.Context for deadline/cancellation checks.
+// Context returns the underlying context.Context, which carries the run's
+// deadline and cancellation signal. Use this for passing to libraries that
+// accept context.Context (e.g. HTTP clients, database drivers).
 func (c *Ctx) Context() context.Context { return c.goCtx }
 
 // --- Top-level store functions ---
@@ -111,10 +123,18 @@ func coerce[T any](val any) (T, bool) {
 	return zero, false
 }
 
-// Get retrieves a typed value from the workflow store.
-// Numeric coercion is applied automatically (e.g. float64 → int after JSON round-trip).
+// Get retrieves a typed value from the workflow's key-value store.
+// If the key is missing or the stored value cannot be coerced to T, the zero
+// value of T is returned. Use [GetOk] to distinguish a missing key from a
+// stored zero value.
+//
+// Type coercion is applied automatically to handle JSON round-trip effects:
+// numeric types are converted (e.g. float64 to int), and composite types
+// (structs, slices, maps) are recovered via JSON re-marshal when a direct
+// type assertion fails.
 //
 //	name := gostage.Get[string](ctx, "user.name")
+//	count := gostage.Get[int](ctx, "retry_count") // works even if stored as float64
 func Get[T any](ctx *Ctx, key string) T {
 	val, ok := ctx.state.Get(key)
 	if !ok {
@@ -129,10 +149,13 @@ func Get[T any](ctx *Ctx, key string) T {
 	return typed
 }
 
-// GetOr retrieves a typed value from the workflow store, returning def if not found.
-// Numeric coercion is applied automatically.
+// GetOr retrieves a typed value from the workflow store, returning def if the
+// key is missing or the stored value cannot be coerced to T. The same type
+// coercion rules as [Get] apply (numeric conversion, JSON re-marshal for
+// composite types).
 //
 //	name := gostage.GetOr[string](ctx, "user.name", "World")
+//	limit := gostage.GetOr[int](ctx, "page_size", 25)
 func GetOr[T any](ctx *Ctx, key string, def T) T {
 	val, ok := ctx.state.Get(key)
 	if !ok {
@@ -145,11 +168,15 @@ func GetOr[T any](ctx *Ctx, key string, def T) T {
 	return typed
 }
 
-// GetOk retrieves a typed value and reports whether the key exists.
-// Returns (zero, false) if the key is missing or the type does not match.
-// Unlike Get, this allows distinguishing a missing key from a zero value.
+// GetOk retrieves a typed value and reports whether the key exists and was
+// successfully coerced to T. Returns (zero, false) if the key is missing or
+// the stored value is incompatible with T. This allows callers to distinguish
+// a missing key from a stored zero value, which [Get] cannot do.
 //
 //	val, ok := gostage.GetOk[string](ctx, "user.name")
+//	if !ok {
+//	    // key does not exist or is not a string
+//	}
 func GetOk[T any](ctx *Ctx, key string) (T, bool) {
 	val, ok := ctx.state.Get(key)
 	if !ok {
@@ -159,14 +186,21 @@ func GetOk[T any](ctx *Ctx, key string) (T, bool) {
 	return coerce[T](val)
 }
 
-// Set stores a typed value in the workflow store.
-// Returns an error if the value's type is not JSON-serializable (e.g. contains
-// channels, functions, or complex numbers).
-// In concurrent ForEach, items share the same state. Each item should
-// write to unique keys (e.g., fmt.Sprintf("result_%d", ItemIndex(ctx))).
-// Mutable values (slices, maps) are stored by reference, not copied.
+// Set stores a typed value in the workflow's key-value store. The value must
+// be JSON-serializable; types containing channels, functions, unsafe pointers,
+// or complex numbers are rejected with a descriptive error. Maps must have
+// string keys.
 //
-//	if err := gostage.Set(ctx, "result", 42); err != nil { return err }
+// Set returns [ErrStateLimitExceeded] if the engine's state entry limit is
+// reached and the key is new. Updating an existing key always succeeds
+// regardless of the limit.
+//
+// Values are stored by reference, not deep-copied. Mutable types (slices,
+// maps, structs with pointer fields) should not be modified after storing
+// unless the caller is the sole writer. In concurrent ForEach, write to
+// unique keys to avoid data races:
+//
+//	gostage.Set(ctx, fmt.Sprintf("result_%d", gostage.ItemIndex(ctx)), val)
 func Set[T any](ctx *Ctx, key string, value T) error {
 	t := reflect.TypeOf(value)
 	if t != nil && !isJSONSerializable(t) {
@@ -175,9 +209,10 @@ func Set[T any](ctx *Ctx, key string, value T) error {
 	return ctx.state.setWithLimit(key, value)
 }
 
-// Delete removes a key from the workflow store.
-// The deletion is durable — it is written to persistence on the next flush
-// and the key does not reappear after a crash and resume.
+// Delete removes a key from the workflow store. The deletion is durable: it
+// is recorded as a tombstone and flushed to the persistence layer at the next
+// step boundary. After a crash and resume, the key does not reappear.
+// Deleting a key that does not exist is a no-op.
 //
 //	gostage.Delete(ctx, "temp_data")
 func Delete(ctx *Ctx, key string) {
@@ -186,35 +221,66 @@ func Delete(ctx *Ctx, key string) {
 
 // --- Control flow functions ---
 
-// Bail signals the workflow to exit early (not an error).
-// The bail reason is recorded in the result.
+// Bail signals the workflow to exit early with an intentional, non-error
+// termination. The engine catches the returned [BailError], sets the run
+// status to [Bailed], and records the reason in [Result].BailReason.
+// Bail should be returned as the task's error value, not called and discarded.
 //
-//	return gostage.Bail(ctx, "Must be 18+")
+//	if age < 18 {
+//	    return gostage.Bail(ctx, "Must be 18+")
+//	}
 func Bail(ctx *Ctx, reason string) error {
 	return &BailError{Reason: reason}
 }
 
-// Suspend pauses the workflow, persists state, and waits for external input.
-// The data map is stored and available when the workflow is resumed.
+// Suspend pauses the workflow and persists its current state so it can be
+// resumed later via [Engine.Resume]. The engine catches the returned
+// [SuspendError], sets the run status to [Suspended], and stores data in
+// [Result].SuspendData. The data map is informational and is not automatically
+// merged into the store; callers typically use it to communicate what input
+// is needed for resumption.
+//
+// Suspend should be returned as the task's error value:
 //
 //	return gostage.Suspend(ctx, gostage.Params{"reason": "needs approval"})
+//
+// When the workflow is resumed, all tasks re-execute from the beginning.
+// Use [IsResuming] to skip already-completed work and [ResumeData] to read
+// the data provided to Engine.Resume.
 func Suspend(ctx *Ctx, data Params) error {
 	return &SuspendError{Data: data}
 }
 
-// IsResuming returns true if the current execution is a resume from a suspended state.
+// IsResuming reports whether the current execution is a resume from a
+// previously suspended run. When true, the task should skip any work that
+// was already completed before suspension and use [ResumeData] to read the
+// external input provided to [Engine.Resume].
+//
+//	if gostage.IsResuming(ctx) {
+//	    approved := gostage.ResumeData[bool](ctx, "approved")
+//	    // handle approval decision
+//	}
 func IsResuming(ctx *Ctx) bool {
 	return ctx.resuming
 }
 
-// ResumeData retrieves a typed value from the resume data provided by engine.Resume().
+// ResumeData retrieves a typed value from the data map that was passed to
+// [Engine.Resume]. Internally, resume data is stored under "__resume:" prefixed
+// keys in the workflow store, so this is equivalent to Get[T](ctx, "__resume:"+key).
+// Returns the zero value of T if the key is missing or the type does not match.
+//
+//	approved := gostage.ResumeData[bool](ctx, "approved")
 func ResumeData[T any](ctx *Ctx, key string) T {
 	return Get[T](ctx, "__resume:"+key)
 }
 
 // --- ForEach helpers ---
 
-// Item retrieves the current ForEach iteration item with type safety.
+// Item retrieves the current ForEach iteration item, coerced to type T.
+// Returns the zero value of T if called outside a ForEach context or if the
+// stored item cannot be coerced to T. When called inside a sub-workflow
+// nested within ForEach, Item falls back to reading the "__foreach_item"
+// key from the store.
 //
 //	track := gostage.Item[Track](ctx)
 func Item[T any](ctx *Ctx) T {
@@ -238,7 +304,11 @@ func Item[T any](ctx *Ctx) T {
 	return val
 }
 
-// ItemIndex returns the current ForEach iteration index.
+// ItemIndex returns the zero-based index of the current ForEach iteration.
+// Returns 0 if called outside a ForEach context. When called inside a
+// sub-workflow nested within ForEach, ItemIndex falls back to reading the
+// "__foreach_index" key from the store, handling JSON round-trip float64
+// conversion automatically.
 func ItemIndex(ctx *Ctx) int {
 	if ctx.forEachItem != nil {
 		return ctx.forEachIndex
@@ -260,7 +330,10 @@ func ItemIndex(ctx *Ctx) int {
 
 // --- Tag queries ---
 
-// FindStepsByTag returns the IDs of all steps in the workflow that have the given tag.
+// FindStepsByTag returns the IDs of all steps in the executing workflow that
+// carry the given tag. Returns nil if the workflow reference is unavailable
+// or no steps match. Tags are assigned via [WithStepTags] during workflow
+// construction.
 func FindStepsByTag(ctx *Ctx, tag string) []string {
 	if ctx.workflow == nil {
 		return nil
@@ -277,7 +350,9 @@ func FindStepsByTag(ctx *Ctx, tag string) []string {
 	return ids
 }
 
-// DisableByTag queues mutations to disable all steps with the given tag.
+// DisableByTag queues mutations to disable all steps carrying the given tag.
+// Disabled steps are skipped during execution. The mutations are applied at
+// the next step boundary and survive suspend/resume cycles.
 func DisableByTag(ctx *Ctx, tag string) {
 	ids := FindStepsByTag(ctx, tag)
 	for _, id := range ids {
@@ -285,7 +360,8 @@ func DisableByTag(ctx *Ctx, tag string) {
 	}
 }
 
-// EnableByTag queues mutations to enable all steps with the given tag.
+// EnableByTag queues mutations to re-enable all previously disabled steps
+// carrying the given tag. The mutations are applied at the next step boundary.
 func EnableByTag(ctx *Ctx, tag string) {
 	ids := FindStepsByTag(ctx, tag)
 	for _, id := range ids {
@@ -295,7 +371,14 @@ func EnableByTag(ctx *Ctx, tag string) {
 
 // --- Dynamic mutations ---
 
-// InsertAfter queues a mutation to insert a new task step after the current step.
+// InsertAfter queues a mutation to dynamically insert a new task step
+// immediately after the currently executing step. The taskName must refer to
+// a task registered in the task registry. The mutation is applied at the next
+// step boundary and the inserted step survives suspend/resume cycles. This
+// is a no-op if the mutation queue is not initialized (e.g. outside engine
+// execution).
+//
+//	gostage.InsertAfter(ctx, "send.confirmation.email")
 func InsertAfter(ctx *Ctx, taskName string) {
 	if ctx.mutations != nil {
 		ctx.mutations.Push(Mutation{
@@ -305,7 +388,10 @@ func InsertAfter(ctx *Ctx, taskName string) {
 	}
 }
 
-// DisableStep queues a mutation to disable a step by ID or name.
+// DisableStep queues a mutation to disable a step, identified by its ID or
+// name. Disabled steps are skipped during execution. If multiple steps share
+// the same name, all matching steps are disabled. The mutation is applied at
+// the next step boundary and survives suspend/resume cycles.
 func DisableStep(ctx *Ctx, stepID string) {
 	if ctx.mutations != nil {
 		ctx.mutations.Push(Mutation{
@@ -315,7 +401,10 @@ func DisableStep(ctx *Ctx, stepID string) {
 	}
 }
 
-// EnableStep queues a mutation to re-enable a previously disabled step.
+// EnableStep queues a mutation to re-enable a previously disabled step,
+// identified by its ID or name. If multiple steps share the same name, all
+// matching steps are re-enabled. The mutation is applied at the next step
+// boundary.
 func EnableStep(ctx *Ctx, stepID string) {
 	if ctx.mutations != nil {
 		ctx.mutations.Push(Mutation{
@@ -327,9 +416,18 @@ func EnableStep(ctx *Ctx, stepID string) {
 
 // --- IPC ---
 
-// Send sends a message via IPC.
-// In child processes, the message goes over gRPC to the parent.
-// In the parent process, the message routes through the engine's handler system.
+// Send dispatches an IPC message from the current task. The routing depends
+// on the execution context:
+//
+//   - In a child process (spawned via [WithSpawn]), the message is sent over
+//     gRPC to the parent engine.
+//   - In the parent process, the message is routed locally through the
+//     engine's registered message handlers (see [Engine.OnMessage]).
+//   - If neither a send function nor an engine reference is available, the
+//     call is silently ignored.
+//
+// The payload is converted to map[string]any for handler dispatch. If the
+// payload is not already a map[string]any, it is wrapped as {"data": payload}.
 //
 //	gostage.Send(ctx, "progress", gostage.Params{"pct": 50})
 func Send(ctx *Ctx, msgType string, payload any) error {

@@ -1,3 +1,6 @@
+// Package spawn provides gRPC-based child process spawning for ForEach steps.
+// Use WithSpawn() as an engine option to enable it, and WithSpawn() on individual
+// ForEach steps to opt in to process-level isolation per iteration.
 package spawn
 
 import gostage "github.com/davidroman0O/gostage"
