@@ -320,6 +320,23 @@ The `examples/` directory has 24 standalone programs organized by topic:
 - [23-run-gc](examples/23-run-gc) — automatic and manual run garbage collection
 - [24-ipc-messaging](examples/24-ipc-messaging) — Send/OnMessage and scoped handlers
 
+## Developer Guide
+
+The `guide/` directory has 12 in-depth guides organized by topic:
+
+- [01 — Getting Started](guide/01-quickstart.md) — install, first workflow, core concepts
+- [02 — Step Kinds](guide/02-step-kinds.md) — all 10 step kinds, composition rules, Named vs anonymous
+- [03 — State Management](guide/03-state.md) — Get/Set/GetOk, type fidelity, concurrency rules
+- [04 — Persistence](guide/04-persistence.md) — SQLite, flush semantics, custom backends
+- [05 — Suspend and Resume](guide/05-suspend-resume.md) — the full lifecycle, IsResuming pattern
+- [06 — Retry Strategies](guide/06-retry-strategies.md) — backoff, jitter, precedence rules
+- [07 — Child Process Spawning](guide/07-spawn.md) — gRPC model, orphan detection, depth limits
+- [08 — Middleware](guide/08-middleware.md) — 4 levels, Plugin interface, practical patterns
+- [09 — Events and Observability](guide/09-events-observability.md) — lifecycle events, IPC messaging
+- [10 — Registry Isolation](guide/10-registry-isolation.md) — custom registries, multi-tenant
+- [11 — Workflow Serialization](guide/11-serialization.md) — definition round-trip, persistence internals
+- [12 — Production Configuration](guide/12-production.md) — GC, recovery, timeouts, cache, pool sizing
+
 ## Testing
 
 ```bash
