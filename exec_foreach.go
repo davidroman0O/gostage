@@ -25,7 +25,17 @@ func (e *Engine) executeForEach(ctx context.Context, wf *Workflow, s *step, runI
 
 	// Spawn path: run each item in an isolated child process
 	if s.useSpawn {
-		return e.executeForEachSpawn(ctx, wf, s, items, runID, resuming)
+		if e.spawnRunner == nil {
+			return fmt.Errorf("ForEach with UseSpawn requires a spawn runner; configure with spawn.WithSpawn()")
+		}
+		cfg := SpawnConfig{
+			StepID:        s.id,
+			TaskName:      s.forEachRef.taskName,
+			SubWorkflow:   s.forEachRef.subWorkflow,
+			Concurrency:   s.concurrency,
+			CollectionKey: s.collectionKey,
+		}
+		return e.spawnRunner.ExecuteForEachSpawn(ctx, e, wf, cfg, items, runID, resuming)
 	}
 
 	// Load step states for per-item resume tracking

@@ -1,6 +1,6 @@
 //go:build !linux
 
-package gostage
+package spawn
 
 import "syscall"
 

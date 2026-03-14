@@ -1,4 +1,4 @@
-package gostage
+package spawn
 
 import (
 	"context"
@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	gostage "github.com/davidroman0O/gostage"
 	pb "github.com/davidroman0O/gostage/proto"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
@@ -25,34 +26,36 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// Runner implements gostage.SpawnRunner using gRPC-based child processes.
+type Runner struct{}
+
+// NewRunner creates a new spawn runner.
+func NewRunner() *Runner {
+	return &Runner{}
+}
+
+// Close is a no-op — the Runner has no persistent resources.
+// Each ExecuteForEachSpawn call starts and stops its own gRPC server.
+func (r *Runner) Close() error {
+	return nil
+}
+
 // spawnServer manages the gRPC server and job dispatch for spawned ForEach.
 // The parent process runs this server; child processes connect as clients.
 type spawnServer struct {
 	pb.UnimplementedWorkflowIPCServer
 
 	mu   sync.Mutex
-	jobs map[string]*SpawnJob // job ID → job
+	jobs map[string]*gostage.SpawnJob // job ID -> job
 
 	listener net.Listener
 	srv      *grpc.Server
 	port     int
 
 	// engine reference for routing child IPC messages to handlers
-	engine *Engine
+	engine *gostage.Engine
 
 	secret string
-}
-
-// SpawnJob represents one ForEach item to execute in a child process.
-// The exported fields are accessible to ChildMiddleware implementations.
-type SpawnJob struct {
-	ID             string
-	RunID          RunID             // the run this job belongs to
-	TaskName       string
-	StoreData      map[string][]byte // serialized store snapshot including item/index
-	DefinitionJSON []byte            // serialized SubWorkflowDef for multi-stage children
-	resultCh       chan *spawnResult  // child sends result here (buffered, size 1)
-	token          string            // per-job auth token
 }
 
 // spawnResult holds the outcome of a child process execution.
@@ -63,7 +66,7 @@ type spawnResult struct {
 }
 
 // newSpawnServer creates and starts a gRPC server on a random available port.
-func newSpawnServer(engine *Engine, secret string) (*spawnServer, error) {
+func newSpawnServer(engine *gostage.Engine, secret string) (*spawnServer, error) {
 	lis, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		return nil, fmt.Errorf("listen: %w", err)
@@ -82,7 +85,7 @@ func newSpawnServer(engine *Engine, secret string) (*spawnServer, error) {
 	})
 
 	ss := &spawnServer{
-		jobs:     make(map[string]*SpawnJob),
+		jobs:     make(map[string]*gostage.SpawnJob),
 		listener: lis,
 		srv: grpc.NewServer(
 			authInterceptor,
@@ -113,7 +116,7 @@ func (ss *spawnServer) stop() {
 }
 
 // addJob registers a job for a child process to pick up.
-func (ss *spawnServer) addJob(job *SpawnJob) {
+func (ss *spawnServer) addJob(job *gostage.SpawnJob) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	ss.jobs[job.ID] = job
@@ -132,7 +135,7 @@ func (ss *spawnServer) RequestWorkflowDefinition(ctx context.Context, req *pb.Re
 	// Validate per-job token
 	md, _ := metadata.FromIncomingContext(ctx)
 	jobTokens := md.Get("x-gostage-job-token")
-	if len(jobTokens) == 0 || subtle.ConstantTimeCompare([]byte(jobTokens[0]), []byte(job.token)) != 1 {
+	if len(jobTokens) == 0 || subtle.ConstantTimeCompare([]byte(jobTokens[0]), []byte(job.Token())) != 1 {
 		return nil, status.Errorf(codes.PermissionDenied, "invalid job token")
 	}
 
@@ -164,7 +167,7 @@ func (ss *spawnServer) SendMessage(ctx context.Context, msg *pb.IPCMessage) (*pb
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "job %q not found", jobID)
 	}
-	if len(jobTokens) == 0 || subtle.ConstantTimeCompare([]byte(jobTokens[0]), []byte(job.token)) != 1 {
+	if len(jobTokens) == 0 || subtle.ConstantTimeCompare([]byte(jobTokens[0]), []byte(job.Token())) != 1 {
 		return nil, status.Errorf(codes.PermissionDenied, "invalid job token for job %q", jobID)
 	}
 
@@ -176,7 +179,7 @@ func (ss *spawnServer) SendMessage(ctx context.Context, msg *pb.IPCMessage) (*pb
 			ss.mu.Unlock()
 			if ok {
 				select {
-				case job.resultCh <- &spawnResult{storeData: payload.StoreData}:
+				case job.ResultCh() <- &gostage.SpawnResult{StoreData: payload.StoreData}:
 				default:
 				}
 			}
@@ -190,7 +193,7 @@ func (ss *spawnServer) SendMessage(ctx context.Context, msg *pb.IPCMessage) (*pb
 				ss.mu.Unlock()
 				if ok {
 					select {
-					case job.resultCh <- &spawnResult{err: payload.ErrorMessage}:
+					case job.ResultCh() <- &gostage.SpawnResult{Err: payload.ErrorMessage}:
 					default:
 					}
 				}
@@ -204,14 +207,14 @@ func (ss *spawnServer) SendMessage(ctx context.Context, msg *pb.IPCMessage) (*pb
 			ss.mu.Unlock()
 			if ok {
 				select {
-				case job.resultCh <- &spawnResult{bailReason: payload.Reason}:
+				case job.ResultCh() <- &gostage.SpawnResult{BailReason: payload.Reason}:
 				default:
 				}
 			}
 		}
 
 	case pb.MessageType_MESSAGE_TYPE_IPC:
-		// Dedicated IPC message type — route to engine message handlers.
+		// Dedicated IPC message type -- route to engine message handlers.
 		if payload := msg.GetIpcPayload(); payload != nil && ss.engine != nil {
 			var parsed any
 			if err := json.Unmarshal(payload.PayloadJson, &parsed); err == nil {
@@ -219,25 +222,25 @@ func (ss *spawnServer) SendMessage(ctx context.Context, msg *pb.IPCMessage) (*pb
 				if !ok {
 					payloadMap = map[string]any{"data": parsed}
 				}
-				jobRunID := RunID("")
+				jobRunID := gostage.RunID("")
 				ss.mu.Lock()
 				if job, ok := ss.jobs[jobID]; ok {
 					jobRunID = job.RunID
 				}
 				ss.mu.Unlock()
-				ss.engine.dispatchMessage(payload.MsgType, payloadMap, jobRunID)
+				ss.engine.DispatchMessage(payload.MsgType, payloadMap, jobRunID)
 			}
 		}
 
 	default:
-		// Unknown message type — ignore
+		// Unknown message type -- ignore
 	}
 
 	return &pb.MessageAck{Success: true, MessageId: msg.MessageId}, nil
 }
 
-// executeForEachSpawn runs ForEach items in isolated child processes.
-func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step, items []any, runID RunID, resuming bool) error {
+// ExecuteForEachSpawn runs ForEach items in isolated child processes.
+func (r *Runner) ExecuteForEachSpawn(ctx context.Context, e *gostage.Engine, wf *gostage.Workflow, cfg gostage.SpawnConfig, items []any, runID gostage.RunID, resuming bool) error {
 	secret := uuid.New().String()
 	ss, err := newSpawnServer(e, secret)
 	if err != nil {
@@ -246,15 +249,15 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 	defer ss.stop()
 
 	// Load step states for per-item resume tracking
-	var stepStates map[string]Status
+	var stepStates map[string]gostage.Status
 	if resuming {
-		run, loadErr := e.persistence.LoadRun(ctx, runID)
+		run, loadErr := e.EnginePersistence().LoadRun(ctx, runID)
 		if loadErr == nil && run.StepStates != nil {
 			stepStates = run.StepStates
 		}
 	}
 
-	concurrency := s.concurrency
+	concurrency := cfg.Concurrency
 	if concurrency < 1 {
 		concurrency = 1
 	}
@@ -271,8 +274,8 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 
 	for i, item := range items {
 		// Skip completed items on resume
-		itemKey := fmt.Sprintf("%s:%d", s.id, i)
-		if resuming && stepStates != nil && stepStates[itemKey] == Completed {
+		itemKey := fmt.Sprintf("%s:%d", cfg.StepID, i)
+		if resuming && stepStates != nil && stepStates[itemKey] == gostage.Completed {
 			continue
 		}
 
@@ -285,41 +288,34 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 		}
 
 		// Serialize state with this item
-		storeData, serErr := serializeStateForChild(wf.state, item, i)
+		storeData, serErr := gostage.SerializeStateForChild(wf.RunState(), item, i)
 		if serErr != nil {
 			return fmt.Errorf("serialize state for item %d: %w", i, serErr)
 		}
 
 		jobID := uuid.New().String()
 		jobToken := uuid.New().String()
-		job := &SpawnJob{
-			ID:        jobID,
-			RunID:     runID,
-			TaskName:  s.forEachRef.taskName,
-			StoreData: storeData,
-			resultCh:  make(chan *spawnResult, 1),
-			token:     jobToken,
-		}
+		job := gostage.NewSpawnJob(jobID, runID, cfg.TaskName, storeData, jobToken)
 
 		// For sub-workflow refs, serialize the workflow definition for child transfer
-		if s.forEachRef.subWorkflow != nil {
-			def, defErr := WorkflowToDefinition(s.forEachRef.subWorkflow)
+		if cfg.SubWorkflow != nil {
+			def, defErr := gostage.WorkflowToDefinition(cfg.SubWorkflow)
 			if defErr != nil {
 				return fmt.Errorf("serialize workflow definition: %w", defErr)
 			}
-			defJSON, marshalErr := MarshalWorkflowDefinition(def)
+			defJSON, marshalErr := gostage.MarshalWorkflowDefinition(def)
 			if marshalErr != nil {
 				return fmt.Errorf("marshal workflow definition: %w", marshalErr)
 			}
 			job.DefinitionJSON = defJSON
-			job.TaskName = s.forEachRef.subWorkflow.ID
+			job.TaskName = cfg.SubWorkflow.ID
 		}
 		ss.addJob(job)
 
 		sem <- struct{}{} // acquire semaphore
 		wg.Add(1)
 
-		go func(job *SpawnJob, itemIndex int, itemStepKey string) {
+		go func(job *gostage.SpawnJob, itemIndex int, itemStepKey string) {
 			defer wg.Done()
 			defer func() { <-sem }() // release semaphore
 			defer func() {
@@ -334,7 +330,7 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 			}()
 
 			// Execute spawn with middleware chain
-			var result *spawnResult
+			var result *gostage.SpawnResult
 			var spawnErr error
 
 			doSpawn := func() error {
@@ -342,20 +338,21 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 				if spawnErr != nil {
 					return spawnErr
 				}
-				if result.bailReason != "" {
-					return &BailError{Reason: result.bailReason}
+				if result.BailReason != "" {
+					return &gostage.BailError{Reason: result.BailReason}
 				}
-				if result.err != "" {
-					return fmt.Errorf("%s", result.err)
+				if result.Err != "" {
+					return fmt.Errorf("%s", result.Err)
 				}
 				return nil
 			}
 
+			childMW := e.ChildMiddlewareChain()
 			var chainErr error
-			if len(e.childMiddleware) > 0 {
+			if len(childMW) > 0 {
 				chain := doSpawn
-				for j := 0; j < len(e.childMiddleware); j++ {
-					mw := e.childMiddleware[j]
+				for j := 0; j < len(childMW); j++ {
+					mw := childMW[j]
 					next := chain
 					chain = func() error {
 						return mw(childCtx, job, next)
@@ -377,9 +374,9 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 				mu.Lock()
 				if firstErr == nil {
 					// Preserve BailError without wrapping so it propagates
-					// through executeForEachSpawn → executeWorkflow → doExecute
+					// through executeForEachSpawn -> executeWorkflow -> doExecute
 					// with Bailed status intact.
-					var bailErr *BailError
+					var bailErr *gostage.BailError
 					if errors.As(chainErr, &bailErr) {
 						firstErr = chainErr
 					} else {
@@ -391,9 +388,9 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 				return
 			}
 
-			// Merge child's store results back atomically — only non-internal keys
-			if result != nil && result.storeData != nil {
-				merged, mergeErr := deserializeStoreData(result.storeData)
+			// Merge child's store results back atomically -- only non-internal keys
+			if result != nil && result.StoreData != nil {
+				merged, mergeErr := gostage.DeserializeStoreData(result.StoreData)
 				if mergeErr == nil {
 					filtered := make(map[string]any)
 					for k, v := range merged {
@@ -402,18 +399,16 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 						}
 					}
 					if len(filtered) > 0 {
-						wf.state.SetBatch(filtered)
+						wf.RunState().SetBatch(filtered)
 					}
 				}
 			}
 
 			// Flush child state to persistence before marking item completed.
-			// Without this, a crash after UpdateStepStatus but before the parent
-			// step's flush permanently loses the child's state contributions.
-			if flushErr := wf.state.Flush(ctx); flushErr != nil {
+			if flushErr := wf.RunState().Flush(childCtx); flushErr != nil {
 				mu.Lock()
 				if firstErr == nil {
-					firstErr = fmt.Errorf("flush child state for item %d: %w", i, flushErr)
+					firstErr = fmt.Errorf("flush child state for item %d: %w", itemIndex, flushErr)
 					cancel()
 				}
 				mu.Unlock()
@@ -421,7 +416,7 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 			}
 
 			// Track per-item completion for resume support
-			if persistErr := e.persistence.UpdateStepStatus(ctx, runID, itemStepKey, Completed); persistErr != nil {
+			if persistErr := e.EnginePersistence().UpdateStepStatus(childCtx, runID, itemStepKey, gostage.Completed); persistErr != nil {
 				mu.Lock()
 				if firstErr == nil {
 					firstErr = fmt.Errorf("persist spawn item completed: %w", persistErr)
@@ -437,7 +432,7 @@ func (e *Engine) executeForEachSpawn(ctx context.Context, wf *Workflow, s *step,
 }
 
 // spawnChild spawns a child process, waits for it to complete, and returns its result.
-func spawnChild(ctx context.Context, port int, job *SpawnJob, secret string) (*spawnResult, error) {
+func spawnChild(ctx context.Context, port int, job *gostage.SpawnJob, secret string) (*gostage.SpawnResult, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("get executable: %w", err)
@@ -450,9 +445,9 @@ func spawnChild(ctx context.Context, port int, job *SpawnJob, secret string) (*s
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = buildChildEnv(secret, job.token)
+	cmd.Env = BuildChildEnv(secret, job.Token())
 
-	// Orphan detection: lifeline pipe — child inherits read end as extra fd
+	// Orphan detection: lifeline pipe -- child inherits read end as extra fd
 	lifelineR, lifelineW, pipeErr := os.Pipe()
 	if pipeErr == nil {
 		cmd.ExtraFiles = []*os.File{lifelineR} // fd 3 in child
@@ -480,31 +475,31 @@ func spawnChild(ctx context.Context, port int, job *SpawnJob, secret string) (*s
 	}()
 
 	select {
-	case result := <-job.resultCh:
-		// Got result via gRPC before process exited — wait for clean exit
+	case result := <-job.ResultCh():
+		// Got result via gRPC before process exited -- wait for clean exit
 		select {
 		case <-exitCh:
 		case <-time.After(5 * time.Second):
-			// Process didn't exit cleanly — kill it
+			// Process didn't exit cleanly -- kill it
 			cmd.Process.Kill()
 		}
 		return result, nil
 
 	case exitErr := <-exitCh:
-		// Process exited — check if we got a result
+		// Process exited -- check if we got a result
 		select {
-		case result := <-job.resultCh:
+		case result := <-job.ResultCh():
 			return result, nil
 		default:
 		}
-		// No result received — process crashed or errored
+		// No result received -- process crashed or errored
 		if exitErr != nil {
 			return nil, fmt.Errorf("child process exited: %w", exitErr)
 		}
 		return nil, fmt.Errorf("child process exited without sending results")
 
 	case <-ctx.Done():
-		// Context cancelled — process will be killed by CommandContext
+		// Context cancelled -- process will be killed by CommandContext
 		select {
 		case <-exitCh:
 		case <-time.After(5 * time.Second):
@@ -514,15 +509,15 @@ func spawnChild(ctx context.Context, port int, job *SpawnJob, secret string) (*s
 	}
 }
 
-// defaultMaxSpawnDepth is the maximum allowed spawn chain depth.
+// DefaultMaxSpawnDepth is the maximum allowed spawn chain depth.
 // A depth of 1 means the root process can spawn children; children cannot spawn
 // further. Increase via GOSTAGE_MAX_SPAWN_DEPTH environment variable.
-const defaultMaxSpawnDepth = 5
+const DefaultMaxSpawnDepth = 5
 
-// buildChildEnv constructs a minimal environment for child processes,
+// BuildChildEnv constructs a minimal environment for child processes,
 // forwarding only necessary variables and filtering out credentials.
 // It also tracks the spawn chain depth via GOSTAGE_SPAWN_DEPTH.
-func buildChildEnv(secret, jobToken string) []string {
+func BuildChildEnv(secret, jobToken string) []string {
 	allowed := map[string]bool{
 		"PATH": true, "HOME": true, "USER": true, "LOGNAME": true,
 		"TMPDIR": true, "TMP": true, "TEMP": true,
@@ -554,58 +549,4 @@ func buildChildEnv(secret, jobToken string) []string {
 	env = append(env, "GOSTAGE_SECRET="+secret)
 	env = append(env, "GOSTAGE_JOB_TOKEN="+jobToken)
 	return env
-}
-
-// --- Store serialization helpers ---
-
-// serializeStateForChild exports the workflow state plus ForEach item/index
-// as a map of JSON-encoded typedEntry values for gRPC transfer.
-// Each entry carries the Go type name so the child can restore original types.
-func serializeStateForChild(s *runState, item any, index int) (map[string][]byte, error) {
-	result, err := s.SerializeAll()
-	if err != nil {
-		return nil, err
-	}
-
-	// Add ForEach item/index with type metadata
-	for k, v := range map[string]any{"__foreach_item": item, "__foreach_index": index} {
-		jsonVal, err := json.Marshal(v)
-		if err != nil {
-			return nil, fmt.Errorf("marshal key %q: %w", k, err)
-		}
-		te := typedEntry{V: jsonVal, T: goTypeName(v)}
-		data, err := json.Marshal(te)
-		if err != nil {
-			return nil, fmt.Errorf("marshal entry %q: %w", k, err)
-		}
-		result[k] = data
-	}
-
-	return result, nil
-}
-
-// deserializeStoreData converts a map of JSON-encoded typedEntry values back
-// to Go values with type restoration. Each entry is expected to be a
-// typedEntry{V, T} where T is the original Go type name.
-func deserializeStoreData(data map[string][]byte) (map[string]any, error) {
-	result := make(map[string]any, len(data))
-	for k, raw := range data {
-		var te typedEntry
-		if err := json.Unmarshal(raw, &te); err == nil && len(te.V) > 0 {
-			// Typed format: decode value and restore original type
-			var val any
-			if err := json.Unmarshal(te.V, &val); err != nil {
-				return nil, fmt.Errorf("unmarshal value for key %q: %w", k, err)
-			}
-			result[k] = convertType(val, te.T)
-			continue
-		}
-		// Fallback: untyped format (backwards compatibility)
-		var val any
-		if err := json.Unmarshal(raw, &val); err != nil {
-			return nil, fmt.Errorf("unmarshal key %q: %w", k, err)
-		}
-		result[k] = val
-	}
-	return result, nil
 }

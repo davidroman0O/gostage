@@ -10,6 +10,7 @@ import (
 	"time"
 
 	gs "github.com/davidroman0O/gostage"
+	"github.com/davidroman0O/gostage/spawn"
 )
 
 // ===========================================================================
@@ -35,10 +36,10 @@ func main() {
 	// ── Child process support ──────────────────────────────────────────
 	// If this binary was spawned by gostage as a child worker, run child
 	// lifecycle and exit. Tasks must be registered before HandleChild().
-	if gs.IsChild() {
+	if spawn.IsChild() {
 		registerAllTasks()
 		registerNamedFunctions()
-		gs.HandleChild()
+		spawn.HandleChild()
 		return
 	}
 
@@ -609,7 +610,7 @@ func demoForEach(ctx context.Context) {
 		log.Fatal(err)
 	}
 
-	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"each"}))
+	engine, _ := gs.New(gs.WithLogger(&consoleLogger{"each"}), spawn.WithSpawn())
 	defer engine.Close()
 
 	r1, _ := engine.RunSync(ctx, wf1, gs.Params{

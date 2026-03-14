@@ -74,6 +74,10 @@ type Engine struct {
 	// Used by HandleChild to avoid idle goroutines in short-lived child processes.
 	noPool      bool
 	noScheduler bool
+
+	// spawnRunner handles ForEach with child process spawning.
+	// nil when spawn support is not configured.
+	spawnRunner SpawnRunner
 }
 
 // runHandle tracks an in-flight workflow execution.
@@ -578,7 +582,14 @@ func (e *Engine) Close() error {
 			}
 		}
 
-		// 4. Close persistence (last — active runs may flush during shutdown)
+		// 4. Close spawn runner (before persistence so child state flushes complete)
+		if e.spawnRunner != nil {
+			if err := e.spawnRunner.Close(); err != nil {
+				e.logger.Warn("spawn runner close: %v", err)
+			}
+		}
+
+		// 5. Close persistence (last — active runs may flush during shutdown)
 		closeErr = e.persistence.Close()
 	})
 	return closeErr

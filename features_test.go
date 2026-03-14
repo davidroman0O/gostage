@@ -9,31 +9,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	pb "github.com/davidroman0O/gostage/proto"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
 )
 
-// === Orphan Detection (unit tests) ===
-
-func TestOrphanWatcherPID(t *testing.T) {
-	// This tests that the PID watcher goroutine starts and doesn't panic
-	ctx, cancel := context.WithCancel(context.Background())
-	stop := startOrphanWatcher(ctx, cancel, nil)
-	defer stop()
-
-	// Should not have cancelled yet (parent is still alive)
-	select {
-	case <-ctx.Done():
-		t.Fatal("context should not be cancelled while parent is alive")
-	case <-time.After(100 * time.Millisecond):
-		// Good - parent is still alive
-	}
-
-	cancel() // clean up
-}
+// Orphan watcher tests moved to spawn/ sub-package.
 
 // === Spawn Type Preservation ===
 
@@ -562,85 +540,7 @@ func TestTaskPanicWithoutMiddleware(t *testing.T) {
 	}
 }
 
-// TestPerJobTokenRejection verifies the spawn server rejects messages with invalid or missing tokens.
-func TestPerJobTokenRejection(t *testing.T) {
-	// Create a spawnServer directly (no gRPC transport needed -- call methods in-process)
-	ss := &spawnServer{
-		jobs:   make(map[string]*SpawnJob),
-		secret: "test-secret",
-	}
-
-	// Register a job with a known token
-	ss.addJob(&SpawnJob{
-		ID:       "job-1",
-		TaskName: "test-task",
-		token:    "valid-token-123",
-		resultCh: make(chan *spawnResult, 1),
-	})
-
-	// Helper to create context with gRPC metadata
-	ctxWithToken := func(jobToken string) context.Context {
-		md := metadata.Pairs("x-gostage-job-token", jobToken)
-		return metadata.NewIncomingContext(context.Background(), md)
-	}
-	ctxNoToken := func() context.Context {
-		return metadata.NewIncomingContext(context.Background(), metadata.MD{})
-	}
-
-	// Test 1: Empty jobID -> InvalidArgument
-	msg := &pb.IPCMessage{
-		Type:    pb.MessageType_MESSAGE_TYPE_UNSPECIFIED,
-		Context: &pb.MessageContext{SessionId: ""},
-	}
-	_, err := ss.SendMessage(ctxWithToken("valid-token-123"), msg)
-	if err == nil {
-		t.Fatal("expected error for empty jobID")
-	}
-	if s, ok := status.FromError(err); !ok || s.Code() != codes.InvalidArgument {
-		t.Fatalf("expected InvalidArgument, got: %v", err)
-	}
-
-	// Test 2: Valid jobID + wrong token -> PermissionDenied
-	msg.Context.SessionId = "job-1"
-	_, err = ss.SendMessage(ctxWithToken("wrong-token"), msg)
-	if err == nil {
-		t.Fatal("expected error for wrong token")
-	}
-	if s, ok := status.FromError(err); !ok || s.Code() != codes.PermissionDenied {
-		t.Fatalf("expected PermissionDenied, got: %v", err)
-	}
-
-	// Test 3: Valid jobID + no token -> PermissionDenied
-	_, err = ss.SendMessage(ctxNoToken(), msg)
-	if err == nil {
-		t.Fatal("expected error for missing token")
-	}
-	if s, ok := status.FromError(err); !ok || s.Code() != codes.PermissionDenied {
-		t.Fatalf("expected PermissionDenied, got: %v", err)
-	}
-
-	// Test 4: Valid jobID + valid token -> success
-	_, err = ss.SendMessage(ctxWithToken("valid-token-123"), msg)
-	if err != nil {
-		t.Fatalf("expected success with valid token, got: %v", err)
-	}
-
-	// Test 5: RequestWorkflowDefinition with wrong token -> PermissionDenied
-	req := &pb.ReadySignal{ChildId: "job-1"}
-	_, err = ss.RequestWorkflowDefinition(ctxWithToken("wrong-token"), req)
-	if err == nil {
-		t.Fatal("expected error for wrong token on RequestWorkflowDefinition")
-	}
-	if s, ok := status.FromError(err); !ok || s.Code() != codes.PermissionDenied {
-		t.Fatalf("expected PermissionDenied, got: %v", err)
-	}
-
-	// Test 6: RequestWorkflowDefinition with valid token -> success
-	_, err = ss.RequestWorkflowDefinition(ctxWithToken("valid-token-123"), req)
-	if err != nil {
-		t.Fatalf("expected success with valid token, got: %v", err)
-	}
-}
+// TestPerJobTokenRejection moved to spawn/server_test.go.
 
 // TestOnStepCompletePanicRecovery verifies that a panicking onStepComplete callback
 // does not crash the worker or hang the run.

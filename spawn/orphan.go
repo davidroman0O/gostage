@@ -1,4 +1,4 @@
-package gostage
+package spawn
 
 import (
 	"context"
@@ -17,12 +17,12 @@ type orphanWatcher struct {
 func startOrphanWatcher(ctx context.Context, cancel context.CancelFunc, lifelineFd *os.File) func() {
 	w := &orphanWatcher{cancel: cancel}
 
-	// Mechanism 1: Lifeline pipe — EOF means parent died
+	// Mechanism 1: Lifeline pipe -- EOF means parent died
 	if lifelineFd != nil {
 		go w.watchLifeline(ctx, lifelineFd)
 	}
 
-	// Mechanism 2: PID polling — re-parented to PID 1 means parent died
+	// Mechanism 2: PID polling -- re-parented to PID 1 means parent died
 	go w.watchPID(ctx)
 
 	return func() {
@@ -40,7 +40,7 @@ func (w *orphanWatcher) watchLifeline(ctx context.Context, fd *os.File) {
 		// Read blocks until parent closes write end (parent death) or context cancels
 		_, err := fd.Read(buf)
 		if err != nil {
-			// EOF or read error — parent is dead
+			// EOF or read error -- parent is dead
 			select {
 			case <-ctx.Done():
 				return // already cancelled

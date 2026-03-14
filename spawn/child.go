@@ -1,4 +1,4 @@
-package gostage
+package spawn
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	gostage "github.com/davidroman0O/gostage"
 	pb "github.com/davidroman0O/gostage/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -38,17 +39,16 @@ func IsChild() bool {
 // or WithPersistence is explicitly passed.
 //
 //	func main() {
-//	    if gostage.IsChild() {
+//	    if spawn.IsChild() {
 //	        registerChildTasks()
-//	        gostage.HandleChild(gostage.WithLogger(myLogger))
+//	        spawn.HandleChild(gostage.WithLogger(myLogger))
 //	        return
 //	    }
 //	    // parent code...
 //	}
-func HandleChild(opts ...EngineOption) {
+func HandleChild(opts ...gostage.EngineOption) {
 	// Enforce spawn chain depth limit before doing any work.
-	// Uses defaultMaxSpawnDepth defined in spawn.go (same package).
-	maxDepth := defaultMaxSpawnDepth
+	maxDepth := DefaultMaxSpawnDepth
 	if val := os.Getenv("GOSTAGE_MAX_SPAWN_DEPTH"); val != "" {
 		if d, parseErr := strconv.Atoi(val); parseErr == nil {
 			maxDepth = d
@@ -111,9 +111,6 @@ func HandleChild(opts ...EngineOption) {
 	}
 
 	// Request our work assignment with a 10-second deadline.
-	// grpc.NewClient is lazy, so the actual connection attempt happens here.
-	// A tight deadline on this call means the child fails fast if the parent
-	// gRPC server is unreachable, rather than hanging until the overall timeout.
 	rpcCtx, rpcCancel := context.WithTimeout(ctx, 10*time.Second)
 	wfDef, err := client.RequestWorkflowDefinition(rpcCtx, &pb.ReadySignal{ChildId: jobID})
 	rpcCancel()
@@ -125,19 +122,19 @@ func HandleChild(opts ...EngineOption) {
 	taskName := wfDef.Name
 
 	// Deserialize store data
-	storeVals, err := deserializeStoreData(wfDef.InitialStore)
+	storeVals, err := gostage.DeserializeStoreData(wfDef.InitialStore)
 	if err != nil {
 		sendError(ctx, client, jobID, fmt.Sprintf("deserialize store: %v", err))
 		os.Exit(1)
 	}
 
-	// Create child state (no persistence — children are memory-only)
-	childState := newRunState(RunID(jobID), nil)
+	// Create child state (no persistence -- children are memory-only)
+	childState := gostage.NewRunStateForChild(gostage.RunID(jobID))
 	for k, v := range storeVals {
 		childState.SetClean(k, v) // parent data is NOT dirty
 	}
 
-	// Wire sendFn for IPC — uses the dedicated MESSAGE_TYPE_IPC message type.
+	// Wire sendFn for IPC -- uses the dedicated MESSAGE_TYPE_IPC message type.
 	ipcSendFn := func(msgType string, payload any) error {
 		payloadBytes, marshalErr := json.Marshal(payload)
 		if marshalErr != nil {
@@ -156,12 +153,13 @@ func HandleChild(opts ...EngineOption) {
 		return rpcErr
 	}
 
-	// Create a child engine — used for both single-task and multi-stage paths.
-	// withNoPool and withNoScheduler skip idle goroutines that child processes
-	// never use. User-supplied opts (e.g. WithTaskMiddleware, WithLogger) come
-	// after so they can override if needed.
-	childOpts := append([]EngineOption{withNoPool(), withNoScheduler()}, opts...)
-	childEngine, engErr := New(childOpts...)
+	// Create a child engine -- used for both single-task and multi-stage paths.
+	// WithNoPool and WithNoScheduler skip idle goroutines that child processes
+	// never use. WithSpawn is included so child processes can themselves spawn
+	// grandchildren (multi-level spawn). User-supplied opts come after so they
+	// can override if needed.
+	childOpts := append([]gostage.EngineOption{gostage.WithNoPool(), gostage.WithNoScheduler(), WithSpawn()}, opts...)
+	childEngine, engErr := gostage.New(childOpts...)
 	if engErr != nil {
 		sendError(ctx, client, jobID, fmt.Sprintf("create child engine: %v", engErr))
 		os.Exit(1)
@@ -177,87 +175,55 @@ func HandleChild(opts ...EngineOption) {
 
 	if len(wfDef.DefinitionJson) > 0 {
 		// Multi-stage workflow: rebuild from definition and execute all stages.
-		def, defErr := UnmarshalWorkflowDefinition(wfDef.DefinitionJson)
+		def, defErr := gostage.UnmarshalWorkflowDefinition(wfDef.DefinitionJson)
 		if defErr != nil {
 			sendError(ctx, client, jobID, fmt.Sprintf("unmarshal workflow definition: %v", defErr))
 			os.Exit(1)
 		}
 
-		childWf, wfErr := NewWorkflowFromDef(def)
+		childWf, wfErr := gostage.NewWorkflowFromDef(def)
 		if wfErr != nil {
 			sendError(ctx, client, jobID, fmt.Sprintf("rebuild workflow: %v", wfErr))
 			os.Exit(1)
 		}
 
 		// Share state with rebuilt workflow
-		childWf.state = childState
+		childWf.SetRunStateFromChild(childState)
 
 		// Register a run record in the child engine's in-memory persistence
 		// so executeWorkflow's UpdateStepStatus calls have a run to write to.
-		// Without this, UpdateStepStatus returns "run not found" for every step.
 		now := time.Now()
-		childRun := &RunState{
-			RunID:      RunID(jobID),
+		childRun := &gostage.RunState{
+			RunID:      gostage.RunID(jobID),
 			WorkflowID: childWf.ID,
-			Status:     Running,
-			StepStates: make(map[string]Status),
+			Status:     gostage.Running,
+			StepStates: make(map[string]gostage.Status),
 			CreatedAt:  now,
 			UpdatedAt:  now,
 		}
-		if saveErr := childEngine.persistence.SaveRun(ctx, childRun); saveErr != nil {
+		if saveErr := childEngine.EnginePersistence().SaveRun(ctx, childRun); saveErr != nil {
 			sendError(ctx, client, jobID, fmt.Sprintf("register child run: %v", saveErr))
 			os.Exit(1)
 		}
 
 		// Execute the workflow (non-resuming)
-		taskErr = childEngine.executeWorkflow(ctx, childWf, RunID(jobID), false)
+		taskErr = childEngine.ExecuteWorkflowForChild(ctx, childWf, gostage.RunID(jobID), false)
 	} else {
-		// Single task execution — route through the child engine's retry and
+		// Single task execution -- route through the child engine's retry and
 		// middleware machinery so opts like WithTaskMiddleware apply here too.
-		td := lookupTask(taskName)
-		if td == nil {
-			sendError(ctx, client, jobID, fmt.Sprintf("task %q not registered in child", taskName))
-			os.Exit(1)
-		}
-
-		taskCtx := newCtx(ctx, childState, NewDefaultLogger())
-		taskCtx.sendFn = ipcSendFn
-		taskCtx.engine = childEngine
-
-		// Set ForEach item/index on Ctx from store
-		if item, ok := storeVals["__foreach_item"]; ok {
-			taskCtx.forEachItem = item
-		}
-		if idx, ok := storeVals["__foreach_index"]; ok {
-			if idxFloat, ok := idx.(float64); ok {
-				taskCtx.forEachIndex = int(idxFloat)
-			}
-		}
-
-		// Use the child engine's retry and middleware machinery so task middleware
-		// registered via opts (e.g. WithTaskMiddleware) is applied here too.
-		retries := td.retries
-		if retries < 0 {
-			retries = 0
-		}
-		strategy := td.retryStrategy
-		if strategy == nil && td.retryDelay > 0 {
-			strategy = FixedDelay(td.retryDelay)
-		}
-		taskErr = childEngine.retryTask(ctx, taskName, taskCtx, td.fn, retries, strategy, td.timeout)
+		taskErr = childEngine.ExecuteSingleTaskForChild(ctx, taskName, childState, storeVals, ipcSendFn)
 	}
 
 	if taskErr != nil {
 		// Bail signals propagate as a typed bail result so the parent can
 		// end the workflow with Bailed status rather than Failed.
-		var bailErr *BailError
+		var bailErr *gostage.BailError
 		if errors.As(taskErr, &bailErr) {
 			sendBail(ctx, client, jobID, bailErr.Reason)
 			os.Exit(0)
 		}
 		// SuspendError in a spawned child has no supported semantics
-		// (the child has no persistence to save state for resume).
-		var suspendErr *SuspendError
+		var suspendErr *gostage.SuspendError
 		if errors.As(taskErr, &suspendErr) {
 			sendError(ctx, client, jobID, "suspend is not supported in spawned child processes")
 			os.Exit(1)
@@ -266,8 +232,7 @@ func HandleChild(opts ...EngineOption) {
 		os.Exit(1)
 	}
 
-	// Send final store back to parent — only dirty keys (what the child wrote)
-	// Uses SerializeDirty to include type metadata for round-trip fidelity.
+	// Send final store back to parent -- only dirty keys (what the child wrote)
 	finalData, serErr := childState.SerializeDirty()
 	if serErr != nil {
 		sendError(ctx, client, jobID, fmt.Sprintf("serialize results: %v", serErr))
@@ -305,9 +270,6 @@ func parseChildArgs() (grpcAddr, jobID string) {
 }
 
 // connectToParent establishes a gRPC connection to the parent server with keepalive.
-// grpc.NewClient is lazy — it does not connect until the first RPC call.
-// The 10-second timeout is therefore applied to the first RPC call at the call site,
-// not here (grpc.WithTimeout is explicitly unsupported by grpc.NewClient).
 func connectToParent(ctx context.Context, addr string) (*grpc.ClientConn, error) {
 	conn, err := grpc.NewClient(addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
